@@ -1,0 +1,37 @@
+name: CI
+
+# SECURITY: this repo is public, and the runner below is a self-hosted machine.
+# A `pull_request` trigger on a public repo lets any stranger run arbitrary code
+# on that machine by opening a PR. So CI runs on push to main only.
+#
+# To get PR checks back, either move this workflow to a GitHub-hosted runner, or
+# use `pull_request_target` with an explicit allow-list. Do not simply re-add
+# `pull_request` here.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: [self-hosted, macos, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.1
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Test
+        run: npm test
