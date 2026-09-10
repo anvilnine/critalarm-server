@@ -1,0 +1,32 @@
+{
+  "name": "critalarm-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/server-node.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/server-node.ts",
+    "start": "tsx src/server-node.ts",
+    "build": "tsc --noEmit",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@sentry/node": "^9",
+    "hono": "^4.12.12",
+    "hono-rate-limiter": "^0.4.2",
+    "tsx": "^4.19.2",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "^4.1.2"
+  }
+}

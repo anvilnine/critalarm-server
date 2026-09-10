@@ -1,0 +1,33 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# environment. Never commit a real one; .env.example is the template.
+.env
+.env.*
+!.env.example
+.dev.vars
+
+# data. SQLite lives on a mounted volume, never in the repo.
+*.sqlite
+*.sqlite-journal
+*.db
+data/
+
+# push credentials. These must never reach a public repo.
+*.p8
+*.pem
+*.key
+google-services.json
+GoogleService-Info.plist
+*service-account*.json
+firebase-adminsdk*.json
+
+# logs
+*.log
+
+# os
+.DS_Store

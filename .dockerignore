@@ -1,0 +1,15 @@
+node_modules
+dist
+# A stale tsbuildinfo makes tsc think dist is current and emit nothing.
+*.tsbuildinfo
+.git
+.github
+docs
+*.md
+.env
+.env.*
+!.env.example
+.dev.vars
+*.sqlite
+*.db
+data
