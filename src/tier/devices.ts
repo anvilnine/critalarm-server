@@ -3,7 +3,7 @@ import { authenticateDevice, credentialHash } from "./auth.js";
 import { capsFor } from "./caps.js";
 import type { AccountContext, TierDependencies } from "./types.js";
 
-const deviceId = z.string().regex(/^dev_[A-Za-z0-9_-]{1,128}$/);
+const deviceId = z.string().regex(/^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 export const registrationSchema = z.object({
   device_id: deviceId,
   platform: z.enum(["ios", "android"]),
@@ -31,7 +31,15 @@ export function accountForContext(deps: TierDependencies, context: AccountContex
   return account ?? null;
 }
 
-export function registerDevice(deps: TierDependencies, input: z.infer<typeof registrationSchema>, bearer: string | undefined): { deviceToken: string; accountId: string; tier: "free" | "relay" | "hosted" } {
+function insertDeviceForAccount(deps: TierDependencies, input: z.infer<typeof registrationSchema>, accountId: string, tier: "free" | "relay" | "hosted"): string {
+  const count = deps.db.prepare("SELECT COUNT(*) AS count FROM devices WHERE account_id = ?").get(accountId) as { count: number };
+  if (count.count >= capsFor(tier).devices) throw new CapError("devices");
+  const token = deps.ids.deviceToken();
+  deps.db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES (?, ?, ?, ?, ?, ?)").run(input.device_id, accountId, credentialHash(token), input.platform, input.push_token, deps.clock.now());
+  return token;
+}
+
+export function registerDevice(deps: TierDependencies, input: z.infer<typeof registrationSchema>, bearer: string | undefined, accountContext?: AccountContext): { deviceToken: string; accountId: string; tier: "free" | "relay" | "hosted" } {
   const existing = deps.db.prepare("SELECT id FROM devices WHERE id = ?").get(input.device_id) as { id: string } | undefined;
   if (existing !== undefined) {
     const context = authenticateDevice(deps.db, bearer);
@@ -42,14 +50,19 @@ export function registerDevice(deps: TierDependencies, input: z.infer<typeof reg
     return { deviceToken: "", accountId: account.account_id, tier: account.tier };
   }
 
+  if (accountContext !== undefined) {
+    return deps.db.transaction(() => {
+      const account = accountForContext(deps, accountContext);
+      if (account === null) throw new Error("unauthorized");
+      return { deviceToken: insertDeviceForAccount(deps, input, account.account_id, account.tier), accountId: account.account_id, tier: account.tier };
+    })();
+  }
+
   const accountId = deps.ids.account();
-  const token = deps.ids.deviceToken();
   const now = deps.clock.now();
-  deps.db.transaction(() => {
-    const caps = capsFor("free");
-    if (caps.devices < 1) throw new CapError("devices");
+  const token = deps.db.transaction(() => {
     deps.db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, 'free', ?)").run(accountId, now);
-    deps.db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES (?, ?, ?, ?, ?, ?)").run(input.device_id, accountId, credentialHash(token), input.platform, input.push_token, now);
+    return insertDeviceForAccount(deps, input, accountId, "free");
   })();
   return { deviceToken: token, accountId, tier: "free" };
 }
