@@ -20,7 +20,12 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.post("/relay/v1/devices", async (c) => {
     try {
       const input = registrationSchema.parse(await requestJson(c.req.raw));
-      const registration = registerDevice(deps, input, bearerFromHeader(c.req.header("authorization")));
+      const authorization = c.req.header("authorization");
+      const bearer = bearerFromHeader(authorization);
+      if (authorization !== undefined && bearer === undefined) return c.json({ error: "unauthorized" }, 401);
+      const context = bearer === undefined ? undefined : authenticateDevice(deps.db, bearer);
+      if (bearer !== undefined && context === null) return c.json({ error: "unauthorized" }, 401);
+      const registration = registerDevice(deps, input, bearer, context ?? undefined);
       const response = { account_id: registration.accountId, tier: registration.tier, caps: capsFor(registration.tier) };
       return c.json(registration.deviceToken === "" ? response : { device_token: registration.deviceToken, ...response }, registration.deviceToken === "" ? 200 : 201);
     } catch (error: unknown) {

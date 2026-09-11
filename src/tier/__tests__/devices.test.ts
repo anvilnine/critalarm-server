@@ -116,4 +116,20 @@ describe("device registry", () => {
     expect(db.prepare("SELECT id, account_id FROM devices").all()).toEqual([{ id: existingId, account_id: "acc_cap" }]);
     expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_1");
   });
+
+  it("enforces the device cap for an authenticated new-device POST", async () => {
+    const { app, db } = setup();
+    const registration = await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(device) });
+    const { device_token: deviceToken } = await registration.json() as { device_token: string };
+    const beforeAccounts = db.prepare("SELECT id, tier FROM accounts").all();
+    const beforeDevices = db.prepare("SELECT id, account_id, device_token_hash FROM devices").all();
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ ...device, device_id: "dev_123e4567-e89b-12d3-a456-426614174001" }) });
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ error: "cap", cap: "devices" });
+    expect(db.prepare("SELECT id, tier FROM accounts").all()).toEqual(beforeAccounts);
+    expect(db.prepare("SELECT id, account_id, device_token_hash FROM devices").all()).toEqual(beforeDevices);
+    expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_2");
+  });
 });
