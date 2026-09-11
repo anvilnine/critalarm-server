@@ -22,7 +22,7 @@ export class PushDispatcher {
 
   async dispatch(events: readonly DeliveryEvent[]): Promise<void> {
     for (const event of events) {
-      const devices = this.subscribedDevices(event.topicHash);
+      const devices = this.subscribedDevices(event.topicHash, event.messageId);
       for (const device of devices) {
         const result = await this.senderFor(device).send(device, event);
         if (device.platform === "ios" && result.stale) {
@@ -34,14 +34,18 @@ export class PushDispatcher {
     }
   }
 
-  private subscribedDevices(topicHash: string): PushDevice[] {
+  private subscribedDevices(topicHash: string, messageId: string): PushDevice[] {
     const rows = this.db
       .prepare(
         `SELECT d.id, d.account_id, d.platform, d.push_token
          FROM devices d JOIN subscriptions s ON s.device_id = d.id
-         WHERE s.topic_hash = ? AND d.push_token <> ''`,
+         WHERE s.topic_hash = ? AND d.push_token <> ''
+           AND d.account_id = (
+             SELECT t.account_id FROM messages m JOIN topics t ON t.id = m.topic_id
+             WHERE m.id = ?
+           )`,
       )
-      .all(topicHash) as DeviceRow[];
+      .all(topicHash, messageId) as DeviceRow[];
     return rows.map((row) => ({
       id: row.id,
       accountId: row.account_id,

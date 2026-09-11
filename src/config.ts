@@ -29,6 +29,7 @@ export interface Config {
   port: number;
   dataDir: string;
   behindProxy: boolean;
+  allowNoopPush?: boolean;
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -145,7 +146,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const apns = apnsConfig(env, file);
   const fcm = fcmConfig(env, file);
   const revenueCatSecret = stringValue(env, "REVENUECAT_SHARED_SECRET", file.revenuecat?.["shared-secret"]);
-  if (env.NODE_ENV === "production" && apns === undefined && fcm === undefined) throw configError("push provider");
+  const allowNoopPush = env.NODE_ENV !== "production" && env.ALLOW_NOOP_PUSH === "true";
+  if (apns === undefined && fcm === undefined && !allowNoopPush) throw configError("push provider");
   if (env.NODE_ENV === "production" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
   return {
     baseUrl: urlValue("base-url", stringValue(env, "BASE_URL", file["base-url"])),
@@ -155,6 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     port,
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",
     behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
+    allowNoopPush,
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret } }),
