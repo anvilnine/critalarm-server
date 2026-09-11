@@ -134,6 +134,9 @@ describe("IncidentService", () => {
       lastMessageAt: 1_000,
     });
     expect(result.message).toMatchObject({ id: "m_1", incidentId: "inc_1", createdAt: 1_000 });
+    expect(
+      db.prepare("SELECT max_ring_s FROM incidents WHERE id = 'inc_1'").get(),
+    ).toEqual({ max_ring_s: 60 });
     expect(result.events).toEqual([
       {
         kind: "open",
@@ -183,7 +186,21 @@ describe("IncidentService", () => {
     const result = service.publishCritical(publication("Cache", "cache01 is down"));
 
     expect(result.incident).toMatchObject({ id: "inc_1", state: "acked", ackedAt: 1_010 });
-    expect(result.events.map((event) => event.kind)).toEqual(["p5"]);
+    expect(result.events).toEqual([
+      {
+        kind: "p5",
+        topicHash: "hash_prod",
+        topic: "prod",
+        incidentId: "inc_1",
+        messageId: "m_2",
+        priority: 5,
+        maxRingS: 60,
+        server: "https://alerts.example.com",
+        title: "Cache",
+        body: "cache01 is down",
+        critical: false,
+      },
+    ]);
     expect(db.prepare("SELECT kind, fire_at FROM timers").all()).toEqual([
       { kind: "desk", fire_at: 1_040 },
     ]);
