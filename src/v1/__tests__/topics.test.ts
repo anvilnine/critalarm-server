@@ -11,9 +11,21 @@ describe("topic mutations", () => {
     const patched = await app.request("/v1/topics/prod", { method: "PATCH", headers, body: '{"critical":true,"repeat_interval_s":45}' });
     expect(await patched.json()).toMatchObject({ critical: true, repeat_interval_s: 45, max_ring_s: 1800 });
     const token = await app.request("/v1/topics/prod/tokens", { method: "POST", headers });
-    const tokenBody = await token.json() as { token: string; token_id: string };
-    expect(tokenBody).toMatchObject({ token: expect.stringMatching(/^tk_/), token_id: expect.stringMatching(/^tok_/) });
-    expect((await app.request(`/v1/topics/prod/tokens/${tokenBody.token_id}`, { method: "DELETE", headers })).status).toBe(204);
+    const tokenBody = await token.json() as { token: string };
+    expect(tokenBody).toEqual({ token: expect.stringMatching(/^tk_/) });
+    expect((await app.request(`/v1/topics/prod/tokens/${tokenBody.token}`, { method: "DELETE", headers })).status).toBe(204);
+    const final = await app.request("/v1/topics/prod/tokens/tk_not_the_only_token", { method: "DELETE", headers });
+    expect(final.status).toBe(404);
     expect((await app.request("/v1/topics/prod", { method: "DELETE", headers })).status).toBe(204);
+  });
+});
+
+describe("topic token invariant", () => {
+  it("refuses to delete a topic's final publishing token", async () => {
+    const app = setup(); const headers = { Authorization: "Bearer dv_a", "content-type": "application/json" };
+    const created = await app.request("/v1/topics", { method:"POST",headers,body:'{"name":"prod"}' });
+    const { token } = await created.json() as { token:string };
+    const response = await app.request(`/v1/topics/prod/tokens/${token}`, { method:"DELETE",headers });
+    expect(response.status).toBe(409); expect(await response.json()).toEqual({ error:"topic must retain a token" });
   });
 });
