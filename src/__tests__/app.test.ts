@@ -50,6 +50,12 @@ describe("loadConfig", () => {
     expect(config.port).toBe(8181);
   });
 
+  it("reads critalarm.yml when CONFIG_PATH is absent", () => {
+    let path = "";
+    loadConfig({ ALLOW_NOOP_PUSH: "true" }, (value) => { path = value; return "base-url: https://alerts.example.com"; });
+    expect(path).toBe("critalarm.yml");
+  });
+
   it("requires a complete push provider and RevenueCat secret in production", () => {
     const incomplete = [
       "base-url: https://alerts.example.com",
