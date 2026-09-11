@@ -1,0 +1,106 @@
+import type Database from "better-sqlite3";
+
+const migrations = [
+  `
+    CREATE TABLE accounts (
+      id TEXT PRIMARY KEY,
+      tier TEXT NOT NULL CHECK (tier IN ('free', 'relay', 'hosted')),
+      rc_app_user_id TEXT UNIQUE,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE devices (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      device_token_hash TEXT NOT NULL UNIQUE,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      push_token TEXT NOT NULL,
+      last_seen INTEGER NOT NULL
+    );
+
+    CREATE TABLE subscriptions (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      topic_hash TEXT NOT NULL,
+      PRIMARY KEY (device_id, topic_hash)
+    );
+
+    CREATE TABLE topics (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      topic_hash TEXT NOT NULL,
+      critical INTEGER NOT NULL DEFAULT 0 CHECK (critical IN (0, 1)),
+      repeat_interval_s INTEGER NOT NULL,
+      max_ring_s INTEGER NOT NULL,
+      desk_timer_s INTEGER NOT NULL,
+      relay_content TEXT NOT NULL CHECK (relay_content IN ('none', 'full')),
+      created_at INTEGER NOT NULL,
+      UNIQUE (account_id, name),
+      UNIQUE (account_id, topic_hash)
+    );
+
+    CREATE TABLE topic_tokens (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      hash TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE incidents (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      state TEXT NOT NULL CHECK (state IN ('open', 'acked', 'closed', 'expired')),
+      opened_at INTEGER NOT NULL,
+      acked_at INTEGER,
+      closed_at INTEGER,
+      last_message_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX incidents_one_active_per_topic
+      ON incidents(topic_id) WHERE state IN ('open', 'acked');
+
+    CREATE TABLE messages (
+      id TEXT PRIMARY KEY,
+      topic_id TEXT NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+      incident_id TEXT REFERENCES incidents(id) ON DELETE SET NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      priority INTEGER NOT NULL CHECK (priority BETWEEN 1 AND 5),
+      tags TEXT NOT NULL DEFAULT '[]',
+      click TEXT,
+      markdown INTEGER NOT NULL DEFAULT 0 CHECK (markdown IN (0, 1)),
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE timers (
+      id TEXT PRIMARY KEY,
+      incident_id TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('repeat', 'expire', 'desk')),
+      fire_at INTEGER NOT NULL,
+      UNIQUE (incident_id, kind)
+    );
+
+    CREATE INDEX messages_by_incident ON messages(incident_id, created_at);
+    CREATE INDEX timers_due ON timers(fire_at);
+  `,
+];
+
+export function migrate(db: Database.Database): void {
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
+  );
+
+  const applied = db.prepare("SELECT version FROM schema_migrations WHERE version = ?");
+  const markApplied = db.prepare("INSERT INTO schema_migrations (version) VALUES (?)");
+
+  for (const [index, sql] of migrations.entries()) {
+    const version = index + 1;
+    if (applied.get(version) === undefined) {
+      db.transaction(() => {
+        db.exec(sql);
+        markApplied.run(version);
+      })();
+    }
+  }
+}
