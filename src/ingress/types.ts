@@ -51,6 +51,7 @@ export interface IngressDependencies {
   ids: IdGenerator;
   dispatch(events: readonly DeliveryEvent[]): Promise<void>;
   publishLimit?: number;
+  behindProxy?: boolean;
 }
 
 export type IngressRouter = Hono;

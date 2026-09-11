@@ -25,6 +25,6 @@ export interface AppDependencies { config: Config; db: Database.Database; clock:
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
-  app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, revenueCat: { sharedSecret: deps.config.revenueCat?.sharedSecret ?? "", entitlements: {} } }));
-  app.route("/", createV1Router({ ...deps, incidents })); app.route("/", createIngressRouter({ ...deps, incidents })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+  app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, revenueCat: { sharedSecret: deps.config.revenueCat?.sharedSecret ?? "", entitlements: deps.config.revenueCat?.entitlements ?? {} } }));
+  app.route("/", createV1Router({ ...deps, incidents })); app.route("/", createIngressRouter({ ...deps, incidents, behindProxy: deps.config.behindProxy })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
 }

@@ -19,6 +19,7 @@ export interface FcmConfig {
 
 export interface RevenueCatConfig {
   sharedSecret: string;
+  entitlements: Record<string, "free" | "relay" | "hosted">;
 }
 
 export interface Config {
@@ -59,7 +60,7 @@ const fileSchema = z.object({
   "behind-proxy": z.boolean().optional(),
   apns: providerSchema,
   fcm: fcmSchema,
-  revenuecat: z.object({ "shared-secret": z.string().min(1).optional() }).optional(),
+  revenuecat: z.object({ "shared-secret": z.string().min(1).optional(), entitlements: z.record(z.string(), z.enum(["free", "relay", "hosted"])).optional() }).optional(),
 });
 
 type FileConfig = z.infer<typeof fileSchema>;
@@ -69,7 +70,6 @@ function configError(field: string): Error {
 }
 
 function readConfiguration(env: NodeJS.ProcessEnv, readFile: ((path: string) => string) | undefined): FileConfig {
-  if (env.CONFIG_PATH === undefined && readFile === undefined) return {};
   let parsed: unknown;
   try {
     parsed = parse((readFile ?? ((path) => readFileSync(path, "utf8")))(env.CONFIG_PATH ?? "critalarm.yml"));
@@ -160,6 +160,6 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     allowNoopPush,
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
-    ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret } }),
+    ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: file.revenuecat?.entitlements ?? {} } }),
   };
 }

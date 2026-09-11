@@ -7,7 +7,8 @@ type Ctx = { Bindings: Bindings; Variables: Variables };
 // Client IP behind Coolify/Traefik comes in via x-forwarded-for. Take the
 // left-most hop (the original client). Only trustworthy behind a reverse proxy
 // that sets the header — fine for the self-hosted dev box.
-function clientIp(c: Context<Ctx>): string {
+function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
+  if (!behindProxy) return "anonymous";
   const xff = c.req.header("x-forwarded-for");
   if (xff) {
     const first = xff.split(",")[0]?.trim();
@@ -34,6 +35,7 @@ function clientIp(c: Context<Ctx>): string {
 export function makeRateLimiter(
   onLimit?: (c: Context<Ctx>) => Response | Promise<Response>,
   limit = 30,
+  behindProxy = false,
 ): MiddlewareHandler<Ctx> {
   let inner: MiddlewareHandler<Ctx> | undefined;
 
@@ -42,7 +44,7 @@ export function makeRateLimiter(
       windowMs: 60_000,
       limit,
       standardHeaders: "draft-6",
-      keyGenerator: clientIp,
+      keyGenerator: (ctx) => clientIp(ctx, behindProxy),
       ...(onLimit ? { handler: (ctx) => onLimit(ctx) } : {}),
     });
     return inner(c, next);

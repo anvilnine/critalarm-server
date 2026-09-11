@@ -62,6 +62,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
   const publishLimit = makeRateLimiter(
     (c) => c.json(numericError(42901, 429, "rate limited"), 429),
     deps.publishLimit ?? 30,
+    deps.behindProxy ?? false,
   );
 
   const publish = async (c: Context<IngressEnv, "/:topic">) => {
