@@ -20,6 +20,7 @@ export interface DeliveryEvent {
   title: string;
   body: string;
   critical: boolean;
+  relayContent?: "none" | "full";
 }
 
 export interface StoredMessageInput {
@@ -40,6 +41,7 @@ export interface CriticalPublication {
   maxRingS: number;
   deskTimerS: number;
   message: StoredMessageInput;
+  relayContent?: "none" | "full";
 }
 
 export type IncidentState = "open" | "acked" | "closed" | "expired";

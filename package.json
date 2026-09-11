@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "main": "./src/main.ts",
+  "bin": { "critalarm": "./bin/critalarm.mjs" },
   "engines": {
     "node": ">=22"
   },

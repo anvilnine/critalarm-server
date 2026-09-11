@@ -6,6 +6,7 @@ import { IncidentService } from "./incident/service.js";
 import { createIngressRouter } from "./ingress/router.js";
 import { createTierRouter } from "./tier/router.js";
 import { createV1Router } from "./v1/router.js";
+import { createRelayRouter } from "./relay/router.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -25,6 +26,8 @@ export interface AppDependencies { config: Config; db: Database.Database; clock:
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
-  app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, revenueCat: { sharedSecret: deps.config.revenueCat?.sharedSecret ?? "", entitlements: deps.config.revenueCat?.entitlements ?? {} } }));
-  app.route("/", createV1Router({ ...deps, incidents })); app.route("/", createIngressRouter({ ...deps, incidents, behindProxy: deps.config.behindProxy })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, revenueCat: { sharedSecret: deps.config.revenueCat?.sharedSecret ?? "", entitlements: deps.config.revenueCat?.entitlements ?? {} } }));
+  app.route("/", createV1Router({ ...deps, incidents }));
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event])));
+  app.route("/", createIngressRouter({ ...deps, incidents, behindProxy: deps.config.behindProxy })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
 }

@@ -23,9 +23,11 @@ export interface RevenueCatConfig {
 }
 
 export interface Config {
+  mode?: "selfhosted" | "relay" | "hosted";
   baseUrl: string;
   relayUrl: string;
-  relayContent: "none";
+  relayUrlExplicit?: boolean;
+  relayContent: "none" | "full";
   listen: string;
   port: number;
   dataDir: string;
@@ -73,7 +75,8 @@ function readConfiguration(env: NodeJS.ProcessEnv, readFile: ((path: string) => 
   let parsed: unknown;
   try {
     parsed = parse((readFile ?? ((path) => readFileSync(path, "utf8")))(env.CONFIG_PATH ?? "critalarm.yml"));
-  } catch {
+  } catch (error: unknown) {
+    if (readFile === undefined && env.CONFIG_PATH === undefined && error instanceof Error && "code" in error && error.code === "ENOENT") return {};
     throw configError("file");
   }
   const result = fileSchema.safeParse(parsed ?? {});
@@ -142,17 +145,24 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   if (!/^:\d+$/.test(listen)) throw configError("listen");
   const port = portValue(env.PORT ?? listen.slice(1));
   const relayContent = stringValue(env, "RELAY_CONTENT", file["relay-content"]) ?? "none";
-  if (relayContent !== "none") throw configError("relay-content");
+  if (relayContent !== "none" && relayContent !== "full") throw configError("relay-content");
   const apns = apnsConfig(env, file);
   const fcm = fcmConfig(env, file);
   const revenueCatSecret = stringValue(env, "REVENUECAT_SHARED_SECRET", file.revenuecat?.["shared-secret"]);
   const allowNoopPush = env.NODE_ENV !== "production" && env.ALLOW_NOOP_PUSH === "true";
-  if (apns === undefined && fcm === undefined && !allowNoopPush) throw configError("push provider");
-  if (env.NODE_ENV === "production" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
+  if (apns === undefined && fcm === undefined && !allowNoopPush) {
+    if (env.NODE_ENV !== "production") throw configError("push provider");
+  }
+  const relayUrlExplicit = stringValue(env, "RELAY_URL", file["relay-url"]) !== undefined;
+  const hasProvider = apns !== undefined || fcm !== undefined;
+  const mode = hasProvider ? (relayUrlExplicit ? "hosted" : "relay") : "selfhosted";
+  if (env.NODE_ENV === "production" && mode !== "selfhosted" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
   return {
+    mode,
     baseUrl: urlValue("base-url", stringValue(env, "BASE_URL", file["base-url"])),
     relayUrl: urlValue("relay-url", stringValue(env, "RELAY_URL", file["relay-url"]) ?? "https://relay.critalarm.app"),
-    relayContent: "none",
+    relayUrlExplicit,
+    relayContent: relayContent as "none" | "full",
     listen,
     port,
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",

@@ -35,17 +35,16 @@ export class PushDispatcher {
   }
 
   private subscribedDevices(topicHash: string, messageId: string): PushDevice[] {
+    const message = this.db.prepare("SELECT t.account_id FROM messages m JOIN topics t ON t.id = m.topic_id WHERE m.id = ?").get(messageId) as { account_id: string } | undefined;
+    const accountClause = message === undefined ? "" : " AND d.account_id = ?";
+    const parameters = message === undefined ? [topicHash] : [topicHash, message.account_id];
     const rows = this.db
       .prepare(
         `SELECT d.id, d.account_id, d.platform, d.push_token
          FROM devices d JOIN subscriptions s ON s.device_id = d.id
-         WHERE s.topic_hash = ? AND d.push_token <> ''
-           AND d.account_id = (
-             SELECT t.account_id FROM messages m JOIN topics t ON t.id = m.topic_id
-             WHERE m.id = ?
-           )`,
+         WHERE s.topic_hash = ? AND d.push_token <> ''${accountClause}`,
       )
-      .all(topicHash, messageId) as DeviceRow[];
+      .all(...parameters) as DeviceRow[];
     return rows.map((row) => ({
       id: row.id,
       accountId: row.account_id,

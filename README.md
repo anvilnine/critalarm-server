@@ -9,7 +9,16 @@ unchanged. On top of that it adds the part ntfy has no concept of: a priority-5
 message on a topic you marked critical opens an **incident**, and the incident
 keeps ringing your phone on a repeat loop until you acknowledge it.
 
-Status: early. The contract is written. The features are not built yet.
+Status: early implementation. Contract-compatible publish, incidents, timers, and relay forwarding are present.
+
+## Configuration
+
+| Option | Environment | Default | Purpose |
+|---|---|---|---|
+| `base-url` | `BASE_URL` | required | Public URL used for topic hashes |
+| `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; explicit value enables hosted mode with push credentials |
+| `relay-content` | `RELAY_CONTENT` | `none` | `none` keeps body on server; `full` includes title/body in push |
+| `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
 ## Run it
 
