@@ -15,8 +15,11 @@ RUN npm ci
 
 FROM base AS runner
 ENV NODE_ENV=production
-ENV PORT=4100
+ENV PORT=8080
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-EXPOSE 4100
+RUN addgroup -S critalarm && adduser -S critalarm -G critalarm && mkdir -p /data && chown -R critalarm:critalarm /app /data
+USER critalarm
+VOLUME ["/data"]
+EXPOSE 8080
 CMD ["npm", "start"]

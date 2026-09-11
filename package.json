@@ -3,15 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./src/server-node.ts",
+  "main": "./src/main.ts",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "dev": "tsx watch --env-file-if-exists=.env src/server-node.ts",
-    "start": "tsx src/server-node.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
+    "start": "tsx src/main.ts",
     "build": "tsc --noEmit",
     "type-check": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -23,6 +24,7 @@
     "hono": "^4.12.12",
     "hono-rate-limiter": "^0.4.2",
     "tsx": "^4.19.2",
+    "yaml": "^2.9.0",
     "zod": "^4"
   },
   "devDependencies": {

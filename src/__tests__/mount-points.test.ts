@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import app from "../index.js";
+import { createApp } from "../index.js";
+import { openDatabase } from "../store/database.js";
+import { migrate } from "../store/migrations.js";
 
 // docs/api.md puts every route at the root: /{topic} for the ntfy-compatible
 // surface and /v1/ for everything else. The /api case below asserts 404 on
@@ -9,6 +11,9 @@ import app from "../index.js";
 const testEnv = {
   ALLOWED_ORIGINS: "http://localhost:3000",
 };
+const db = openDatabase(":memory:");
+migrate(db);
+const app = createApp({ config: { baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false }, db, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {} });
 
 describe("health", () => {
   it("answers at /v1/health", async () => {

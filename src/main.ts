@@ -1,0 +1,14 @@
+import { serve } from "@hono/node-server";
+import { join } from "node:path";
+import { loadConfig } from "./config.js";
+import { createApp } from "./index.js";
+import { IncidentService } from "./incident/service.js";
+import { startTimerScanner } from "./incident/scanner.js";
+import { openDatabase } from "./store/database.js";
+import { migrate } from "./store/migrations.js";
+import type { DeliveryEvent, IdGenerator } from "./incident/types.js";
+import { ApnsSender } from "./push/apns.js";
+import { FcmSender } from "./push/fcm.js";
+import { PushDispatcher } from "./push/dispatcher.js";
+import type { PushSender } from "./push/types.js";
+const config=loadConfig({...process.env,BASE_URL:process.env.BASE_URL??`http://localhost:${process.env.PORT??"8080"}`});const db=openDatabase(join(config.dataDir,"critalarm.sqlite"));migrate(db);const clock={now:()=>Math.floor(Date.now()/1000)};const ids:IdGenerator={message:()=>`m_${crypto.randomUUID()}`,incident:()=>`inc_${crypto.randomUUID()}`,timer:()=>`tm_${crypto.randomUUID()}`};const noop:PushSender={send:async()=>({status:204,stale:false})};const apns=config.apns===undefined?noop:new ApnsSender({...config.apns,clock,fetch});const fcm=config.fcm===undefined?noop:new FcmSender({...config.fcm,clock,fetch});const dispatcher=new PushDispatcher(db,{apns,fcm});const incidents=new IncidentService(db,clock,ids);const dispatch=(events:readonly DeliveryEvent[])=>dispatcher.dispatch(events);const app=createApp({config,db,clock,ids,dispatch});await dispatch(incidents.scanDue());const stop=startTimerScanner(incidents,dispatch);serve({fetch:app.fetch,port:config.port});const shutdown=()=>{stop();db.close();process.exit(0)};process.once("SIGTERM",shutdown);process.once("SIGINT",shutdown);
