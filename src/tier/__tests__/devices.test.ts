@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
+import { CapError, registerDevice } from "../devices.js";
 import { createTierRouter } from "../router.js";
+import type { TierDependencies } from "../types.js";
 
 class FakeClock {
   constructor(public value = 1_000) {}
@@ -21,10 +23,11 @@ function setup() {
   migrate(db);
   const clock = new FakeClock();
   const ids = new FixedIds();
-  return { app: createTierRouter({ db, clock, ids, revenueCat: { sharedSecret: "revenuecat-secret", entitlements: { relay: "relay", hosted: "hosted" } } }), db, clock };
+  const deps: TierDependencies = { db, clock, ids, revenueCat: { sharedSecret: "revenuecat-secret", entitlements: { relay: "relay", hosted: "hosted" } } };
+  return { app: createTierRouter(deps), db, clock, deps };
 }
 
-const device = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "apns-token", app_version: "1.0.0" };
+const device = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "apns-token", app_version: "1.0.0" } as const;
 
 describe("device registry", () => {
   it("creates an account and device for an unknown device id without storing the plaintext token", async () => {
@@ -90,5 +93,27 @@ describe("device registry", () => {
     const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: "Bearer dv_unknown", "content-type": "application/json" }, body: JSON.stringify({ push_token: "new-token", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects a non-UUID device id without creating rows", async () => {
+    const { app, db } = setup();
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...device, device_id: "dev_not-a-uuid" }) });
+
+    expect(response.status).toBe(400);
+    expect(db.prepare("SELECT * FROM accounts").all()).toEqual([]);
+    expect(db.prepare("SELECT * FROM devices").all()).toEqual([]);
+  });
+
+  it("does not mint a device or token when an authenticated account is at its device cap", () => {
+    const { db, deps } = setup();
+    const existingId = "dev_123e4567-e89b-12d3-a456-426614174001";
+    db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_cap', 'free', 1)").run();
+    db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES (?, 'acc_cap', ?, 'ios', 'existing-token', 1)").run(existingId, createHash("sha256").update("dv_existing").digest("hex"));
+
+    expect(() => registerDevice(deps, device, undefined, { accountId: "acc_cap", deviceId: existingId })).toThrow(CapError);
+    expect(db.prepare("SELECT id, tier FROM accounts").all()).toEqual([{ id: "acc_cap", tier: "free" }]);
+    expect(db.prepare("SELECT id, account_id FROM devices").all()).toEqual([{ id: existingId, account_id: "acc_cap" }]);
+    expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_1");
   });
 });
