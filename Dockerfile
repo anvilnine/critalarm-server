@@ -16,6 +16,7 @@ RUN npm ci
 FROM base AS runner
 ENV NODE_ENV=production
 ENV PORT=8080
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm prune --omit=dev
 RUN addgroup -S critalarm && adduser -S critalarm -G critalarm && mkdir -p /data && chown -R critalarm:critalarm /app /data

@@ -6,7 +6,7 @@ import { IncidentService } from "./incident/service.js";
 import { createIngressRouter } from "./ingress/router.js";
 import { createTierRouter } from "./tier/router.js";
 import { createV1Router } from "./v1/router.js";
-export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string };
+export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
 // The Hono app. Right now it serves GET /v1/health and a JSON 404.

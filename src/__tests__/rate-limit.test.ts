@@ -10,10 +10,13 @@ function app(behindProxy: boolean) {
 }
 
 describe("rate limiter client keys", () => {
-  it("ignores attacker-supplied X-Forwarded-For without a trusted proxy", async () => {
+  it("uses the direct socket address and ignores attacker-supplied X-Forwarded-For", async () => {
     const server = app(false);
-    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.1" } })).status).toBe(200);
-    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.2" } })).status).toBe(429);
+    const one = { incoming: { socket: { remoteAddress: "10.0.0.1" } } };
+    const two = { incoming: { socket: { remoteAddress: "10.0.0.2" } } };
+    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.1" }, }, one as never)).status).toBe(200);
+    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.2" }, }, one as never)).status).toBe(429);
+    expect((await server.request("/", {}, two as never)).status).toBe(200);
   });
 
   it("uses the first forwarded hop behind a configured proxy", async () => {

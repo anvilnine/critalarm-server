@@ -8,7 +8,7 @@ type Ctx = { Bindings: Bindings; Variables: Variables };
 // left-most hop (the original client). Only trustworthy behind a reverse proxy
 // that sets the header — fine for the self-hosted dev box.
 function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
-  if (!behindProxy) return "anonymous";
+  if (!behindProxy) return c.env?.incoming?.socket?.remoteAddress ?? "anonymous";
   const xff = c.req.header("x-forwarded-for");
   if (xff) {
     const first = xff.split(",")[0]?.trim();
