@@ -92,6 +92,21 @@ const migrations = [
       )
       WHERE max_ring_s = 0;
   `,
+  `
+    CREATE TABLE server_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE relay_servers (
+      id TEXT PRIMARY KEY, base_url TEXT NOT NULL, version TEXT NOT NULL,
+      relay_key_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE relay_client_credentials (
+      relay_url TEXT PRIMARY KEY, relay_key TEXT NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE relay_p4_usage (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      day_start INTEGER NOT NULL, count INTEGER NOT NULL,
+      PRIMARY KEY (account_id, day_start)
+    );
+  `,
 ];
 
 export function migrate(db: Database.Database): void {

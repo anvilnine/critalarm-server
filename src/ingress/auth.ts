@@ -12,6 +12,7 @@ type TopicRow = {
   repeat_interval_s: number;
   max_ring_s: number;
   desk_timer_s: number;
+  relay_content: "none" | "full";
 };
 
 function tokenFromRequest(request: Request): string | null {
@@ -38,6 +39,7 @@ function topicRecord(row: TopicRow): TopicRecord {
     repeatIntervalS: row.repeat_interval_s,
     maxRingS: row.max_ring_s,
     deskTimerS: row.desk_timer_s,
+    relayContent: row.relay_content,
   };
 }
 
@@ -47,7 +49,7 @@ export function authenticateTopic(db: Database.Database, request: Request, name:
   const hash = createHash("sha256").update(token).digest("hex");
   const row = db
     .prepare(
-      `SELECT t.id, t.account_id, t.name, t.base_url, t.topic_hash, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s
+      `SELECT t.id, t.account_id, t.name, t.base_url, t.topic_hash, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content
        FROM topic_tokens tt JOIN topics t ON t.id = tt.topic_id
        WHERE tt.hash = ? AND t.name = ?`,
     )

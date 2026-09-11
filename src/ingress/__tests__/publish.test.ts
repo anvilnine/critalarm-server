@@ -81,11 +81,11 @@ describe("ntfy publish", () => {
     expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p4", incidentId: null, priority: 4 })]);
   });
 
-  it("stores but does not dispatch the 51st account-wide priority 4 message today", async () => {
+  it("forwards priority 4 after publisher-side cap removal", async () => {
     const { app, db, dispatch } = setup();
     for (let number = 0; number < 50; number += 1) db.prepare("INSERT INTO messages (id,topic_id,incident_id,title,body,priority,tags,markdown,created_at) VALUES (?, 'top_1', NULL, 'old', 'old', 4, '[]', 0, 1000)").run(`old_${number}`);
     const response = await app.request("/prod", { method:"POST",headers:{...bearer,Priority:"4"},body:"new" });
-    expect(response.status).toBe(200); expect(dispatch).not.toHaveBeenCalled();
+    expect(response.status).toBe(200); expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches the 50th account-wide priority 4 message today", async () => {

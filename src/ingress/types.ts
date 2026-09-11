@@ -42,6 +42,7 @@ export interface TopicRecord {
   repeatIntervalS: number;
   maxRingS: number;
   deskTimerS: number;
+  relayContent?: "none" | "full";
 }
 
 export interface IngressDependencies {

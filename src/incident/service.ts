@@ -44,6 +44,7 @@ type ScopedIncidentRow = IncidentRow & {
   max_ring_s: number;
   desk_timer_s: number;
   incident_max_ring_s: number;
+  relay_content?: "none" | "full";
 };
 
 export class IncidentConflictError extends Error {
@@ -174,6 +175,7 @@ export class IncidentService {
             messageRow,
             existing === undefined ? input.maxRingS : existing.max_ring_s,
             existing?.state !== "acked",
+            ...(input.relayContent === "full" ? ["full" as const] : []),
           ),
         ],
       };
@@ -228,7 +230,7 @@ export class IncidentService {
     const rows = this.db
       .prepare(
         `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
-          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s,
+          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content,
           i.max_ring_s AS incident_max_ring_s
          FROM incidents i JOIN topics t ON t.id = i.topic_id
          WHERE ${clauses.join(" AND ")}
@@ -243,7 +245,7 @@ export class IncidentService {
       .prepare(
         `SELECT tm.id AS timer_id, tm.kind, tm.fire_at, i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
           i.max_ring_s AS incident_max_ring_s,
-          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s
+          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content
          FROM timers tm JOIN incidents i ON i.id = tm.incident_id JOIN topics t ON t.id = i.topic_id
          WHERE tm.fire_at <= ?
          ORDER BY CASE tm.kind WHEN 'expire' THEN 0 WHEN 'desk' THEN 1 ELSE 2 END, tm.fire_at, tm.id`,
@@ -277,6 +279,7 @@ export class IncidentService {
       }
       this.db.prepare("UPDATE incidents SET state = 'expired', closed_at = ? WHERE id = ?").run(now, timer.id);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(timer.id);
+      console.log(JSON.stringify({ event: "incident_expired", incident_id: timer.id }));
       return null;
     }
     if (timer.kind === "desk") {
@@ -313,6 +316,7 @@ export class IncidentService {
       message,
       incident.incident_max_ring_s,
       incident.critical === 1,
+      ...(incident.relay_content === "full" ? ["full" as const] : []),
     );
   }
 
@@ -325,6 +329,7 @@ export class IncidentService {
     message: MessageRow,
     maxRingS: number,
     critical: boolean,
+    relayContent?: "none" | "full",
   ): DeliveryEvent {
     return {
       kind,
@@ -338,6 +343,7 @@ export class IncidentService {
       title: message.title,
       body: message.body,
       critical,
+      relayContent,
     };
   }
 

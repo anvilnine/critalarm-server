@@ -65,9 +65,11 @@ flowchart TB
     BIN --> C["Hosted mode<br/>= self-hosted + relay<br/>in one process"]
 ```
 
-Mode is inferred from config, not a flag. Push credentials present turns on the
-relay endpoints and the account and device tables. `relay-url` set turns on
-forwarding. Hosted has both.
+Mode is inferred from config, not a flag. Without push credentials, server runs
+self-hosted and forwards supported events to effective `relay-url` (default
+`https://relay.critalarm.app`). Push credentials without explicit `relay-url`
+select relay mode; push credentials plus explicit `relay-url` select hosted mode.
+Relay endpoints and account/device tables exist only in relay and hosted modes.
 
 Mode also decides which credential the `/v1/` routes accept: the admin token in
 self-hosted mode, a device token scoped to one account in relay and hosted mode.
@@ -265,6 +267,9 @@ listen: :8080
 data-dir: /data
 behind-proxy: true
 ```
+
+`relay-url` may be overridden with `RELAY_URL`. `relay-content` accepts `none`
+or `full`; environment override is `RELAY_CONTENT`.
 
 The startup log prints all five, so a reverse-proxy mistake is visible in the
 first line instead of in a 401 an hour later.

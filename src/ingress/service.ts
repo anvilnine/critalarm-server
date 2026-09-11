@@ -29,6 +29,7 @@ export class PublishService {
       repeatIntervalS: topic.repeatIntervalS,
       maxRingS: topic.maxRingS,
       deskTimerS: topic.deskTimerS,
+      ...(topic.relayContent === "full" ? { relayContent: "full" as const } : {}),
       message: { title, body: input.message, priority: 5, tags: input.tags, click: input.click ?? null, markdown: input.markdown },
     });
     return {
@@ -38,9 +39,8 @@ export class PublishService {
   }
 
   private publishStandard(topic: TopicRecord, input: PublishInput, title: string): { response: PublishResult; events: DeliveryEvent[] } {
-    const canDeliverP4 = input.priority !== 4 || this.p4Available(topic);
     const message = this.store(topic, input, title);
-    const events: DeliveryEvent[] = input.priority >= 4 && canDeliverP4
+    const events: DeliveryEvent[] = input.priority >= 4
       ? [{
           kind: input.priority === 4 ? "p4" : "p5",
           topicHash: topic.topicHash,
@@ -53,15 +53,10 @@ export class PublishService {
           title,
           body: input.message,
           critical: false,
+          ...(topic.relayContent === "full" ? { relayContent: "full" as const } : {}),
         }]
       : [];
     return { response: this.response(topic, input, title, message), events };
-  }
-
-  private p4Available(topic: TopicRecord): boolean {
-    const dayStart = Math.floor(this.deps.clock.now() / 86_400) * 86_400;
-    const count = this.deps.db.prepare("SELECT COUNT(*) AS count FROM messages m JOIN topics t ON t.id = m.topic_id WHERE t.account_id = ? AND m.priority = 4 AND m.created_at >= ? AND m.created_at < ?").get(topic.accountId, dayStart, dayStart + 86_400) as { count: number };
-    return count.count < 50;
   }
 
   private store(topic: TopicRecord, input: PublishInput, title: string): StoredMessage {

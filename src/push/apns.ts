@@ -60,10 +60,11 @@ export class ApnsSender implements PushSender {
 
 function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
   const isCritical = event.priority === 5 && event.critical && event.incidentId !== null;
+  const full = event.relayContent === "full";
   const aps: Record<string, unknown> = {
-    alert: { title: "Crit Alarm", body: `Critical alert on ${event.topic} — open to see details` },
+    alert: full ? { title: event.title, body: event.body } : { title: "Crit Alarm", body: `Critical alert on ${event.topic} — open to see details` },
     "interruption-level": isCritical ? "critical" : "time-sensitive",
-    "mutable-content": 1,
+    ...(full ? {} : { "mutable-content": 1 }),
     category: "INCIDENT",
   };
   if (isCritical) {

@@ -27,8 +27,8 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ALLOW_NOOP_PUSH: "true" }, () => "relay-content: none")).toThrow("base-url");
   });
 
-  it("rejects relay content other than none", () => {
-    expect(() => loadConfig({ ALLOW_NOOP_PUSH: "true" }, () => "base-url: https://alerts.example.com\nrelay-content: full")).toThrow("relay-content");
+  it("supports full relay content", () => {
+    expect(loadConfig({ ALLOW_NOOP_PUSH: "true" }, () => "base-url: https://alerts.example.com\nrelay-content: full").relayContent).toBe("full");
   });
 
   it("rejects malformed URLs and invalid ports", () => {
@@ -73,7 +73,7 @@ describe("loadConfig", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/APNs/);
     expect((error as Error).message).not.toContain("secret-private-key");
-    expect(() => loadConfig({ NODE_ENV: "production" }, () => "base-url: https://alerts.example.com")).toThrow("push provider");
+    expect(loadConfig({ NODE_ENV: "production" }, () => "base-url: https://alerts.example.com").mode).toBe("selfhosted");
     expect(() => loadConfig({ NODE_ENV: "production" }, () => [
       "base-url: https://alerts.example.com",
       "apns:",
@@ -89,6 +89,6 @@ describe("loadConfig", () => {
   it("only permits no-op push when explicitly enabled outside production", () => {
     expect(() => loadConfig({}, () => "base-url: https://alerts.example.com")).toThrow("push provider");
     expect(() => loadConfig({ ALLOW_NOOP_PUSH: "true" }, () => "base-url: https://alerts.example.com")).not.toThrow();
-    expect(() => loadConfig({ NODE_ENV: "production", ALLOW_NOOP_PUSH: "true" }, () => "base-url: https://alerts.example.com")).toThrow("push provider");
+    expect(loadConfig({ NODE_ENV: "production", ALLOW_NOOP_PUSH: "true" }, () => "base-url: https://alerts.example.com").mode).toBe("selfhosted");
   });
 });

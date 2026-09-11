@@ -19,6 +19,7 @@ ENV PORT=8080
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm prune --omit=dev
+RUN ln -s /app/bin/critalarm.mjs /usr/local/bin/critalarm
 RUN addgroup -S critalarm && adduser -S critalarm -G critalarm && mkdir -p /data && chown -R critalarm:critalarm /app /data
 USER critalarm
 VOLUME ["/data"]

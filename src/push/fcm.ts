@@ -93,6 +93,7 @@ function fcmPayload(device: PushDevice, event: DeliveryEvent): Record<string, un
         server: event.server,
         kind: event.kind,
         priority: String(event.priority),
+        ...(event.relayContent === "full" ? { title: event.title, body: event.body } : {}),
       },
     },
   };
