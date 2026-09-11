@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
+import { startTimerScanner } from "../scanner.js";
 import { IncidentService } from "../service.js";
 import type { Clock, IdGenerator } from "../types.js";
 
@@ -76,6 +77,48 @@ describe("due incident timers", () => {
     expect(db.prepare("SELECT fire_at FROM timers WHERE kind = 'repeat'").get()).toEqual({ fire_at: 1_020 });
   });
 
+  it("uses current critical toggle for repeat delivery", () => {
+    const { clock, db, ids } = setup();
+    const service = new IncidentService(db, clock, ids);
+    service.publishCritical(publication());
+    db.prepare("UPDATE topics SET critical = 0 WHERE id = 'top_1'").run();
+    clock.value = 1_010;
+
+    expect(service.scanDue()).toEqual([
+      expect.objectContaining({ kind: "repeat", incidentId: "inc_1", critical: false }),
+    ]);
+  });
+
+  it("uses the critical toggle but original duration when reopening", () => {
+    const { clock, db, ids } = setup();
+    const service = new IncidentService(db, clock, ids);
+    const opened = service.publishCritical(publication());
+    clock.value = 1_010;
+    service.acknowledge("acc_1", opened.incident.id);
+    db.prepare("UPDATE topics SET critical = 0, max_ring_s = 120 WHERE id = 'top_1'").run();
+    clock.value = 1_040;
+
+    expect(service.scanDue()).toEqual([
+      {
+        kind: "reopen",
+        topicHash: "hash_prod",
+        topic: "prod",
+        incidentId: "inc_1",
+        messageId: "m_1",
+        priority: 5,
+        maxRingS: 60,
+        server: "https://alerts.example.com",
+        title: "Database",
+        body: "db01 is down",
+        critical: false,
+      },
+    ]);
+    expect(db.prepare("SELECT kind, fire_at FROM timers ORDER BY kind").all()).toEqual([
+      { kind: "expire", fire_at: 1_100 },
+      { kind: "repeat", fire_at: 1_050 },
+    ]);
+  });
+
   it("expires open incident at max-ring deadline", () => {
     const { clock, db, ids } = setup();
     const service = new IncidentService(db, clock, ids);
@@ -117,5 +160,38 @@ describe("due incident timers", () => {
     clock.value = 1_010;
 
     expect(second.scanDue()).toEqual([expect.objectContaining({ kind: "repeat", incidentId: "inc_1" })]);
+  });
+});
+
+describe("timer scanner lifecycle", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("reports rejected dispatch and continues later scans", async () => {
+    vi.useFakeTimers();
+    const { clock, db, ids } = setup();
+    const service = new IncidentService(db, clock, ids);
+    service.publishCritical(publication());
+    const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const deliveries: string[] = [];
+    let attempts = 0;
+    const stop = startTimerScanner(service, async (events) => {
+      attempts += 1;
+      deliveries.push(events[0]?.kind ?? "none");
+      if (attempts === 1) {
+        throw new Error("relay unavailable");
+      }
+    }, 10);
+
+    clock.value = 1_010;
+    await vi.advanceTimersByTimeAsync(10);
+    clock.value = 1_020;
+    await vi.advanceTimersByTimeAsync(10);
+    stop();
+
+    expect(deliveries).toEqual(["repeat", "repeat"]);
+    expect(report).toHaveBeenCalledWith("incident timer dispatch failed", expect.any(Error));
   });
 });

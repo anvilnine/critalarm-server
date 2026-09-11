@@ -9,7 +9,9 @@ export function startTimerScanner(
   const timer = setInterval(() => {
     const events = service.scanDue();
     if (events.length > 0) {
-      void dispatch(events);
+      void dispatch(events).catch((error: unknown) => {
+        console.error("incident timer dispatch failed", error);
+      });
     }
   }, intervalMs);
   return () => clearInterval(timer);

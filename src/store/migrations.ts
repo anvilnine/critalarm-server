@@ -84,6 +84,14 @@ const migrations = [
     CREATE INDEX messages_by_incident ON messages(incident_id, created_at);
     CREATE INDEX timers_due ON timers(fire_at);
   `,
+  `
+    ALTER TABLE incidents ADD COLUMN max_ring_s INTEGER NOT NULL DEFAULT 0;
+    UPDATE incidents
+      SET max_ring_s = (
+        SELECT max_ring_s FROM topics WHERE topics.id = incidents.topic_id
+      )
+      WHERE max_ring_s = 0;
+  `,
 ];
 
 export function migrate(db: Database.Database): void {
