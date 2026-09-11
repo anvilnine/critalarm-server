@@ -65,6 +65,13 @@ describe("ntfy poll", () => {
     expect((await ndjson(await app.request("/prod/json?poll=1&since=m_a", { headers }))).map((message) => message.id)).toEqual(["m_b", "m_c"]);
   });
 
+  it("uses insertion order for same-second message boundaries", async () => {
+    const { add, app } = setup();
+    add("m_z", 800);
+    add("m_a", 800);
+    expect((await ndjson(await app.request("/prod/json?poll=1&since=m_z", { headers }))).map((message) => message.id)).toEqual(["m_a"]);
+  });
+
   it("returns oldest-first NDJSON with a final newline", async () => {
     const { add, app } = setup();
     add("m_a", 800);

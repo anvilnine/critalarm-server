@@ -37,6 +37,12 @@ describe("publish errors", () => {
     expect(await response.json()).toEqual({ code: 41301, http: 413, error: "message too large" });
   });
 
+  it("rejects a delay header on JSON publish", async () => {
+    const response = await setup().request("/", { method: "POST", headers: { Authorization: "Bearer tk_test", "content-type": "application/json", "X-Delay": "10m" }, body: JSON.stringify({ topic: "prod" }) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "scheduled delivery not supported" });
+  });
+
   it("returns the exact rate-limit error", async () => {
     const app = setup(1);
     await app.request("/prod", { method: "POST", headers: { Authorization: "Bearer tk_test", "x-real-ip": "127.0.0.1" }, body: "one" });

@@ -62,6 +62,22 @@ describe("publish header parser", () => {
     expect(input).toMatchObject({ title: "Kuma", priority: 5, tags: ["warning", "db"], message: "down" });
   });
 
+  it("uses headers ahead of conflicting query values", async () => {
+    const input = await parsePublishRequest(new Request("https://alerts.example.com/prod?t=query-title&p=1&ta=query-tag&m=query-message", {
+      method: "POST",
+      headers: { "X-Title": "header-title", "X-Priority": "urgent", "X-Tags": "header-tag" },
+      body: "body-message",
+    }));
+    expect(input).toMatchObject({ title: "header-title", priority: 5, tags: ["header-tag"], message: "query-message" });
+  });
+
+  it("treats empty header aliases as absent and falls back to another alias then query", async () => {
+    const alias = await parsePublishRequest(new Request("https://alerts.example.com/prod?t=query", { headers: { "X-Title": "", Title: "alias" } }));
+    const query = await parsePublishRequest(new Request("https://alerts.example.com/prod?t=query", { headers: { "X-Title": "" } }));
+    expect(alias.title).toBe("alias");
+    expect(query.title).toBe("query");
+  });
+
   it("uses defaults and accepts case-insensitive header names", async () => {
     const input = await parsePublishRequest(new Request("https://alerts.example.com/prod", { headers: { "x-pRiOrItY": "low" } }));
     expect(input).toMatchObject({ message: "triggered", priority: 2, tags: [], markdown: false });
