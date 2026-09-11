@@ -19,7 +19,7 @@ class FixedIds implements IdGenerator {
   timer(): string { this.timerNumber += 1; return `tm_${this.timerNumber}`; }
 }
 
-function setup(critical = true) {
+function setup(critical = true, dispatch = vi.fn(async () => {})) {
   const db = openDatabase(":memory:");
   migrate(db);
   db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1', 'free', 1)").run();
@@ -27,7 +27,6 @@ function setup(critical = true) {
   db.prepare("INSERT INTO topic_tokens (id, topic_id, hash, created_at) VALUES ('tok_1', 'top_1', ?, 1)").run(createHash("sha256").update("tk_test").digest("hex"));
   const clock = new FakeClock();
   const ids = new FixedIds();
-  const dispatch = vi.fn(async () => {});
   const app = createIngressRouter({ db, clock, ids, incidents: new IncidentService(db, clock, ids), dispatch });
   return { app, db, dispatch };
 }
@@ -39,7 +38,7 @@ describe("ntfy publish", () => {
     const { app } = setup();
     const response = await app.request("/prod", { method, headers: bearer, body: "db01 is down" });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ id: "m_1", time: 1_000, expires: 44_200, event: "message", topic: "prod", title: "prod", message: "db01 is down", priority: 3, tags: [] });
+    expect(await response.text()).toBe('{"id":"m_1","time":1000,"expires":44200,"event":"message","topic":"prod","title":"prod","message":"db01 is down","priority":3,"tags":[]}');
   });
 
   it("accepts JSON publish at root", async () => {
@@ -56,6 +55,15 @@ describe("ntfy publish", () => {
     expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "open", incidentId: "inc_1", priority: 5 })]);
   });
 
+  it("joins a second critical publish to the existing incident", async () => {
+    const { app, db, dispatch } = setup(true);
+    await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "5" }, body: "first" });
+    const second = await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "5" }, body: "second" });
+    expect(await second.json()).toMatchObject({ id: "m_2", incident_id: "inc_1" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM incidents").get()).toEqual({ count: 1 });
+    expect(dispatch).toHaveBeenLastCalledWith([expect.objectContaining({ kind: "p5", incidentId: "inc_1" })]);
+  });
+
   it("forwards noncritical priority 5 without an incident", async () => {
     const { app, db, dispatch } = setup(false);
     const response = await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "5" }, body: "down" });
@@ -64,10 +72,11 @@ describe("ntfy publish", () => {
     expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p5", incidentId: null, priority: 5, critical: false })]);
   });
 
-  it("forwards priority 4 and retains lower priorities without dispatch", async () => {
+  it("forwards priority 4 and suppresses priority 1 and 2 delivery", async () => {
     const { app, dispatch } = setup();
     await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "4" }, body: "high" });
-    await app.request("/prod", { method: "POST", headers: bearer, body: "normal" });
+    await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "1" }, body: "min" });
+    await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "2" }, body: "low" });
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p4", incidentId: null, priority: 4 })]);
   });
@@ -82,5 +91,21 @@ describe("ntfy publish", () => {
     const { app } = setup();
     const response = await app.request(`/prod?auth=${encodeURIComponent(Buffer.from("Bearer tk_test").toString("base64"))}`, { method: "POST", body: "down" });
     expect(response.status).toBe(200);
+  });
+
+  it("rejects a token scoped to another topic", async () => {
+    const { app, db } = setup();
+    db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES ('top_2', 'acc_1', 'staging', 'https://alerts.example.com', 'hash_staging', 0, 10, 60, 30, 'none', 1)").run();
+    const response = await app.request("/staging", { method: "POST", headers: bearer, body: "down" });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ code: 40101, http: 401, error: "unauthorized" });
+  });
+
+  it("keeps a stored message when delivery dispatch rejects", async () => {
+    const rejectedDispatch = vi.fn(async () => { throw new Error("provider unavailable"); });
+    const { app, db } = setup(false, rejectedDispatch);
+    const response = await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "4" }, body: "down" });
+    expect(response.status).toBe(500);
+    expect(db.prepare("SELECT id, body FROM messages").all()).toEqual([{ id: "m_1", body: "down" }]);
   });
 });

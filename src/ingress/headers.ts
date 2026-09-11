@@ -24,7 +24,7 @@ const priorityNames: Record<string, number> = {
 function firstHeader(headers: Headers, aliases: readonly string[]): string | undefined {
   for (const alias of aliases) {
     const value = headers.get(alias);
-    if (value !== null) return value;
+    if (value !== null && value !== "") return value;
   }
   return undefined;
 }
@@ -48,8 +48,10 @@ function markdown(value: unknown): boolean {
   return value === true || (typeof value === "string" && ["true", "1", "yes"].includes(value.toLowerCase()));
 }
 
-function hasDelay(headers: Headers): boolean {
-  return firstHeader(headers, ["X-Delay", "Delay", "X-At", "At", "X-In", "In"]) !== undefined;
+export function rejectDelayHeaders(headers: Headers): void {
+  if (firstHeader(headers, ["X-Delay", "Delay", "X-At", "At", "X-In", "In"]) !== undefined) {
+    throw new ParseError(400, "scheduled delivery not supported");
+  }
 }
 
 function normalize(fields: {
@@ -71,9 +73,7 @@ function normalize(fields: {
 }
 
 export async function parsePublishRequest(request: Request): Promise<ParsedPublish> {
-  if (hasDelay(request.headers)) {
-    throw new ParseError(400, "scheduled delivery not supported");
-  }
+  rejectDelayHeaders(request.headers);
   const bytes = new Uint8Array(await request.arrayBuffer());
   if (bytes.byteLength > 4096) {
     throw new ParseError(413, "message too large");
@@ -81,9 +81,9 @@ export async function parsePublishRequest(request: Request): Promise<ParsedPubli
   const query = new URL(request.url).searchParams;
   return normalize({
     message: query.get("m") ?? new TextDecoder().decode(bytes),
-    title: query.get("t") ?? firstHeader(request.headers, ["X-Title", "Title", "ti", "t"]),
-    priority: query.get("p") ?? firstHeader(request.headers, ["X-Priority", "Priority", "prio", "p"]),
-    tags: query.get("ta") ?? firstHeader(request.headers, ["X-Tags", "Tags", "tag", "ta"]),
+    title: firstHeader(request.headers, ["X-Title", "Title", "ti", "t"]) ?? query.get("t") ?? undefined,
+    priority: firstHeader(request.headers, ["X-Priority", "Priority", "prio", "p"]) ?? query.get("p") ?? undefined,
+    tags: firstHeader(request.headers, ["X-Tags", "Tags", "tag", "ta"]) ?? query.get("ta") ?? undefined,
     click: firstHeader(request.headers, ["X-Click", "Click"]),
     markdown: firstHeader(request.headers, ["X-Markdown", "Markdown", "md"]),
   });

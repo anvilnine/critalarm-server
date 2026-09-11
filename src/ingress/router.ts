@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { makeRateLimiter } from "../rate-limit.js";
 import { authenticateTopic } from "./auth.js";
-import { ParseError, parseJsonPublish, parsePublishRequest } from "./headers.js";
+import { ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
 import { PublishService } from "./service.js";
 import type { IngressDependencies } from "./types.js";
 
@@ -32,6 +32,7 @@ async function jsonValue(request: Request): Promise<unknown> {
 }
 
 type PollMessageRow = {
+  sequence: number;
   id: string;
   incident_id: string | null;
   title: string;
@@ -78,6 +79,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
 
   router.post("/", publishLimit, async (c) => {
     try {
+      rejectDelayHeaders(c.req.raw.headers);
       const input = parseJsonPublish(await jsonValue(c.req.raw));
       if (!validTopic.test(input.topic)) return c.json(numericError(40001, 400, "invalid topic name"), 400);
       const topic = authenticateTopic(deps.db, c.req.raw, input.topic);
@@ -101,15 +103,15 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
     const since = pollSince(c.req.query("since"), deps.clock.now());
     let rows: PollMessageRow[];
     if (since === "all") {
-      rows = deps.db.prepare("SELECT id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? ORDER BY created_at ASC, id ASC").all(topic.id) as PollMessageRow[];
+      rows = deps.db.prepare("SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? ORDER BY created_at ASC, rowid ASC").all(topic.id) as PollMessageRow[];
     } else if ("messageId" in since) {
-      const boundary = deps.db.prepare("SELECT created_at FROM messages WHERE topic_id = ? AND id = ?").get(topic.id, since.messageId) as { created_at: number } | undefined;
+      const boundary = deps.db.prepare("SELECT created_at, rowid AS sequence FROM messages WHERE topic_id = ? AND id = ?").get(topic.id, since.messageId) as { created_at: number; sequence: number } | undefined;
       rows = boundary === undefined
         ? []
-        : deps.db.prepare("SELECT id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) ORDER BY created_at ASC, id ASC").all(topic.id, boundary.created_at, boundary.created_at, since.messageId) as PollMessageRow[];
+        : deps.db.prepare("SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND (created_at > ? OR (created_at = ? AND rowid > ?)) ORDER BY created_at ASC, rowid ASC").all(topic.id, boundary.created_at, boundary.created_at, boundary.sequence) as PollMessageRow[];
     } else {
       const operator = since.inclusive ? ">=" : ">";
-      rows = deps.db.prepare(`SELECT id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND created_at ${operator} ? ORDER BY created_at ASC, id ASC`).all(topic.id, since.timestamp) as PollMessageRow[];
+      rows = deps.db.prepare(`SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND created_at ${operator} ? ORDER BY created_at ASC, rowid ASC`).all(topic.id, since.timestamp) as PollMessageRow[];
     }
     const body = rows.map((message) => JSON.stringify({
       id: message.id,
