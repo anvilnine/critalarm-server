@@ -1,0 +1,77 @@
+import { z } from "zod";
+import { authenticateDevice, credentialHash } from "./auth.js";
+import { capsFor } from "./caps.js";
+import type { AccountContext, TierDependencies } from "./types.js";
+
+const deviceId = z.string().regex(/^dev_[A-Za-z0-9_-]{1,128}$/);
+export const registrationSchema = z.object({
+  device_id: deviceId,
+  platform: z.enum(["ios", "android"]),
+  push_token: z.string().min(1),
+  app_version: z.string().min(1),
+});
+export const deviceUpdateSchema = z.object({
+  push_token: z.string().min(1),
+  app_version: z.string().min(1),
+});
+export const subscriptionSchema = z.object({
+  topic_hash: z.string().regex(/^[0-9a-f]{64}$/),
+});
+
+type DeviceAccountRow = { account_id: string; tier: "free" | "relay" | "hosted" };
+
+export class CapError extends Error {
+  constructor(readonly cap: "devices" | "critical_topics" | "p4_daily") {
+    super("cap");
+  }
+}
+
+export function accountForContext(deps: TierDependencies, context: AccountContext): DeviceAccountRow | null {
+  const account = deps.db.prepare("SELECT devices.account_id, accounts.tier FROM devices JOIN accounts ON accounts.id = devices.account_id WHERE devices.id = ? AND devices.account_id = ?").get(context.deviceId, context.accountId) as DeviceAccountRow | undefined;
+  return account ?? null;
+}
+
+export function registerDevice(deps: TierDependencies, input: z.infer<typeof registrationSchema>, bearer: string | undefined): { deviceToken: string; accountId: string; tier: "free" | "relay" | "hosted" } {
+  const existing = deps.db.prepare("SELECT id FROM devices WHERE id = ?").get(input.device_id) as { id: string } | undefined;
+  if (existing !== undefined) {
+    const context = authenticateDevice(deps.db, bearer);
+    if (context === null || context.deviceId !== input.device_id) throw new Error("unauthorized");
+    deps.db.prepare("UPDATE devices SET platform = ?, push_token = ?, last_seen = ? WHERE id = ?").run(input.platform, input.push_token, deps.clock.now(), input.device_id);
+    const account = accountForContext(deps, context);
+    if (account === null) throw new Error("unauthorized");
+    return { deviceToken: "", accountId: account.account_id, tier: account.tier };
+  }
+
+  const accountId = deps.ids.account();
+  const token = deps.ids.deviceToken();
+  const now = deps.clock.now();
+  deps.db.transaction(() => {
+    const caps = capsFor("free");
+    if (caps.devices < 1) throw new CapError("devices");
+    deps.db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, 'free', ?)").run(accountId, now);
+    deps.db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES (?, ?, ?, ?, ?, ?)").run(input.device_id, accountId, credentialHash(token), input.platform, input.push_token, now);
+  })();
+  return { deviceToken: token, accountId, tier: "free" };
+}
+
+export function updateDevice(deps: TierDependencies, deviceIdValue: string, input: z.infer<typeof deviceUpdateSchema>, bearer: string | undefined): DeviceAccountRow | null {
+  const context = authenticateDevice(deps.db, bearer);
+  if (context === null) return null;
+  if (context.deviceId !== deviceIdValue) return null;
+  deps.db.prepare("UPDATE devices SET push_token = ?, last_seen = ? WHERE id = ?").run(input.push_token, deps.clock.now(), deviceIdValue);
+  return accountForContext(deps, context);
+}
+
+export function subscribeDevice(deps: TierDependencies, context: AccountContext, topicHash: string): void {
+  const account = accountForContext(deps, context);
+  if (account === null) throw new Error("not found");
+  const existing = deps.db.prepare("SELECT 1 FROM subscriptions WHERE device_id = ? AND topic_hash = ?").get(context.deviceId, topicHash);
+  if (existing !== undefined) return;
+  const count = deps.db.prepare("SELECT COUNT(DISTINCT topic_hash) AS count FROM subscriptions WHERE account_id = ? AND topic_hash <> ?").get(context.accountId, topicHash) as { count: number };
+  if (count.count >= capsFor(account.tier).critical_topics) throw new CapError("critical_topics");
+  deps.db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES (?, ?, ?)").run(context.accountId, context.deviceId, topicHash);
+}
+
+export function unsubscribeDevice(deps: TierDependencies, context: AccountContext, topicHash: string): void {
+  deps.db.prepare("DELETE FROM subscriptions WHERE account_id = ? AND device_id = ? AND topic_hash = ?").run(context.accountId, context.deviceId, topicHash);
+}
