@@ -3,6 +3,23 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.2.0 — 2026-09-13
+
+A device now has a list of push tokens instead of one, so iOS Live Activities
+can be started, updated and ended. No existing route changed.
+
+- §4.2: added `POST /relay/v1/devices/{device_id}/tokens` with a `kind` of
+  `apns`, `fcm`, `la_start` or `la_update`. Posting the same `kind` and
+  `activity_id` again replaces the stored token.
+- §4.2: added `DELETE /relay/v1/devices/{device_id}/tokens/{kind}` and
+  `DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}`.
+- §4.2: `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still
+  take `push_token`. The server stores it as kind `apns` on iOS and kind `fcm`
+  on Android, so an app that never calls `/tokens` is unaffected.
+- §5.3: added the Live Activity APNs payloads. Start carries
+  `attributes-type: CritAlarmIncidentAttributes` and `attributes`; update and
+  end carry `content-state`, and end carries `dismissal-date`.
+
 ## 1.1.0 — 2026-09-10
 
 Reconciled the contract with the ntfy identity research and PRD §6.7, §6.9 and

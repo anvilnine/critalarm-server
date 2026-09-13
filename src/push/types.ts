@@ -25,3 +25,19 @@ export interface SenderDependencies {
   clock: Clock;
   fetch: PushFetch;
 }
+
+// api.md §5.3. The Live Activity push that rides next to the alarm push.
+export interface LiveActivityPush {
+  token: string;
+  event: "start" | "update" | "end";
+  incidentId: string;
+  topic: string;
+  server: string;
+  state: "open" | "acked" | "closed" | "expired";
+  title: string;
+  openedAt: number;
+}
+
+export interface LiveActivitySender {
+  sendLiveActivity(push: LiveActivityPush): Promise<PushResult>;
+}
