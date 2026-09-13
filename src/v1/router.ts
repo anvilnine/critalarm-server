@@ -3,11 +3,12 @@ import type Database from "better-sqlite3";
 import type { Config } from "../config.js";
 import { IncidentConflictError, IncidentService } from "../incident/service.js";
 import type { Clock, DeliveryEvent, IdGenerator, IncidentWithMessages } from "../incident/types.js";
+import type { DispatchResult } from "../domain-events.js";
 import { PublishService } from "../ingress/service.js";
 import type { TopicRecord } from "../ingress/types.js";
 import { requireDevice, type V1Env } from "./auth.js";
 import { addToken, createTopic, deleteToken, deleteTopic, listTopics, ownedTopic, patchTopic, view } from "./topics.js";
-type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<void>};
+type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
 export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=requireDevice(deps.db,deps.config.mode ?? "hosted");const service=new PublishService({...deps,incidents:deps.incidents});r.get("/v1/info",c=>c.json({name:"critalarm",version:"0.1.0",base_url:deps.config.baseUrl,relay_url:deps.config.relayUrl,relay_content:deps.config.relayContent,mode:deps.config.mode ?? "hosted"}));r.use("/v1/topics*",auth);r.use("/v1/incidents*",auth);r.use("/v1/test",auth);

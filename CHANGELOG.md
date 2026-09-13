@@ -3,6 +3,27 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.3.0 - 2026-09-13
+
+Added an internal counter read for the relay operator. No public route changed,
+and a self-hosted server is unaffected.
+
+- §4.4: added `GET /relay/v1/internal/stats`, authorized by a bearer token from
+  the `STATS_KEY` environment variable. Returns lifetime `totals`,
+  `servers_total`, `devices_active_7d` and the last 30 days as rows. Answers
+  `401` without the key and `404` in self-hosted mode or when `STATS_KEY` is
+  unset. Never cached, and it carries no topic names, message text or account
+  ids.
+- §4.4: `?by=key` adds a per relay key breakdown for abuse review.
+- §4.4: counters are written on the event, never worked out on read. Rows are
+  keyed by `(day, relay_key, metric)` over the four metrics
+  `pushes_delivered`, `alarms_rung`, `acks` and `incidents_opened`. A push the
+  provider refused is not counted, a `reopen` counts as an alarm but not as a
+  new incident, and work a relay does for its own hosted accounts is stored
+  under the key `local`.
+- §4.4: added `critalarm stats zero-key <relay_key>`, which drops an abusive key
+  out of every total and keeps its rows.
+
 ## 1.2.0 — 2026-09-13
 
 A device now has a list of push tokens instead of one, so iOS Live Activities

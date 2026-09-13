@@ -1,9 +1,10 @@
+import type { DispatchResult } from "../domain-events.js";
 import type { DeliveryEvent } from "./types.js";
 import { IncidentService } from "./service.js";
 
 export function startTimerScanner(
   service: IncidentService,
-  dispatch: (events: readonly DeliveryEvent[]) => Promise<void>,
+  dispatch: (events: readonly DeliveryEvent[]) => Promise<DispatchResult | void>,
   intervalMs = 5_000,
 ): () => void {
   const timer = setInterval(() => {

@@ -1,7 +1,9 @@
 # Crit Alarm Server — API Contract
 
-**Version:** 1.2.0
+**Version:** 1.3.0
 **Status:** draft, 2026-09-13. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.3.0** adds `GET /relay/v1/internal/stats`, an internal counter read for the relay operator. Nothing public changed. §4.4 defines it.
 
 **1.2.0** gives a device a list of push tokens instead of one. iOS Live Activities need two extra tokens per device: a push-to-start token and one update token per running activity. §4.2 gains `POST` and `DELETE /relay/v1/devices/{device_id}/tokens`, and §5.3 defines the Live Activity APNs payloads. `push_token` on registration and on `PATCH` still works and still means the alarm token.
 
@@ -335,6 +337,80 @@ Authorization: Bearer <shared secret from RevenueCat dashboard>
 Body is RevenueCat's webhook event. `app_user_id` is the **`account_id`**, which the app sets on the RevenueCat SDK right after registration. Updates `tier` on the account, so every device under it changes tier in one write.
 
 Using `device_id` here would attach the purchase to a handset. A reinstall or a second handset would then leave the server with two records for one paying person and no way to join them.
+
+### 4.4 Internal stats
+
+```
+GET /relay/v1/internal/stats
+GET /relay/v1/internal/stats?by=key
+Authorization: Bearer <STATS_KEY>
+→ 200 (Cache-Control: no-store)
+→ 400 {"error":"invalid request"}          // ?by= anything other than key
+→ 401 {"error":"unauthorized"}             // missing or wrong key
+→ 404 {"error":"Not found"}                // self-hosted mode, or no STATS_KEY set
+```
+
+Not public. It is for the operator of a relay, not for apps and not for
+servers. It is never cached, it carries no topic names, no message text and no
+account ids, and it is not served at all by a self-hosted server. The key comes
+from the `STATS_KEY` environment variable. There is no other way to reach it,
+and an unset `STATS_KEY` leaves the route unmounted.
+
+**Body.**
+
+```json
+{
+  "totals": { "pushes_delivered": 41230, "alarms_rung": 8801, "acks": 8120, "incidents_opened": 8611 },
+  "servers_total": 214,
+  "devices_active_7d": 963,
+  "days": [
+    { "day": "2026-09-13", "pushes_delivered": 612, "alarms_rung": 130, "acks": 121, "incidents_opened": 128 }
+  ]
+}
+```
+
+`totals` is lifetime. `days` is the last 30 days, newest first, UTC, and only
+days that have counts appear. `servers_total` is how many distinct relay keys
+have been issued. `devices_active_7d` is how many devices have a `last_seen`
+inside the last 7 days.
+
+**Counters are written when something happens, never worked out on read.** Each
+row is keyed by `(day, relay_key, metric)`, where `day` is a UTC `YYYY-MM-DD`
+and `relay_key` is the sha256 hash of the relay key. Work a relay does for its
+own hosted accounts has no relay key and is stored under the literal
+`local`.
+
+| Metric | Incremented when |
+|---|---|
+| `pushes_delivered` | One alarm push that APNs or FCM accepted with a 2xx. A refused push, a 410 or a provider timeout adds nothing. Live Activity pushes are not counted. |
+| `alarms_rung` | An `open` or a `reopen` forwarded through `POST /relay/v1/push`, or opened locally. `repeat`, `p4`, `p5`, `close` and `expire` are not alarms. |
+| `acks` | An incident acknowledged through `POST /v1/incidents/{id}/ack`. |
+| `incidents_opened` | An `open`. A `reopen` is a new alarm on an incident that already exists, so it is not a new incident. |
+
+**`?by=key`** adds a `keys` array for abuse review, one entry per relay key,
+busiest first:
+
+```json
+{
+  "keys": [
+    { "relay_key": "sha256hex", "zeroed": false,
+      "totals": { "pushes_delivered": 900, "alarms_rung": 300, "acks": 280, "incidents_opened": 295 },
+      "days": [ { "day": "2026-09-13", "pushes_delivered": 40, "alarms_rung": 12, "acks": 11, "incidents_opened": 12 } ] }
+  ]
+}
+```
+
+**Zeroing a key.** A key that is flooding the relay is excluded from
+`totals`, `days` and `servers_total` without losing its history:
+
+```
+critalarm stats zero-key rk_...        # the key the server was issued
+critalarm stats zero-key <sha256hex>   # or the hash this endpoint prints
+```
+
+Its counter rows stay in the database and it keeps its own entry under
+`?by=key` with `"zeroed": true`, so an operator can still see what it did.
+Zeroing does not revoke the key. `POST /relay/v1/push` keeps working for it.
 
 ---
 
