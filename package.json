@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@sentry/node": "^9",
+    "@sentry/node": "^10",
     "better-sqlite3": "^13.0.3",
     "hono": "^4.12.12",
     "hono-rate-limiter": "^0.4.2",
