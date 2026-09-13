@@ -33,6 +33,26 @@ npm run type-check # tsc --noEmit
 docker build -t critalarm-server .
 ```
 
+## Docker
+
+Every push to `main` publishes a multi-arch image (`linux/amd64`,
+`linux/arm64`) to GitHub's registry.
+
+```bash
+docker pull ghcr.io/anvilnine/critalarm:latest
+```
+
+```bash
+docker run -d --name critalarm \
+  -p 8080:8080 \
+  -v critalarm-data:/data \
+  -e BASE_URL=https://alarm.example.com \
+  ghcr.io/anvilnine/critalarm:latest
+```
+
+Tags: `latest` and the short commit sha on `main`, plus the semver tags
+(`1.2.3`, `1.2`, `1`) when a `v*` tag is pushed.
+
 ## Docs
 
 - `docs/api.md` is the contract. The app's client code and tests pin to it, and
