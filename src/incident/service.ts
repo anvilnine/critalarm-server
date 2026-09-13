@@ -182,7 +182,7 @@ export class IncidentService {
     })();
   }
 
-  acknowledge(accountId: string, incidentId: string): IncidentRecord {
+  acknowledge(accountId: string, incidentId: string): { incident: IncidentRecord; events: DeliveryEvent[] } {
     return this.db.transaction(() => {
       const incident = this.scopedIncident(accountId, incidentId);
       if (incident.state !== "open") {
@@ -192,11 +192,14 @@ export class IncidentService {
       this.db.prepare("UPDATE incidents SET state = 'acked', acked_at = ? WHERE id = ?").run(now, incidentId);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(incidentId);
       this.insertTimer(incidentId, "desk", now + incident.desk_timer_s);
-      return { ...incidentRecord(incident), state: "acked" as const, ackedAt: now };
+      return {
+        incident: { ...incidentRecord(incident), state: "acked" as const, ackedAt: now },
+        events: [this.timerEvent("ack", incident)],
+      };
     })();
   }
 
-  close(accountId: string, incidentId: string): IncidentRecord {
+  close(accountId: string, incidentId: string): { incident: IncidentRecord; events: DeliveryEvent[] } {
     return this.db.transaction(() => {
       const incident = this.scopedIncident(accountId, incidentId);
       if (incident.state !== "acked") {
@@ -205,7 +208,10 @@ export class IncidentService {
       const now = this.clock.now();
       this.db.prepare("UPDATE incidents SET state = 'closed', closed_at = ? WHERE id = ?").run(now, incidentId);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(incidentId);
-      return { ...incidentRecord(incident), state: "closed" as const, closedAt: now };
+      return {
+        incident: { ...incidentRecord(incident), state: "closed" as const, closedAt: now },
+        events: [this.timerEvent("close", incident)],
+      };
     })();
   }
 
@@ -280,7 +286,7 @@ export class IncidentService {
       this.db.prepare("UPDATE incidents SET state = 'expired', closed_at = ? WHERE id = ?").run(now, timer.id);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(timer.id);
       console.log(JSON.stringify({ event: "incident_expired", incident_id: timer.id }));
-      return null;
+      return this.timerEvent("expire", timer);
     }
     if (timer.kind === "desk") {
       if (current.state !== "acked") {
@@ -301,19 +307,21 @@ export class IncidentService {
     return this.timerEvent("repeat", timer);
   }
 
-  private timerEvent(kind: "repeat" | "reopen", incident: ScopedIncidentRow): DeliveryEvent {
+  // ack, close and expire carry no new message. They exist so the push layer
+  // can update or end a running Live Activity (api.md §5.3). They never ring.
+  private timerEvent(kind: "repeat" | "reopen" | "ack" | "close" | "expire", incident: ScopedIncidentRow): DeliveryEvent {
     const message = this.db
       .prepare(
         "SELECT id, topic_id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE incident_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
       )
-      .get(incident.id) as MessageRow;
+      .get(incident.id) as MessageRow | undefined;
     return this.deliveryEvent(
       kind,
       incident.topic_hash,
       incident.topic,
       incident.base_url,
       incident.id,
-      message,
+      message ?? { id: "", title: "", body: "" },
       incident.incident_max_ring_s,
       incident.critical === 1,
       ...(incident.relay_content === "full" ? ["full" as const] : []),
@@ -326,7 +334,7 @@ export class IncidentService {
     topic: string,
     server: string,
     incidentId: string,
-    message: MessageRow,
+    message: Pick<MessageRow, "id" | "title" | "body">,
     maxRingS: number,
     critical: boolean,
     relayContent?: "none" | "full",
@@ -364,7 +372,7 @@ export class IncidentService {
       .prepare(
         `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
           i.max_ring_s AS incident_max_ring_s,
-          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s
+          t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content
          FROM incidents i JOIN topics t ON t.id = i.topic_id
          WHERE i.id = ? AND t.account_id = ?`,
       )

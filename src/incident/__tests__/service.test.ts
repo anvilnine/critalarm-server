@@ -211,9 +211,10 @@ describe("IncidentService", () => {
     const opened = service.publishCritical(publication());
     clock.value = 1_010;
 
-    const incident = service.acknowledge("acc_1", opened.incident.id);
+    const acked = service.acknowledge("acc_1", opened.incident.id);
 
-    expect(incident).toMatchObject({ state: "acked", ackedAt: 1_010, closedAt: null });
+    expect(acked.incident).toMatchObject({ state: "acked", ackedAt: 1_010, closedAt: null });
+    expect(acked.events).toEqual([expect.objectContaining({ kind: "ack", incidentId: opened.incident.id })]);
     expect(db.prepare("SELECT kind, fire_at FROM timers").all()).toEqual([
       { kind: "desk", fire_at: 1_040 },
     ]);
@@ -234,9 +235,10 @@ describe("IncidentService", () => {
     service.acknowledge("acc_1", opened.incident.id);
     clock.value = 1_011;
 
-    const incident = service.close("acc_1", opened.incident.id);
+    const closed = service.close("acc_1", opened.incident.id);
 
-    expect(incident).toMatchObject({ state: "closed", closedAt: 1_011 });
+    expect(closed.incident).toMatchObject({ state: "closed", closedAt: 1_011 });
+    expect(closed.events).toEqual([expect.objectContaining({ kind: "close", incidentId: opened.incident.id })]);
     expect(db.prepare("SELECT * FROM timers").all()).toEqual([]);
   });
 

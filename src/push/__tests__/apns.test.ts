@@ -151,3 +151,93 @@ describe("ApnsSender", () => {
     expect(authorizations[1]).toBe(authorizations[0]);
   });
 });
+
+describe("ApnsSender Live Activity pushes", () => {
+  function senderFor(requests: Request[]) {
+    return new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "sandbox",
+      clock: { now: () => 1_757_740_800 },
+      fetch: async (request) => {
+        requests.push(request);
+        return new Response(null, { status: 200 });
+      },
+    });
+  }
+
+  const push = {
+    token: "la/token",
+    incidentId: "inc_1",
+    topic: "prod",
+    server: "https://alerts.example.com",
+    state: "open" as const,
+    title: "Database down",
+    openedAt: 1_757_740_800,
+  };
+
+  it("starts an activity on the Live Activity topic with attributes", async () => {
+    const requests: Request[] = [];
+
+    await senderFor(requests).sendLiveActivity({ ...push, event: "start" });
+
+    expect(requests[0]!.url).toBe("https://api.sandbox.push.apple.com/3/device/la%2Ftoken");
+    expect(requests[0]!.headers.get("apns-topic")).toBe("app.critalarm.push-type.liveactivity");
+    expect(requests[0]!.headers.get("apns-push-type")).toBe("liveactivity");
+    expect(requests[0]!.headers.get("apns-priority")).toBe("10");
+    expect(await requests[0]!.json()).toEqual({
+      aps: {
+        timestamp: 1_757_740_800,
+        event: "start",
+        "attributes-type": "CritAlarmIncidentAttributes",
+        attributes: { incident_id: "inc_1", topic: "prod", server: "https://alerts.example.com" },
+        "content-state": { state: "open", title: "Database down", opened_at: 1_757_740_800 },
+      },
+    });
+  });
+
+  it("updates an activity with content-state only", async () => {
+    const requests: Request[] = [];
+
+    await senderFor(requests).sendLiveActivity({ ...push, event: "update", state: "acked" });
+
+    expect(await requests[0]!.json()).toEqual({
+      aps: {
+        timestamp: 1_757_740_800,
+        event: "update",
+        "content-state": { state: "acked", title: "Database down", opened_at: 1_757_740_800 },
+      },
+    });
+  });
+
+  it("ends an activity with a dismissal date", async () => {
+    const requests: Request[] = [];
+
+    await senderFor(requests).sendLiveActivity({ ...push, event: "end", state: "closed" });
+
+    expect(await requests[0]!.json()).toEqual({
+      aps: {
+        timestamp: 1_757_740_800,
+        event: "end",
+        "content-state": { state: "closed", title: "Database down", opened_at: 1_757_740_800 },
+        "dismissal-date": 1_757_740_800,
+      },
+    });
+  });
+
+  it("reports a gone Live Activity token as stale", async () => {
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_757_740_800 },
+      fetch: async () => new Response(null, { status: 410 }),
+    });
+
+    expect(await sender.sendLiveActivity({ ...push, event: "update" })).toEqual({ status: 410, stale: true });
+  });
+});

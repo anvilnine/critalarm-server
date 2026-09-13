@@ -1,6 +1,6 @@
 import type { DeliveryEvent } from "../domain-events.js";
 import { signJwt } from "./jwt.js";
-import type { PrivateKey, PushDevice, PushResult, PushSender, SenderDependencies } from "./types.js";
+import type { LiveActivityPush, LiveActivitySender, PrivateKey, PushDevice, PushResult, PushSender, SenderDependencies } from "./types.js";
 
 export interface ApnsSenderOptions extends SenderDependencies {
   teamId: string;
@@ -12,7 +12,7 @@ export interface ApnsSenderOptions extends SenderDependencies {
 
 type CachedToken = { value: string; issuedAt: number };
 
-export class ApnsSender implements PushSender {
+export class ApnsSender implements PushSender, LiveActivitySender {
   private cachedToken: CachedToken | null = null;
 
   constructor(private readonly options: ApnsSenderOptions) {}
@@ -32,6 +32,24 @@ export class ApnsSender implements PushSender {
           "content-type": "application/json",
         },
         body: JSON.stringify(apnsPayload(event)),
+      }),
+    );
+    return { status: response.status, stale: response.status === 410 };
+  }
+
+  async sendLiveActivity(push: LiveActivityPush): Promise<PushResult> {
+    const now = this.options.clock.now();
+    const response = await this.options.fetch(
+      new Request(`${this.endpoint()}/3/device/${encodeURIComponent(push.token)}`, {
+        method: "POST",
+        headers: {
+          authorization: `bearer ${this.authorization(now)}`,
+          "apns-topic": `${this.options.bundleId}.push-type.liveactivity`,
+          "apns-push-type": "liveactivity",
+          "apns-priority": "10",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(liveActivityPayload(push, now)),
       }),
     );
     return { status: response.status, stale: response.status === 410 };
@@ -76,4 +94,20 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
     server: event.server,
     kind: event.kind,
   };
+}
+
+function liveActivityPayload(push: LiveActivityPush, now: number): Record<string, unknown> {
+  const aps: Record<string, unknown> = {
+    timestamp: now,
+    event: push.event,
+  };
+  if (push.event === "start") {
+    aps["attributes-type"] = "CritAlarmIncidentAttributes";
+    aps.attributes = { incident_id: push.incidentId, topic: push.topic, server: push.server };
+  }
+  aps["content-state"] = { state: push.state, title: push.title, opened_at: push.openedAt };
+  if (push.event === "end") {
+    aps["dismissal-date"] = now;
+  }
+  return { aps };
 }

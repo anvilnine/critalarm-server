@@ -11,7 +11,9 @@ export class RelayClient {
   }
 
   async forwardOne(event: DeliveryEvent): Promise<Response | undefined> {
-    if (event.kind === "p5") return undefined;
+    // p5 rings locally, and the three state changes only drive Live Activities,
+    // which /relay/v1/push does not carry.
+    if (event.kind === "p5" || event.kind === "ack" || event.kind === "close" || event.kind === "expire") return undefined;
     const key = await this.key();
     const payload: RelayPayload = { topic_hash: event.topicHash, incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind };
     if (this.options.relayContent === "full") { payload.title = event.title; payload.body = event.body; }

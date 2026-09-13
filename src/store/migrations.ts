@@ -107,6 +107,22 @@ const migrations = [
       PRIMARY KEY (account_id, day_start)
     );
   `,
+  `
+    CREATE TABLE device_tokens (
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('apns', 'fcm', 'la_start', 'la_update')),
+      activity_id TEXT NOT NULL DEFAULT '',
+      incident_id TEXT,
+      token TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (device_id, kind, activity_id)
+    );
+    CREATE INDEX device_tokens_by_incident ON device_tokens(incident_id, kind);
+
+    INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at)
+      SELECT id, CASE platform WHEN 'ios' THEN 'apns' ELSE 'fcm' END, '', NULL, push_token, last_seen
+      FROM devices WHERE push_token <> '';
+  `,
 ];
 
 export function migrate(db: Database.Database): void {

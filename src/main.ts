@@ -22,9 +22,10 @@ if (identity?.firstBoot) console.log(`admin token: ${identity.token}`);
 const clock = { now: () => Math.floor(Date.now() / 1000) };
 const ids: IdGenerator = { message: () => `m_${crypto.randomUUID()}`, incident: () => `inc_${crypto.randomUUID()}`, timer: () => `tm_${crypto.randomUUID()}` };
 const noop: PushSender = { send: async () => ({ status: 204, stale: false }) };
-const apns = config.apns === undefined ? noop : new ApnsSender({ ...config.apns, clock, fetch });
+const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock, fetch });
+const apns: PushSender = apnsSender ?? noop;
 const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clock, fetch });
-const dispatcher = new PushDispatcher(db, { apns, fcm });
+const dispatcher = new PushDispatcher(db, { apns, fcm, liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
 const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent }) : undefined;
 const dispatch = async (events: readonly DeliveryEvent[]) => {

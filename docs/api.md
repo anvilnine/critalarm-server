@@ -1,7 +1,9 @@
 # Crit Alarm Server — API Contract
 
-**Version:** 1.1.0
-**Status:** draft, 2026-09-10. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.2.0
+**Status:** draft, 2026-09-13. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.2.0** gives a device a list of push tokens instead of one. iOS Live Activities need two extra tokens per device: a push-to-start token and one update token per running activity. §4.2 gains `POST` and `DELETE /relay/v1/devices/{device_id}/tokens`, and §5.3 defines the Live Activity APNs payloads. `push_token` on registration and on `PATCH` still works and still means the alarm token.
 
 **1.1.0** reconciles §3, §4.2 and §4.3 with `planning/research/identity.md` and PRD §6.7 and §6.9: device registration now issues a device token and returns an account id, `/v1/` authorization is scoped by server mode, and caps are counted per account instead of per device. Tier names are unchanged.
 
@@ -290,7 +292,28 @@ POST   /relay/v1/devices/{device_id}/subscriptions
 DELETE /relay/v1/devices/{device_id}/subscriptions/{topic_hash}
   Authorization: Bearer dv_...
 → 204
+
+POST   /relay/v1/devices/{device_id}/tokens                 // add or replace one push token
+  Authorization: Bearer dv_...
+  { "kind":"apns"|"fcm"|"la_start"|"la_update",
+    "token":"...",
+    "activity_id":"...",                                    // required when kind is la_update, rejected otherwise
+    "incident_id":"inc_9a8b7c" }                            // la_update only, optional
+→ 204
+
+DELETE /relay/v1/devices/{device_id}/tokens/{kind}          // drop every token of that kind
+DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
+  Authorization: Bearer dv_...
+→ 204
 ```
+
+**A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android has no Live Activity tokens.
+
+`POST` is a replace, not an append. A second `POST` with the same `kind` and `activity_id` overwrites the stored token and its `incident_id`. Since `apns`, `fcm` and `la_start` have no `activity_id`, a device can only ever hold one of each.
+
+**Backward compatible.** `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still take `push_token` and still work unchanged. The server stores that token as kind `apns` on an iOS device and kind `fcm` on an Android one. An app that never calls `/tokens` behaves exactly as it did in 1.1.0 and gets alarm pushes with no Live Activity.
+
+`incident_id` on an `la_update` token is how the server finds the right activity when an incident changes state. Without it the server can still start activities but cannot update or end them, so send it.
 
 **Two secrets, two jobs.** `tk_` (§1.2) is a publish token. It goes to Uptime Kuma, a cron job, a CI pipeline, anywhere outside the user's control, and it can only publish to one topic. `dv_` is the device's own secret. It manages topics, subscriptions and incidents, and it never leaves the app. Never send `dv_` to an alerting source and never publish with it.
 
@@ -365,6 +388,72 @@ Category `INCIDENT` registers one action: `ACK` ("I'm up"), which calls `POST /v
 ```
 
 Data-only. The app builds the full-screen alarm notification itself.
+
+### 5.3 Live Activity (iOS)
+
+Live Activity pushes go to APNs on the Live Activity topic, which is the bundle
+id with `.push-type.liveactivity` on the end. They are a second push, sent next
+to the alarm push in §5.1, never instead of it. Android devices get none of this.
+
+**Start.** Sent when an incident opens, to the device's `la_start` token.
+
+```
+headers:
+  apns-topic:       <bundle_id>.push-type.liveactivity
+  apns-push-type:   liveactivity
+  apns-priority:    10
+
+{
+  "aps": {
+    "timestamp": 1757740800,
+    "event": "start",
+    "attributes-type": "CritAlarmIncidentAttributes",
+    "attributes": {
+      "incident_id": "inc_9a8b7c",
+      "topic": "prod",
+      "server": "https://alerts.example.com"
+    },
+    "content-state": {
+      "state": "open",
+      "title": "Database down",
+      "opened_at": 1757740800
+    }
+  }
+}
+```
+
+**Update and end.** Sent when the incident is acknowledged, reopened, closed or
+expired, to the `la_update` token registered for that incident. `event` is
+`update` for `open` and `acked`, and `end` for `closed` and `expired`.
+
+```
+headers:
+  apns-topic:       <bundle_id>.push-type.liveactivity
+  apns-push-type:   liveactivity
+  apns-priority:    10
+
+{
+  "aps": {
+    "timestamp": 1757740860,
+    "event": "update" | "end",
+    "content-state": {
+      "state": "open" | "acked" | "closed" | "expired",
+      "title": "Database down",
+      "opened_at": 1757740800
+    },
+    "dismissal-date": 1757740860        // end only. when iOS removes the activity
+  }
+}
+```
+
+`attributes-type` and `attributes` are start only. iOS rejects them on an
+update. `content-state` carries the same three fields every time, so the widget
+reads one shape whatever happened.
+
+A device with no `la_start` token gets no activity and no error. A device whose
+activity has no `la_update` token keeps the activity on screen until iOS times
+it out, because the server has nothing to send the end to. Neither case blocks
+or delays the alarm push.
 
 ---
 

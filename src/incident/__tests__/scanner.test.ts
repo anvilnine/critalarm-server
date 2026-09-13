@@ -125,7 +125,7 @@ describe("due incident timers", () => {
     service.publishCritical(publication());
     clock.value = 1_060;
 
-    expect(service.scanDue()).toEqual([]);
+    expect(service.scanDue()).toEqual([expect.objectContaining({ kind: "expire", incidentId: "inc_1" })]);
     expect(db.prepare("SELECT state, closed_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "expired", closed_at: 1_060 });
     expect(db.prepare("SELECT * FROM timers").all()).toEqual([]);
   });
@@ -136,7 +136,7 @@ describe("due incident timers", () => {
     service.publishCritical({ ...publication(), repeatIntervalS: 60 });
     clock.value = 1_060;
 
-    expect(service.scanDue()).toEqual([]);
+    expect(service.scanDue()).toEqual([expect.objectContaining({ kind: "expire", incidentId: "inc_1" })]);
     expect(db.prepare("SELECT state FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "expired" });
   });
 

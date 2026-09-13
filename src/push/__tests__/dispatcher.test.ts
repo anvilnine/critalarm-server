@@ -3,7 +3,7 @@ import type { DeliveryEvent } from "../../domain-events.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { PushDispatcher } from "../dispatcher.js";
-import type { PushDevice, PushResult, PushSender } from "../types.js";
+import type { LiveActivityPush, LiveActivitySender, PushDevice, PushResult, PushSender } from "../types.js";
 
 function event(): DeliveryEvent {
   return {
@@ -110,6 +110,161 @@ describe("PushDispatcher", () => {
       { device_id: "dev_cross", topic_hash: "hash_prod" },
       { device_id: "dev_ios", topic_hash: "hash_prod" },
       { device_id: "dev_other", topic_hash: "hash_other" },
+    ]);
+  });
+});
+
+class RecordingLiveActivity implements LiveActivitySender {
+  readonly pushes: LiveActivityPush[] = [];
+
+  constructor(private readonly result: PushResult = { status: 200, stale: false }) {}
+
+  async sendLiveActivity(push: LiveActivityPush): Promise<PushResult> {
+    this.pushes.push(push);
+    return this.result;
+  }
+}
+
+function liveActivitySetup() {
+  const db = setup();
+  db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,max_ring_s) VALUES ('inc_1','top_1','open',900,900,60)").run();
+  db.prepare("UPDATE messages SET incident_id = 'inc_1' WHERE id = 'm_1'").run();
+  db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_ios','la_start','',NULL,'start-ios',1)").run();
+  db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_other','la_start','',NULL,'start-other',1)").run();
+  db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_ios','la_update','act_1','inc_1','update-ios',1)").run();
+  return db;
+}
+
+function dispatcherFor(db: ReturnType<typeof liveActivitySetup>, liveActivity: RecordingLiveActivity) {
+  const apns = new RecordingSender({ status: 200, stale: false });
+  const fcm = new RecordingSender({ status: 200, stale: false });
+  return { apns, fcm, dispatcher: new PushDispatcher(db, { apns, fcm, liveActivity }, { now: () => 2_000 }) };
+}
+
+describe("Live Activity selection", () => {
+  it("rings the alarm and starts an activity on open, using only start tokens of subscribed devices", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, fcm, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_ios"]);
+    expect(fcm.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_android"]);
+    expect(liveActivity.pushes).toEqual([
+      {
+        token: "start-ios",
+        event: "start",
+        incidentId: "inc_1",
+        topic: "prod",
+        server: "https://alerts.example.com",
+        state: "open",
+        title: "Critical alert on prod",
+        openedAt: 900,
+      },
+    ]);
+  });
+
+  it("sends no Live Activity push on a repeat", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([{ ...event(), kind: "repeat" }]);
+
+    expect(apns.deliveries).toHaveLength(1);
+    expect(liveActivity.pushes).toEqual([]);
+  });
+
+  it("updates the activity without ringing on ack", async () => {
+    const db = liveActivitySetup();
+    db.prepare("UPDATE incidents SET state = 'acked', acked_at = 1000 WHERE id = 'inc_1'").run();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, fcm, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([{ ...event(), kind: "ack" }]);
+
+    expect(apns.deliveries).toEqual([]);
+    expect(fcm.deliveries).toEqual([]);
+    expect(liveActivity.pushes).toEqual([
+      expect.objectContaining({ token: "update-ios", event: "update", state: "acked", openedAt: 900 }),
+    ]);
+  });
+
+  it("rings the alarm and updates the activity on reopen", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([{ ...event(), kind: "reopen" }]);
+
+    expect(apns.deliveries).toHaveLength(1);
+    expect(liveActivity.pushes).toEqual([
+      expect.objectContaining({ token: "update-ios", event: "update", state: "open" }),
+    ]);
+  });
+
+  it("ends the activity on close and on expire, without ringing", async () => {
+    const db = liveActivitySetup();
+    db.prepare("UPDATE incidents SET state = 'closed', closed_at = 1000 WHERE id = 'inc_1'").run();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([{ ...event(), kind: "close" }]);
+    db.prepare("UPDATE incidents SET state = 'expired' WHERE id = 'inc_1'").run();
+    await dispatcher.dispatch([{ ...event(), kind: "expire" }]);
+
+    expect(apns.deliveries).toEqual([]);
+    expect(liveActivity.pushes.map((push) => [push.event, push.state])).toEqual([
+      ["end", "closed"],
+      ["end", "expired"],
+    ]);
+  });
+
+  it("carries the real title only when the topic relays full content", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const { dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([{ ...event(), relayContent: "full" }]);
+
+    expect(liveActivity.pushes[0]?.title).toBe("Database");
+  });
+
+  it("prefers the alarm token from the token list over the legacy device column", async () => {
+    const db = liveActivitySetup();
+    db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_ios','apns','',NULL,'apns-listed',1)").run();
+    const liveActivity = new RecordingLiveActivity();
+    const { apns, dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(apns.deliveries.map((delivery) => delivery.device.pushToken)).toEqual(["apns-listed"]);
+  });
+
+  it("drops a Live Activity token APNs reports gone", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity({ status: 410, stale: true });
+    const { dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(db.prepare("SELECT token FROM device_tokens ORDER BY token").all()).toEqual([
+      { token: "start-other" },
+      { token: "update-ios" },
+    ]);
+  });
+
+  it("falls back to the event kind and the clock when the incident is not stored locally", async () => {
+    const db = liveActivitySetup();
+    db.prepare("DELETE FROM incidents WHERE id = 'inc_1'").run();
+    const liveActivity = new RecordingLiveActivity();
+    const { dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(liveActivity.pushes).toEqual([
+      expect.objectContaining({ event: "start", state: "open", openedAt: 2_000 }),
     ]);
   });
 });

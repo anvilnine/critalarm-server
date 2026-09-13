@@ -1,8 +1,10 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { authenticateDevice, bearerFromHeader } from "./auth.js";
 import { capsFor } from "./caps.js";
 import { CapError, deviceUpdateSchema, registerDevice, registrationSchema, subscribeDevice, subscriptionSchema, unsubscribeDevice, updateDevice } from "./devices.js";
+import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from "./device-tokens.js";
 import { applyRevenueCatEvent, parseRevenueCatEvent, sharedSecretMatches } from "./revenuecat.js";
 import type { TierDependencies } from "./types.js";
 
@@ -81,6 +83,36 @@ export function createTierRouter(deps: TierDependencies): Hono {
       throw error;
     }
   });
+
+  router.post("/relay/v1/devices/:deviceId/tokens", async (c) => {
+    try {
+      const input = tokenSchema.parse(await requestJson(c.req.raw));
+      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
+      if (context === null) return c.json({ error: "unauthorized" }, 401);
+      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      putDeviceToken(deps, context.deviceId, input);
+      return c.body(null, 204);
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
+      throw error;
+    }
+  });
+
+  const deleteToken = (c: Context) => {
+    try {
+      const kind = tokenKindSchema.parse(c.req.param("kind"));
+      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
+      if (context === null) return c.json({ error: "unauthorized" }, 401);
+      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      deleteDeviceTokens(deps, context.deviceId, kind, c.req.param("activityId"));
+      return c.body(null, 204);
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
+      throw error;
+    }
+  };
+  router.delete("/relay/v1/devices/:deviceId/tokens/:kind", deleteToken);
+  router.delete("/relay/v1/devices/:deviceId/tokens/:kind/:activityId", deleteToken);
 
   router.post("/webhooks/revenuecat", async (c) => {
     if (!sharedSecretMatches(c.req.header("authorization"), deps.revenueCat.sharedSecret)) return c.json({ error: "unauthorized" }, 401);

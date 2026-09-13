@@ -9,7 +9,7 @@ export interface IdGenerator {
 }
 
 export interface DeliveryEvent {
-  kind: "open" | "repeat" | "reopen" | "p4" | "p5";
+  kind: "open" | "repeat" | "reopen" | "p4" | "p5" | "ack" | "close" | "expire";
   topicHash: string;
   topic: string;
   incidentId: string | null;

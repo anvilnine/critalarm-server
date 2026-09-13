@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { authenticateDevice, credentialHash } from "./auth.js";
+import { setAlarmToken } from "./device-tokens.js";
 import { capsFor } from "./caps.js";
 import type { AccountContext, TierDependencies } from "./types.js";
 
@@ -36,6 +37,7 @@ function insertDeviceForAccount(deps: TierDependencies, input: z.infer<typeof re
   if (count.count >= capsFor(tier).devices) throw new CapError("devices");
   const token = deps.ids.deviceToken();
   deps.db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES (?, ?, ?, ?, ?, ?)").run(input.device_id, accountId, credentialHash(token), input.platform, input.push_token, deps.clock.now());
+  setAlarmToken(deps.db, deps.clock, input.device_id, input.platform, input.push_token);
   return token;
 }
 
@@ -45,6 +47,7 @@ export function registerDevice(deps: TierDependencies, input: z.infer<typeof reg
     const context = authenticateDevice(deps.db, bearer);
     if (context === null || context.deviceId !== input.device_id) throw new Error("unauthorized");
     deps.db.prepare("UPDATE devices SET platform = ?, push_token = ?, last_seen = ? WHERE id = ?").run(input.platform, input.push_token, deps.clock.now(), input.device_id);
+    setAlarmToken(deps.db, deps.clock, input.device_id, input.platform, input.push_token);
     const account = accountForContext(deps, context);
     if (account === null) throw new Error("unauthorized");
     return { deviceToken: "", accountId: account.account_id, tier: account.tier };
@@ -72,6 +75,8 @@ export function updateDevice(deps: TierDependencies, deviceIdValue: string, inpu
   if (context === null) return null;
   if (context.deviceId !== deviceIdValue) return null;
   deps.db.prepare("UPDATE devices SET push_token = ?, last_seen = ? WHERE id = ?").run(input.push_token, deps.clock.now(), deviceIdValue);
+  const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceIdValue) as { platform: "ios" | "android" } | undefined;
+  if (device !== undefined) setAlarmToken(deps.db, deps.clock, deviceIdValue, device.platform, input.push_token);
   return accountForContext(deps, context);
 }
 
