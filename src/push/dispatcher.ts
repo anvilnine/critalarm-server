@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { DeliveryEvent } from "../domain-events.js";
+import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
 import type { LiveActivityPush, LiveActivitySender, PushDevice, PushSender } from "./types.js";
 
@@ -36,18 +36,24 @@ export class PushDispatcher {
     private readonly clock: Clock = { now: () => Math.floor(Date.now() / 1000) },
   ) {}
 
-  async dispatch(events: readonly DeliveryEvent[]): Promise<void> {
+  async dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult> {
+    let delivered = 0;
     for (const event of events) {
       if (!silentKinds.has(event.kind)) {
-        await this.ringAlarm(event);
+        delivered += await this.ringAlarm(event);
       }
       await this.updateLiveActivities(event);
     }
+    return { delivered };
   }
 
-  private async ringAlarm(event: DeliveryEvent): Promise<void> {
+  // Returns how many alarm pushes the provider accepted. A refused push is not
+  // counted, so a run of 500s or 410s never shows up as delivery.
+  private async ringAlarm(event: DeliveryEvent): Promise<number> {
+    let delivered = 0;
     for (const device of this.subscribedDevices(event.topicHash, event.messageId)) {
       const result = await this.senderFor(device).send(device, event);
+      if (result.status >= 200 && result.status < 300 && !result.stale) delivered += 1;
       if (device.platform === "ios" && result.stale) {
         this.db
           .prepare("UPDATE devices SET push_token = '' WHERE id = ? AND push_token = ?")
@@ -57,6 +63,7 @@ export class PushDispatcher {
           .run(device.id, device.pushToken);
       }
     }
+    return delivered;
   }
 
   private async updateLiveActivities(event: DeliveryEvent): Promise<void> {

@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
-import type { DeliveryEvent } from "../domain-events.js";
+import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
 import type { IncidentService } from "../incident/service.js";
 import type { Clock, IdGenerator } from "../incident/types.js";
 
@@ -50,7 +50,7 @@ export interface IngressDependencies {
   incidents: IncidentService;
   clock: Clock;
   ids: IdGenerator;
-  dispatch(events: readonly DeliveryEvent[]): Promise<void>;
+  dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>;
   publishLimit?: number;
   behindProxy?: boolean;
 }

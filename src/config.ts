@@ -33,6 +33,7 @@ export interface Config {
   dataDir: string;
   behindProxy: boolean;
   allowNoopPush?: boolean;
+  statsKey?: string;
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -168,6 +169,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",
     behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
     allowNoopPush,
+    ...(env.STATS_KEY === undefined || env.STATS_KEY === "" ? {} : { statsKey: env.STATS_KEY }),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: file.revenuecat?.entitlements ?? {} } }),

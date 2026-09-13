@@ -123,6 +123,21 @@ const migrations = [
       SELECT id, CASE platform WHEN 'ios' THEN 'apns' ELSE 'fcm' END, '', NULL, push_token, last_seen
       FROM devices WHERE push_token <> '';
   `,
+  `
+    CREATE TABLE counters (
+      day TEXT NOT NULL,
+      relay_key TEXT NOT NULL,
+      metric TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (day, relay_key, metric)
+    );
+    CREATE INDEX counters_by_day ON counters(day);
+
+    CREATE TABLE counters_zeroed (
+      relay_key TEXT PRIMARY KEY,
+      zeroed_at INTEGER NOT NULL
+    );
+  `,
 ];
 
 export function migrate(db: Database.Database): void {

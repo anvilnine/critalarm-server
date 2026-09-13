@@ -3,8 +3,10 @@ import type Database from "better-sqlite3";
 import { relayKeyHash, newRelayKey } from "./client.js";
 import type { RelayPayload } from "./types.js";
 import type { DeliveryEvent } from "../incident/types.js";
+import type { DispatchResult } from "../domain-events.js";
+import type { Counters } from "../stats/counters.js";
 
-export function createRelayRouter(db: Database.Database, dispatch: (event: DeliveryEvent) => Promise<void>): Hono {
+export function createRelayRouter(db: Database.Database, dispatch: (event: DeliveryEvent) => Promise<DispatchResult | void>, counters: Counters): Hono {
   const router = new Hono();
   router.post("/relay/v1/servers", async (c) => {
     const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown } | null;
@@ -16,7 +18,8 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   router.post("/relay/v1/push", async (c) => {
     const auth = c.req.header("authorization") ?? "";
     const key = /^Bearer (rk_[A-Za-z0-9_-]+)$/.exec(auth)?.[1];
-    if (key === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(relayKeyHash(key)) === undefined) return c.json({ error: "unauthorized" }, 401);
+    const keyHash = key === undefined ? undefined : relayKeyHash(key);
+    if (keyHash === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) === undefined) return c.json({ error: "unauthorized" }, 401);
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
     if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     if (body.kind === "p4") {
@@ -30,7 +33,11 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
       if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     }
     const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
-    await dispatch(event);
+    const result = await dispatch(event);
+    // api.md §4.4. Counted here because this is the only place the pushing
+    // server's relay key is known.
+    counters.countEvents(keyHash, [event]);
+    counters.add(keyHash, "pushes_delivered", result?.delivered ?? 0);
     console.log(JSON.stringify({ route: "/relay/v1/push", topic_hash: body.topic_hash, kind: body.kind }));
     return c.body(null, 202);
   });
