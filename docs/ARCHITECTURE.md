@@ -55,6 +55,17 @@ In hosted mode the two boxes collapse: the hosted server has push credentials,
 so the incident engine calls the push sender directly and `FWD` and `RIN` are
 skipped.
 
+**The dashboard is the Flutter app, built for web.** When an account UI ships it
+is `flutter build web` out of `critalarm-app`, deployed at `app.critalarm.app`,
+calling the same `/v1/` routes with the same device token as the phone. A
+self-hosted server may also serve that build at `/ui`. That is optional and
+self-hosted only: a hosted deployment serves the dashboard from
+`app.critalarm.app`, not from the API host. Next.js is not used. The web build
+cannot register for push and cannot run the alarm, so the app gates those
+screens on a capability instead of a platform check. No web UI is being built in
+this pass. The decision is recorded here so nothing gets written against a
+second framework.
+
 ## 3. Roles of the one binary
 
 ```mermaid
