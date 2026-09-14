@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Status:** draft, 2026-09-15. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.5.0** is what a route by route audit of a running server turned up. Creating a topic that already exists answers `409` instead of crashing, and topic creation now returns a `token_id` so the token it hands you can be revoked (§3.1). `caps.critical_topics` says where it is counted and enforced (§4.2). The rest is documentation catching up with behaviour that was already correct: the relay `kind` enum gains `p5` (§4.1), `GET /v1/health` is written down (§3.6), §1.6 lists `click` and `markdown`, and §1.8, §2 and §3 name the error bodies, the rate limit and the `since` rules the server already applies.
 
 **1.4.0** closes the two gaps the wiring pass found, gives caps real per-tier numbers, and adds one route for the dashboard. Poll now accepts the management credential, so the app can read priority 1 to 3 history without holding a topic token (§2). Re-registering a device that kept its `device_id` but lost its `dv_` token no longer locks it out (§4.2). `caps` gains `history_incidents` and `history_days` (§4.2). `POST /v1/topics/{name}/send` lets a dashboard publish without ever holding a `tk_` (§3.5). The Android half of the identity storage rule is corrected: Keystore with auto-backup on does not work (§4.2).
 
@@ -101,11 +103,15 @@ Content-Type: application/json
   "message":  "db01 is down",
   "priority": 5,
   "tags":     ["warning"],
+  "click":    "https://...",      // present only when the publish set it
+  "markdown": true,               // present only when the publish set it
   "incident_id": "inc_9a8b7c"     // Crit Alarm extension. present only when an incident was opened or joined
 }
 ```
 
 Field set and order match ntfy's message object so ntfy client libraries parse it unchanged. `incident_id` is additive.
+
+**Ids are opaque.** Every id is a prefix and a UUID: `m_`, `inc_`, `tok_`, `acc_`, `top_`, and the credential prefixes `tk_`, `dv_`, `ad_`, `rk_`. The short ids in these examples are for readability. Do not size a column, a buffer, or a regex to them; treat an id as a string of unbounded length.
 
 ### 1.7 Behaviour by priority
 
@@ -123,9 +129,24 @@ ntfy's shape:
 ```
 {"code":40101,"http":401,"error":"unauthorized"}
 {"code":40001,"http":400,"error":"invalid topic name"}
+{"code":40901,"http":409,"error":"topic already exists"}
 {"code":41301,"http":413,"error":"message too large"}      // body > 4096 bytes
 {"code":42901,"http":429,"error":"rate limited"}
 ```
+
+Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute.
+
+Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code. The ones a client will meet:
+
+| Body | When |
+|---|---|
+| `{"error":"invalid priority"}` | priority outside 1-5 or an unknown name |
+| `{"error":"invalid request"}` | a malformed body or an unknown enum value in a query filter |
+| `{"error":"incident state conflict"}` | `409` from ack or close against the wrong state (§3.2) |
+| `{"error":"scheduled delivery not supported"}` | `X-Delay`, `At`, `In`, or JSON `delay` (§1.4) |
+| `{"error":"streaming not supported"}` | `501` from `/json` without `poll=1`, `/sse`, `/ws`, `/raw` (§2) |
+| `{"error":"not found"}` | `404`, including a row owned by another account |
+| `{"error":"cap","cap":"..."}` | `429` from a cap (§4.2) |
 
 ---
 
@@ -145,6 +166,18 @@ The app uses this for priority 1 to 3 history and for filling gaps after reconne
 **Two credentials reach this route.** A `tk_` publish token reaches the one topic it was issued for, which is what an alerting source holds. A management credential (§3, `ad_` in `selfhosted`, `dv_` in `relay` and `hosted`) reaches every topic its owner can already see through `GET /v1/topics`, and reaches nothing else. The app holds a management credential and never holds a `tk_`, because a topic token is shown once on creation and then goes out to a monitoring tool. Without this, the app cannot read its own low-priority history.
 
 Scoping is the same as §3. A management credential that does not own the topic answers `404`, never `403`, so it cannot be used to probe which topic names exist. An unknown or out of scope token answers `401`.
+
+**What `since` accepts, and where the boundary falls.**
+
+| Form | Example | Boundary |
+|---|---|---|
+| message id | `since=m_7f3k2p9q` | exclusive. That message is not returned. An id the server does not know answers `200` with an empty body. |
+| unix timestamp | `since=1757462400` | exclusive |
+| duration | `since=10m` | inclusive |
+| `all` | `since=all` | everything the server still holds |
+| omitted | | inclusive, last 12 hours |
+
+The split between exclusive and inclusive is deliberate: paging with the last id you saw must not hand you that message twice, while a duration is a window you asked to see all of.
 
 ---
 
@@ -177,26 +210,36 @@ GET    /v1/topics
 → 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":... }]
 
 POST   /v1/topics
-  { "name":"prod" }
-→ 201 { ...topic, "token":"tk_..." }        // token returned ONCE, on creation only
+  { "name":"prod", "critical":false }       // critical optional, defaults false
+→ 201 { ...topic, "token":"tk_...", "token_id":"tok_..." }   // token returned ONCE, on creation only
+→ 409 {"code":40901,"http":409,"error":"topic already exists"}
+→ 429 {"error":"cap","cap":"critical_topics"}                // only when critical is true
 
 PATCH  /v1/topics/{name}
   { "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600 }
 → 200 { ...topic }
+→ 429 {"error":"cap","cap":"critical_topics"}                // only when flipping critical on
 
 DELETE /v1/topics/{name}
 → 204
 
 POST   /v1/topics/{name}/tokens
-→ 201 { "token":"tk_..." }                  // additional token; returned once
+→ 201 { "token":"tk_...", "token_id":"tok_..." }   // additional token; token returned once
 
 DELETE /v1/topics/{name}/tokens/{token_id}
 → 204
+→ 409 {"error":"topic must retain a token"}        // refusing to delete the last one
 ```
 
 `critical` defaults to `false` on creation. This default is an Apple entitlement commitment; do not change it.
 
 `relay_content` is read-only here; it is server config.
+
+**Every token has a `token_id`, including the one creation hands back.** `DELETE /v1/topics/{name}/tokens/{token_id}` is keyed on it, so a token returned without one could never be revoked, and the creation token is the one that actually ships out to a monitoring tool. A topic always keeps at least one token; deleting the last one answers `409`.
+
+**Creating a topic that already exists answers `409`, not `500`.** Names are unique per account. A client that retries after a dropped `201` will hit this, so it must be a clean, JSON answer.
+
+**Out of range numbers on `PATCH` are ignored, not rejected.** A value outside what the server accepts leaves the stored value unchanged and still answers `200` with the current topic. Read the response rather than assuming the write landed.
 
 ### 3.2 Incidents
 
@@ -265,6 +308,15 @@ Same scoping as the rest of §3: a topic the credential does not own answers `40
 
 This route does not mint, return, or require a `tk_`. It never appears in a publish example for an alerting source, which must keep using §1 with its own topic token.
 
+### 3.6 Health
+
+```
+GET /v1/health                               // no auth
+→ 200 { "ok": true }
+```
+
+For a load balancer, a container health check, or an uptime probe. It touches no database row and says nothing about the server beyond the process being up. Use `GET /v1/info` (§3.4) for anything a client needs to make a decision about.
+
 ---
 
 ## 4. Relay API
@@ -282,7 +334,7 @@ Authorization: Bearer rk_...                 // relay key. issued anonymously on
   "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
   "message_id": "m_7f3k2p9q",
   "priority": 5,
-  "kind": "open" | "repeat" | "reopen" | "p4",
+  "kind": "open" | "repeat" | "reopen" | "p4" | "p5",   // p5: priority 5 on a topic whose switch is off
   "title": "...",                            // only when relay_content: full
   "body": "..."                              // only when relay_content: full
 }
@@ -349,6 +401,18 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 **Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. There is no sign-up screen and no email on any tier. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count. Adding sign-in later means filling in one column on the account row, with no migration of topics or tokens.
 
 **Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
+
+**`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in three places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
+
+| Where | When |
+|---|---|
+| `POST /v1/topics` (§3.1) | the new topic is created with `critical: true` |
+| `PATCH /v1/topics/{name}` (§3.1) | the patch flips `critical` from `false` to `true` |
+| `POST /relay/v1/devices/{id}/subscriptions` (§4.2) | the new subscription would be the account's `n+1`th distinct topic |
+
+Turning a topic's switch off frees a slot at once. Deleting a critical topic frees one too.
+
+The app shows this as "N of M topics used", where N is the count of the account's topics with the switch on and M is `caps.critical_topics`. Both numbers come from data the app already holds, so it never hardcodes either.
 
 **The numbers.**
 
