@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../../index.js"; import { openDatabase } from "../../store/database.js"; import { migrate } from "../../store/migrations.js";
-function setup(){const db=openDatabase(":memory:");migrate(db);for(const id of ["a","b"])db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES (?, 'free',1)").run(id);for(const [id,a,t] of [["da","a","dv_a"],["db","b","dv_b"]])db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES (?, ?, ?, 'ios','x',1)").run(id,a,createHash("sha256").update(t).digest("hex"));const ids={message:()=>"m_1",incident:()=>"inc_1",timer:()=>"tm_1"};return { app:createApp({config:{baseUrl:"https://alerts.example.com",relayUrl:"https://relay.critalarm.app",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false},db,clock:{now:()=>1000},ids,dispatch:async()=>{}}),db}}
+import type { Config } from "../../config.js";
+import { ensureSelfHostedIdentity } from "../../admin/credentials.js";
+const databases: ReturnType<typeof openDatabase>[] = [];
+afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+function setup(mode?: Config["mode"]){const db=openDatabase(":memory:");databases.push(db);migrate(db);for(const id of ["a","b"])db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES (?, 'free',1)").run(id);for(const [id,a,t] of [["da","a","dv_a"],["db","b","dv_b"]])db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES (?, ?, ?, 'ios','x',1)").run(id,a,createHash("sha256").update(t).digest("hex"));const ids={message:()=>"m_1",incident:()=>"inc_1",timer:()=>"tm_1"};return { app:createApp({config:{mode,baseUrl:"https://alerts.example.com",relayUrl:"https://relay.critalarm.app",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false},db,clock:{now:()=>1000},ids,dispatch:async()=>{}}),db}}
 describe("V1 topics",()=>{it("creates a private noncritical topic and only returns its token once",async()=>{const {app}=setup();const h={Authorization:"Bearer dv_a","content-type":"application/json"};const made=await app.request("/v1/topics",{method:"POST",headers:h,body:'{"name":"prod"}'});expect(made.status).toBe(201);expect(await made.json()).toMatchObject({name:"prod",critical:false,repeat_interval_s:30,max_ring_s:1800,desk_timer_s:600,relay_content:"none",token:expect.stringMatching(/^tk_/)});expect((await app.request("/v1/topics",{headers:h})).status).toBe(200);expect((await app.request("/v1/topics/prod",{method:"PATCH",headers:{Authorization:"Bearer dv_b","content-type":"application/json"},body:"{}"})).status).toBe(404)});});
 
 describe("topic mutations", () => {
@@ -22,10 +26,139 @@ describe("topic mutations", () => {
 
 describe("topic token invariant", () => {
   it("refuses to delete a topic's final publishing token", async () => {
-    const {app,db} = setup(); const headers = { Authorization: "Bearer dv_a", "content-type": "application/json" };
-    await app.request("/v1/topics", { method:"POST",headers,body:'{"name":"prod"}' });
-    const { id: token_id } = db.prepare("SELECT id FROM topic_tokens").get() as {id:string};
+    const {app} = setup(); const headers = { Authorization: "Bearer dv_a", "content-type": "application/json" };
+    const made = await app.request("/v1/topics", { method:"POST",headers,body:'{"name":"prod"}' });
+    const { token_id } = await made.json() as {token_id:string};
     const response = await app.request(`/v1/topics/prod/tokens/${token_id}`, { method:"DELETE",headers });
     expect(response.status).toBe(409); expect(await response.json()).toEqual({ error:"topic must retain a token" });
+  });
+});
+
+const headers = { Authorization: "Bearer dv_a", "content-type": "application/json" };
+function request(app: ReturnType<typeof createApp>, method: string, path: string, body?: Record<string, unknown>, auth = headers) {
+  return app.request(path, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+}
+function create(app: ReturnType<typeof createApp>, name: string, critical?: boolean) {
+  return request(app, "POST", "/v1/topics", { name, ...(critical === undefined ? {} : { critical }) });
+}
+async function fillCap(app: ReturnType<typeof createApp>) {
+  for (const name of ["one", "two"]) {
+    const response = await create(app, name, true);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ critical: true });
+  }
+}
+async function expectCap(response: Response) {
+  expect(response.status).toBe(429);
+  expect(await response.json()).toEqual({ error: "cap", cap: "critical_topics" });
+}
+
+describe("contract 1.5.0 topics", () => {
+  it("returns the numeric duplicate error without creating another token", async () => {
+    const { app, db } = setup();
+    expect((await create(app, "prod")).status).toBe(201);
+    const duplicate = await create(app, "prod");
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.headers.get("content-type")).toContain("application/json");
+    expect(await duplicate.json()).toEqual({ code: 40901, http: 409, error: "topic already exists" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topic_tokens").get()).toEqual({ count: 1 });
+  });
+
+  it("allows the same name in two accounts", async () => {
+    const { app } = setup();
+    expect((await create(app, "prod")).status).toBe(201);
+    expect((await request(app, "POST", "/v1/topics", { name: "prod" }, { ...headers, Authorization: "Bearer dv_b" })).status).toBe(201);
+  });
+
+  it("returns the creation token id and revokes that token", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const original = await made.json() as { token: string; token_id: string };
+    expect(original.token_id).toMatch(/^tok_/);
+    const poll = () => app.request("/prod/json?poll=1", { headers: { Authorization: `Bearer ${original.token}` } });
+    expect((await poll()).status).toBe(200);
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens");
+    const remaining = await extra.json() as { token_id: string };
+    expect((await request(app, "DELETE", `/v1/topics/prod/tokens/${original.token_id}`)).status).toBe(204);
+    expect((await poll()).status).toBe(401);
+    const last = await request(app, "DELETE", `/v1/topics/prod/tokens/${remaining.token_id}`);
+    expect(last.status).toBe(409);
+    expect(await last.json()).toEqual({ error: "topic must retain a token" });
+  });
+
+  it.each(["relay", "hosted"] as const)("caps critical creation in %s mode and still allows noncritical topics", async mode => {
+    const { app, db } = setup(mode);
+    await fillCap(app);
+    await expectCap(await create(app, "three", true));
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topics").get()).toEqual({ count: 2 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM topic_tokens").get()).toEqual({ count: 2 });
+    const normal = await create(app, "normal");
+    expect(normal.status).toBe(201);
+    expect(await normal.json()).toMatchObject({ critical: false });
+    expect((await create(app, "off", false)).status).toBe(201);
+    expect((await request(app, "POST", "/v1/topics", { name: "three", critical: true }, { ...headers, Authorization: "Bearer dv_b" })).status).toBe(201);
+  });
+
+  it("rejects a PATCH flipping critical on at the cap without changing settings", async () => {
+    const { app } = setup();
+    await fillCap(app);
+    await create(app, "normal");
+    await expectCap(await request(app, "PATCH", "/v1/topics/normal", { critical: true, repeat_interval_s: 45 }));
+    const topics = await request(app, "GET", "/v1/topics");
+    expect(await topics.json()).toContainEqual(expect.objectContaining({ name: "normal", critical: false, repeat_interval_s: 30 }));
+  });
+
+  it("allows a PATCH flipping critical on under the cap", async () => {
+    const { app } = setup();
+    await create(app, "one", true);
+    await create(app, "normal");
+    const response = await request(app, "PATCH", "/v1/topics/normal", { critical: true });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ critical: true });
+  });
+
+  it("allows PATCH when critical is already true at the cap", async () => {
+    const { app } = setup();
+    await fillCap(app);
+    const response = await request(app, "PATCH", "/v1/topics/one", { critical: true, repeat_interval_s: 45 });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ critical: true, repeat_interval_s: 45 });
+    expect((await request(app, "PATCH", "/v1/topics/one", { desk_timer_s: 90 })).status).toBe(200);
+  });
+
+  it.each(["disable", "delete"])("%s frees a critical slot immediately", async action => {
+    const { app } = setup();
+    await fillCap(app);
+    if (action === "disable") {
+      const response = await request(app, "PATCH", "/v1/topics/one", { critical: false });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ critical: false });
+    } else {
+      expect((await request(app, "DELETE", "/v1/topics/one")).status).toBe(204);
+    }
+    expect((await create(app, "three", true)).status).toBe(201);
+  });
+
+  it.each(["relay", "hosted"])("treats the %s tier's null cap as unlimited for create and PATCH", async tier => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET tier=? WHERE id='a'").run(tier);
+    for (let i = 0; i < 10; i++) expect((await create(app, `topic-${i}`, true)).status).toBe(201);
+    await create(app, "normal");
+    expect((await request(app, "PATCH", "/v1/topics/normal", { critical: true })).status).toBe(200);
+  });
+
+  it("bypasses tier caps in selfhosted mode and keeps the default off", async () => {
+    const { app, db } = setup("selfhosted");
+    const { token } = ensureSelfHostedIdentity(db);
+    // A finite synthetic tier proves the bypass is based on mode.
+    db.prepare("UPDATE accounts SET tier='free' WHERE id='acc_selfhosted'").run();
+    const auth = { ...headers, Authorization: `Bearer ${token}` };
+    for (let i = 0; i < 5; i++) expect((await request(app, "POST", "/v1/topics", { name: `topic-${i}`, critical: true }, auth)).status).toBe(201);
+    const normal = await request(app, "POST", "/v1/topics", { name: "normal" }, auth);
+    expect(normal.status).toBe(201);
+    expect(await normal.json()).toMatchObject({ critical: false });
+    const patched = await request(app, "PATCH", "/v1/topics/normal", { critical: true }, auth);
+    expect(patched.status).toBe(200);
+    expect(await patched.json()).toMatchObject({ critical: true });
   });
 });
