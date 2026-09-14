@@ -3,6 +3,52 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.5.0 - 2026-09-15
+
+What a route by route audit of a running dev server turned up. Two behaviour
+changes, one product decision written down, and a batch of documentation
+catching up with behaviour that was already right.
+
+Behaviour changes, both in §3.1:
+
+- `POST /v1/topics` with a name the account already owns now answers
+  `409 {"code":40901,"http":409,"error":"topic already exists"}`. It used to let
+  the unique-constraint error escape as a `500` with a `text/plain` body. A
+  client retrying after a dropped `201` is the ordinary way to hit this.
+- `POST /v1/topics` returns `token_id` next to `token`, and
+  `POST /v1/topics/{name}/tokens` documents the `token_id` it already returned.
+  `DELETE /v1/topics/{name}/tokens/{token_id}` is keyed on that id, so a token
+  handed out without one could never be revoked, and the creation token is the
+  one that actually ships to a monitoring tool. This also makes the
+  "topic must retain a token" `409` reachable; it was dead code.
+
+Product decision, §4.2:
+
+- `caps.critical_topics` counts topics with the critical switch on, not
+  subscriptions and not topics in total. It is enforced when a topic is created
+  critical, when a `PATCH` flips the switch on, and on the account's `n+1`th
+  distinct subscription. Turning a switch off or deleting a critical topic frees
+  a slot at once. Previously only the subscription path enforced it, so an
+  account could own any number of critical topics.
+
+Documentation catching up, no behaviour change:
+
+- §4.1: the relay push `kind` enum gains `p5`, which the server already emits
+  for a priority-5 message on a topic whose switch is off. §4.4 already named it.
+- §3.6: `GET /v1/health` is written down. It was live and undocumented.
+- §1.6: the message object lists `click` and `markdown`, both of which the
+  server already echoes when the publish sets them.
+- §1.6: ids are a prefix plus a UUID. The short ids in the examples are for
+  readability; a client must not size a column or a regex to them.
+- §1.8: adds the `40901` code, states the publish rate limit as 30 requests per
+  60 seconds per IP, and tables the plain `{"error":"..."}` bodies that carry no
+  numeric code.
+- §2: tables what `since` accepts and where each boundary falls. A message id
+  and a unix timestamp are exclusive; a duration and the default 12 hour window
+  are inclusive. An unknown message id answers `200` with an empty body.
+- §3.1: out of range numbers on `PATCH` are ignored, leaving the stored value
+  unchanged, and still answer `200`.
+
 ## 1.4.0 - 2026-09-15
 
 Closes the two gaps the app wiring pass found, puts real numbers on the caps,
