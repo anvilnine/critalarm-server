@@ -51,6 +51,7 @@ export interface IngressDependencies {
   clock: Clock;
   ids: IdGenerator;
   dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>;
+  mode?: "selfhosted" | "relay" | "hosted";
   publishLimit?: number;
   behindProxy?: boolean;
 }

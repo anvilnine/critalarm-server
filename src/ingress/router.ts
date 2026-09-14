@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { makeRateLimiter } from "../rate-limit.js";
+import { authenticateManagement } from "../v1/auth.js";
+import { ownedTopic } from "../v1/topics.js";
 import { authenticateTopic } from "./auth.js";
 import { ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
 import { PublishService } from "./service.js";
@@ -97,7 +99,11 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
   router.get("/:topic/json", (c) => {
     const name = c.req.param("topic");
     if (!validTopic.test(name)) return c.json(numericError(40001, 400, "invalid topic name"), 400);
-    const topic = authenticateTopic(deps.db, c.req.raw, name);
+    const account = authenticateManagement(deps.db, c.req.header("authorization"), deps.mode ?? "hosted");
+    const topic = account === null
+      ? authenticateTopic(deps.db, c.req.raw, name)
+      : ownedTopic(deps.db, account.accountId, name);
+    if (topic === undefined) return c.json({ error: "not found" }, 404);
     if (topic === null) return c.json(numericError(40101, 401, "unauthorized"), 401);
     if (c.req.query("poll") !== "1") return c.json({ error: "streaming not supported" }, 501);
 

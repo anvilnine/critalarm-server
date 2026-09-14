@@ -1,3 +1,5 @@
+import { capsFor } from "../tier/caps.js";
+import type { Tier } from "../tier/types.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { relayKeyHash, newRelayKey } from "./client.js";
@@ -23,12 +25,12 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
     if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     if (body.kind === "p4") {
-      const accounts = db.prepare("SELECT DISTINCT account_id FROM subscriptions WHERE topic_hash = ?").all(body.topic_hash) as { account_id: string }[];
+      const accounts = db.prepare("SELECT DISTINCT s.account_id, a.tier FROM subscriptions s JOIN accounts a ON a.id = s.account_id WHERE s.topic_hash = ?").all(body.topic_hash) as { account_id: string; tier: Tier }[];
       const day = Math.floor(Date.now() / 1000 / 86400) * 86400;
       let eligible = 0;
       for (const account of accounts) {
         const row = db.prepare("SELECT count FROM relay_p4_usage WHERE account_id = ? AND day_start = ?").get(account.account_id, day) as { count: number } | undefined;
-        if ((row?.count ?? 0) < 50) { eligible += 1; db.prepare("INSERT INTO relay_p4_usage(account_id,day_start,count) VALUES(?,?,1) ON CONFLICT(account_id,day_start) DO UPDATE SET count=count+1").run(account.account_id, day); }
+        if ((row?.count ?? 0) < capsFor(account.tier).p4_daily) { eligible += 1; db.prepare("INSERT INTO relay_p4_usage(account_id,day_start,count) VALUES(?,?,1) ON CONFLICT(account_id,day_start) DO UPDATE SET count=count+1").run(account.account_id, day); }
       }
       if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     }

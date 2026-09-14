@@ -29,7 +29,7 @@ export function createTierRouter(deps: TierDependencies): Hono {
       if (bearer !== undefined && context === null) return c.json({ error: "unauthorized" }, 401);
       const registration = registerDevice(deps, input, bearer, context ?? undefined);
       const response = { account_id: registration.accountId, tier: registration.tier, caps: capsFor(registration.tier) };
-      return c.json(registration.deviceToken === "" ? response : { device_token: registration.deviceToken, ...response }, registration.deviceToken === "" ? 200 : 201);
+      return c.json(registration.deviceToken === undefined ? response : { device_token: registration.deviceToken, ...response }, registration.deviceToken === undefined ? 200 : 201);
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
       if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
