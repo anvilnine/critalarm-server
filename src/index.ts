@@ -45,5 +45,5 @@ export function createApp(deps: AppDependencies): Hono {
     app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
-  app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+  app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
 }

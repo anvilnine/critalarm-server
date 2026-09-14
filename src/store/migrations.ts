@@ -138,6 +138,7 @@ const migrations = [
       zeroed_at INTEGER NOT NULL
     );
   `,
+  `ALTER TABLE devices ADD COLUMN app_version TEXT;`,
 ];
 
 export function migrate(db: Database.Database): void {
