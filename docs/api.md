@@ -1,7 +1,9 @@
-# Crit Alarm Server — API Contract
+# Crit Alarm Server: API Contract
 
-**Version:** 1.3.0
-**Status:** draft, 2026-09-13. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.4.0
+**Status:** draft, 2026-09-15. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.4.0** closes the two gaps the wiring pass found, gives caps real per-tier numbers, and adds one route for the dashboard. Poll now accepts the management credential, so the app can read priority 1 to 3 history without holding a topic token (§2). Re-registering a device that kept its `device_id` but lost its `dv_` token no longer locks it out (§4.2). `caps` gains `history_incidents` and `history_days` (§4.2). `POST /v1/topics/{name}/send` lets a dashboard publish without ever holding a `tk_` (§3.5). The Android half of the identity storage rule is corrected: Keystore with auto-backup on does not work (§4.2).
 
 **1.3.0** adds `GET /relay/v1/internal/stats`, an internal counter read for the relay operator. Nothing public changed. §4.4 defines it.
 
@@ -50,9 +52,9 @@ Header names are case-insensitive. Each has ntfy's aliases.
 | Header | Aliases | Type | Default | Used for |
 |---|---|---|---|---|
 | `X-Title` | `Title`, `ti`, `t` | string | topic name | notification title |
-| `X-Priority` | `Priority`, `prio`, `p` | `1`–`5` or `min`,`low`,`default`,`high`,`urgent`,`max` | `3` | delivery class; `5` opens an incident on a critical topic |
-| `X-Tags` | `Tags`, `tag`, `ta` | comma list | — | stored, shown in app; emoji shortcodes rendered like ntfy |
-| `X-Click` | `Click` | URL | — | opened on tap |
+| `X-Priority` | `Priority`, `prio`, `p` | `1`-`5` or `min`,`low`,`default`,`high`,`urgent`,`max` | `3` | delivery class; `5` opens an incident on a critical topic |
+| `X-Tags` | `Tags`, `tag`, `ta` | comma list | - | stored, shown in app; emoji shortcodes rendered like ntfy |
+| `X-Click` | `Click` | URL | - | opened on tap |
 | `X-Markdown` | `Markdown`, `md` | `true`/`1`/`yes` | off | body rendered as markdown in app |
 
 Priority name → number: `min`=1, `low`=2, `default`=3, `high`=4, `urgent`=5, `max`=5.
@@ -111,8 +113,8 @@ Field set and order match ntfy's message object so ntfy client libraries parse i
 |---|---|---|
 | 5 | on | Incident opened (or joined if one is open). Repeat loop starts. `incident_id` returned. |
 | 5 | off | Stored. Forwarded as Time-Sensitive / high. No incident. |
-| 4 | — | Stored. Forwarded as Time-Sensitive / high. |
-| 1–3 | — | Stored. App polls. Not forwarded to relay. |
+| 4 | - | Stored. Forwarded as Time-Sensitive / high. |
+| 1-3 | - | Stored. App polls. Not forwarded to relay. |
 
 ### 1.8 Errors
 
@@ -131,12 +133,18 @@ ntfy's shape:
 
 ```
 GET /{topic}/json?poll=1[&since=<message id | unix ts | duration like 10m | all>]
-Authorization: Bearer tk_...
+Authorization: Bearer tk_...     # a publish token for this topic
+Authorization: Bearer ad_...     # or the management credential, selfhosted
+Authorization: Bearer dv_...     # or the management credential, relay and hosted
 ```
 
 Returns newline-delimited JSON, one message object per line (shape as §1.6), oldest first. `since` omitted = last 12 hours. `poll=1` is required; streaming (`/json` without `poll`, `/sse`, `/ws`, `/raw`) is **not supported in v1** and returns `501`.
 
-The app uses this for priority 1–3 history and for filling gaps after reconnect.
+The app uses this for priority 1 to 3 history and for filling gaps after reconnect.
+
+**Two credentials reach this route.** A `tk_` publish token reaches the one topic it was issued for, which is what an alerting source holds. A management credential (§3, `ad_` in `selfhosted`, `dv_` in `relay` and `hosted`) reaches every topic its owner can already see through `GET /v1/topics`, and reaches nothing else. The app holds a management credential and never holds a `tk_`, because a topic token is shown once on creation and then goes out to a monitoring tool. Without this, the app cannot read its own low-priority history.
+
+Scoping is the same as §3. A management credential that does not own the topic answers `404`, never `403`, so it cannot be used to probe which topic names exist. An unknown or out of scope token answers `401`.
 
 ---
 
@@ -239,6 +247,24 @@ GET /v1/info                                 // no auth
 
 The app calls this first when a server URL is added, to validate the URL and read `base_url` for hash derivation.
 
+### 3.5 Send to a topic
+
+```
+POST /v1/topics/{name}/send
+  { "title":"Backup failed", "message":"nas-backup exited 1", "priority":5, "tags":["warning","skull"] }
+→ 200 { "id":"m_7f3k2p9q", "incident_id":"inc_9a8b7c" }    // incident_id null unless an incident opened
+```
+
+Publishes to the topic through the same path as §1, so every §1.7 priority rule applies unchanged. A priority-5 post to a topic with `critical: true` opens or joins an incident and returns its id, exactly as `POST /{topic}` does.
+
+`title`, `priority` and `tags` are optional. `message` is required. `priority` defaults to `3`. Values and meanings are §1.3's.
+
+**Why this exists.** A topic token is shown once, on creation, and then goes out to a monitoring tool. The dashboard and the app never hold one, so without this route they cannot send to a topic they own. This route takes the management credential instead, which the app already has.
+
+Same scoping as the rest of §3: a topic the credential does not own answers `404`. A topic name that exists but is out of scope is indistinguishable from one that does not exist.
+
+This route does not mint, return, or require a `tk_`. It never appears in a publish example for an alerting source, which must keep using §1 with its own topic token.
+
 ---
 
 ## 4. Relay API
@@ -278,7 +304,8 @@ POST /relay/v1/devices                                  // registration. no auth
 → 201 { "device_token":"dv_...",                        // returned ONCE, on first registration only
         "account_id":"acc_...",
         "tier":"free"|"relay"|"hosted",
-        "caps":{ "devices":1, "critical_topics":1, "p4_daily":50 } }
+        "caps":{ "devices":1, "critical_topics":2, "p4_daily":50,
+                 "history_incidents":20, "history_days":7 } }
 
 PATCH  /relay/v1/devices/{device_id}                     // re-register: new push token, new app version
   Authorization: Bearer dv_...
@@ -323,9 +350,47 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 
 **Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
-**`device_id` must survive a reinstall.** The app generates it once and stores it where deleting the app does not: iOS Keychain with `kSecAttrAccessibleAfterFirstUnlock` and iCloud Keychain sync on, Android Keystore-backed storage with auto-backup on. A `device_id` kept in `UserDefaults` or `SharedPreferences` is lost on reinstall, which orphans the account, silently breaks every webhook the user configured, and detaches a live subscription from its purchase. Store `device_token` beside it.
+**The numbers.**
 
-Re-registering a known `device_id` without a valid `dv_` token returns `401`. It does not mint a second token. Recovery from a lost token is a support path, not an API call, in v1.
+| Cap | `free` | `relay` | `hosted` |
+|---|---|---|---|
+| `devices` | 1 | 5 | 5 |
+| `critical_topics` | 2 | `null` | `null` |
+| `p4_daily` | 50 | 1000 | 1000 |
+| `history_incidents` | 20 | `null` | `null` |
+| `history_days` | 7 | 90 | 90 |
+
+`null` means no limit. A client that does not understand `null` must treat it as no limit, never as zero.
+
+These are launch guesses, set by gut and adjusted from relay metrics after 30 days. One rule is not a guess and never changes: **no tier caps the alarm.** There is no cap on incidents opened, on repeats, or on how long a critical alarm rings. Plans cap the things a team needs, not the thing one person came for.
+
+**`history_incidents` and `history_days` are display caps, enforced by the app.** The relay returns them; the app trims the list it shows. A self-hosted server keeps whatever it keeps, is never sent a tier, and never deletes anything because of a cap. The relay is the only place a plan exists, and the app mirrors it for the UI.
+
+**Ring until acked has no cap field.** The app offers the "no limit" option when `tier != "free"` and disables it otherwise. The ring ceiling itself is the server's `max_ring_s` config, which the account holder owns.
+
+**`device_id` must survive a reinstall.** The app generates it once and stores it where deleting the app does not. Losing it orphans the account, silently breaks every webhook the user configured, and detaches a live subscription from its purchase.
+
+| Platform | Where | Survives |
+|---|---|---|
+| iOS | Keychain, `kSecAttrAccessibleAfterFirstUnlock`, iCloud Keychain sync on | reinstall, and moving to a new iPhone |
+| Android | `SharedPreferences` with `android:allowBackup="true"` | reinstall, when the user has Android backup on |
+
+**Store `device_token` in the same place, with the same lifetime.** This is the rule that matters, and it is easy to get wrong in a way that bricks a phone. If the `device_id` outlives the `dv_` token, the app re-registers an id the server already knows, cannot present the token the server demands, and is locked out for good. Whatever holds one must hold the other, so that they are both there or both gone.
+
+Android does not use Keystore-backed storage here, which is a change from 1.3.0 and deliberate. Keystore keys are destroyed on uninstall while Android's auto-backup restores the encrypted blob, so the restored bytes have no key left to decrypt them and the read throws. Encrypting the token at rest is not worth trading for a credential that cannot be read back. App-private storage is not readable on an unrooted device, and the token is scoped to one account's alerts.
+
+**Registering a `device_id` the server already knows.**
+
+| Request | Result |
+|---|---|
+| valid `dv_` for that device | `200`, push token and `app_version` updated, `account_id`, `tier` and `caps` returned. No `device_token` field, because the caller already holds it. |
+| no token, wrong token, or another device's token | `401`. No second token is minted. |
+
+The `200` case is the same work as `PATCH /relay/v1/devices/{device_id}`, and an app that already holds a token should send the `PATCH`. `POST` accepts it so that a retry after a dropped response does the right thing instead of failing.
+
+A client must never read `device_token` as an empty string and store it. The field is absent on this path, not blank.
+
+Recovery from a genuinely lost token is a support path, not an API call, in v1. The storage rule above is what keeps that path close to unused.
 
 ### 4.3 RevenueCat → relay
 
