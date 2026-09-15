@@ -15,7 +15,25 @@ export class PublishService {
       ? this.publishCritical(topic, input, title)
       : this.publishStandard(topic, input, title);
     if (result.events.length > 0) {
-      await this.deps.dispatch(result.events);
+      // The 500 is on purpose: this is an alarm product, and a caller that is
+      // told "accepted" when nobody was paged has been lied to. The message
+      // and the incident are already stored, so nothing is lost by failing
+      // the response. See the test "keeps a stored message when delivery
+      // dispatch rejects".
+      //
+      // What was missing is any way to find out why. A bad FCM_PRIVATE_KEY on
+      // the dev server turned every publish into a bare "Internal Server
+      // Error" with nothing in the container log to explain it.
+      try {
+        await this.deps.dispatch(result.events);
+      } catch (error) {
+        console.error("dispatch_failed", {
+          topic: topic.name,
+          messageId: result.response.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
     }
     return result.response;
   }

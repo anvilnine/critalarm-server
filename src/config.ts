@@ -107,11 +107,22 @@ function portValue(value: string): number {
   return port;
 }
 
+// A service account JSON stores the key with literal two-character \n
+// sequences, and pasting that value straight into an env var is what everyone
+// does. Node's createPrivateKey wants real newlines and answers
+// "DECODER routines::unsupported" when it does not get them. Firebase's own
+// SDK unescapes this, so do the same. A value that already has real newlines
+// is left alone.
+function pemNewlines(value: string | undefined): string | undefined {
+  if (value === undefined || value.includes("\n")) return value;
+  return value.replace(/\\n/g, "\n");
+}
+
 function apnsConfig(env: NodeJS.ProcessEnv, file: FileConfig): ApnsConfig | undefined {
   const values = {
     teamId: stringValue(env, "APNS_TEAM_ID", file.apns?.["team-id"]),
     keyId: stringValue(env, "APNS_KEY_ID", file.apns?.["key-id"]),
-    privateKey: stringValue(env, "APNS_PRIVATE_KEY", file.apns?.["private-key"]),
+    privateKey: pemNewlines(stringValue(env, "APNS_PRIVATE_KEY", file.apns?.["private-key"])),
     bundleId: stringValue(env, "APNS_BUNDLE_ID", file.apns?.["bundle-id"]),
     environment: stringValue(env, "APNS_ENVIRONMENT", file.apns?.environment) ?? "production",
   };
@@ -127,7 +138,7 @@ function fcmConfig(env: NodeJS.ProcessEnv, file: FileConfig): FcmConfig | undefi
   const values = {
     projectId: stringValue(env, "FCM_PROJECT_ID", file.fcm?.["project-id"]),
     clientEmail: stringValue(env, "FCM_CLIENT_EMAIL", file.fcm?.["client-email"]),
-    privateKey: stringValue(env, "FCM_PRIVATE_KEY", file.fcm?.["private-key"]),
+    privateKey: pemNewlines(stringValue(env, "FCM_PRIVATE_KEY", file.fcm?.["private-key"])),
     tokenUrl: stringValue(env, "FCM_TOKEN_URL", file.fcm?.["token-url"]) ?? "https://oauth2.googleapis.com/token",
   };
   if (values.projectId === undefined && values.clientEmail === undefined && values.privateKey === undefined) return undefined;
