@@ -285,6 +285,13 @@ or `full`; environment override is `RELAY_CONTENT`.
 The startup log prints all five, so a reverse-proxy mistake is visible in the
 first line instead of in a 401 an hour later.
 
+`LOG_REQUESTS=true` adds one line per request: method, path, status, duration.
+Off by default. It carries no tokens, no message bodies and no push tokens, so
+it is safe to turn on against a real deployment while chasing something. Push
+failures log themselves either way, under `dispatch_failed`, because a publish
+that answers 500 because a push provider is misconfigured used to give an
+operator nothing at all to go on.
+
 ## 10. Trust and abuse
 
 - No public topics. Every topic has a token from creation.
