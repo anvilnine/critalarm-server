@@ -3,6 +3,35 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.6.0 - 2026-09-16
+
+Apple Critical Alerts is gone. Apple turned the entitlement down, and APNs
+rejects a critical payload from an app that does not hold it, so every iOS
+alert the server sent was failing.
+
+Behaviour change, in §5.1:
+
+- The APNs alert payload now sends `"sound": "alarm.caf"` and
+  `"interruption-level": "time-sensitive"`. It used to send
+  `"sound": { "critical": 1, "name": "alarm.caf", "volume": 1.0 }` and
+  `"interruption-level": "critical"`. There is no flag. If Apple ever approves
+  the entitlement, putting it back is its own change.
+- When the sound is attached did not change: a priority-5 message on a topic
+  with the `critical` switch on, opening or joining an incident. Only the shape
+  of the value changed, from a critical sound object to a plain string.
+
+Wording, in §3.1:
+
+- The `critical` default of `false` was explained as an Apple entitlement
+  commitment. That reason no longer holds. The default is unchanged, and it is
+  now explained for what it is: a topic that rings has to be switched on
+  deliberately.
+
+Nothing else moved. The priority ladder, the per-topic `critical` switch,
+incidents, and `caps.critical_topics` behave exactly as they did in 1.5.0. The
+switch still decides whether a priority-5 message opens an incident and whether
+Android rings through with a full-screen intent.
+
 ## 1.5.0 - 2026-09-15
 
 What a route by route audit of a running dev server turned up. Two behaviour
