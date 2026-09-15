@@ -81,12 +81,17 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
   const full = event.relayContent === "full";
   const aps: Record<string, unknown> = {
     alert: full ? { title: event.title, body: event.body } : { title: "Crit Alarm", body: `Critical alert on ${event.topic} — open to see details` },
-    "interruption-level": isCritical ? "critical" : "time-sensitive",
+    "interruption-level": "time-sensitive",
     ...(full ? {} : { "mutable-content": 1 }),
     category: "INCIDENT",
   };
+  // Apple denied the Critical Alerts entitlement, so this payload never asks
+  // for one. APNs rejects a critical sound or a critical interruption level
+  // from an app without the entitlement, which fails the whole send. A topic
+  // with critical on still gets the alarm sound, played at the ringer volume
+  // and silenced by the silent switch like any other notification sound.
   if (isCritical) {
-    aps.sound = { critical: 1, name: "alarm.caf", volume: 1.0 };
+    aps.sound = "alarm.caf";
   }
   return {
     aps,

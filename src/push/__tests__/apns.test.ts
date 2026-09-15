@@ -73,8 +73,8 @@ describe("ApnsSender", () => {
     await expect(request.json()).resolves.toEqual({
       aps: {
         alert: { title: "Crit Alarm", body: "Critical alert on prod — open to see details" },
-        sound: { critical: 1, name: "alarm.caf", volume: 1 },
-        "interruption-level": "critical",
+        sound: "alarm.caf",
+        "interruption-level": "time-sensitive",
         "mutable-content": 1,
         category: "INCIDENT",
       },
@@ -82,6 +82,35 @@ describe("ApnsSender", () => {
       server: "https://alerts.example.com",
       kind: "open",
     });
+  });
+
+  // Apple denied the Critical Alerts entitlement. A payload that asks for one
+  // is rejected, so no send may carry a critical sound or interruption level.
+  it("never asks for a critical alert on a critical topic", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      fetch: async (request) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return new Response(null, { status: 200 });
+      },
+    });
+
+    await sender.send(device, event());
+    await sender.send(device, event({ relayContent: "full" }));
+
+    for (const body of bodies) {
+      const aps = body.aps as Record<string, unknown>;
+      expect(aps["interruption-level"]).toBe("time-sensitive");
+      expect(aps.sound).toBe("alarm.caf");
+      expect(typeof aps.sound).toBe("string");
+      expect(JSON.stringify(aps.sound)).not.toContain("critical");
+    }
   });
 
   it("uses a time-sensitive payload without critical sound for p4 and noncritical p5", async () => {
