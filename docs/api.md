@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.5.0
-**Status:** draft, 2026-09-15. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.6.0
+**Status:** draft, 2026-09-16. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.6.0** drops Apple Critical Alerts. Apple turned the entitlement down, so every iOS alert now carries `"interruption-level": "time-sensitive"` and a plain `alarm.caf` sound (§5.1). This is a wire change: the server used to send a critical payload, and APNs was rejecting it. Nothing else moved. The priority ladder, the per-topic `critical` switch, incidents, and `caps.critical_topics` all behave exactly as they did in 1.5.0.
 
 **1.5.0** is what a route by route audit of a running server turned up. Creating a topic that already exists answers `409` instead of crashing, and topic creation now returns a `token_id` so the token it hands you can be revoked (§3.1). `caps.critical_topics` says where it is counted and enforced (§4.2). The rest is documentation catching up with behaviour that was already correct: the relay `kind` enum gains `p5` (§4.1), `GET /v1/health` is written down (§3.6), §1.6 lists `click` and `markdown`, and §1.8, §2 and §3 name the error bodies, the rate limit and the `since` rules the server already applies.
 
@@ -231,7 +233,7 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 → 409 {"error":"topic must retain a token"}        // refusing to delete the last one
 ```
 
-`critical` defaults to `false` on creation. This default is an Apple entitlement commitment; do not change it.
+`critical` defaults to `false` on creation. A topic that rings has to be switched on deliberately, so the default stays `false`.
 
 `relay_content` is read-only here; it is server config.
 
@@ -558,8 +560,8 @@ payload (relay_content: none):
 {
   "aps": {
     "alert": { "title": "Crit Alarm", "body": "Critical alert on prod — open to see details" },
-    "sound": { "critical": 1, "name": "alarm.caf", "volume": 1.0 },     // only if entitlement + topic critical
-    "interruption-level": "critical" | "time-sensitive",
+    "sound": "alarm.caf",                                               // only on a critical topic
+    "interruption-level": "time-sensitive",
     "mutable-content": 1,
     "category": "INCIDENT"
   },
@@ -568,6 +570,8 @@ payload (relay_content: none):
   "kind": "open"
 }
 ```
+
+**iOS alerts are time-sensitive, never critical.** Apple turned the Critical Alerts entitlement down, and APNs rejects a critical payload from an app that does not hold it. So `"interruption-level"` is always `"time-sensitive"`, and the sound is the plain string `"alarm.caf"` rather than a critical sound object. When the sound is attached is unchanged: a priority-5 message on a topic whose `critical` switch is on, opening or joining an incident. The switch still decides that, and still decides whether Android rings through with a full-screen intent. Only the shape of the iOS payload changed.
 
 `relay_content: full` puts the real title/body in `alert` and drops `mutable-content`.
 
