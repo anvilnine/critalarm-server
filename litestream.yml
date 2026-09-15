@@ -1,0 +1,21 @@
+# Litestream config for the sidecar in docker-compose.yml.
+#
+# Every value comes from an environment variable. Litestream expands ${VAR}
+# when it reads this file, so nothing secret is written down here. The names
+# are documented in .env.example.
+#
+# The server opens the database in WAL mode (src/store/database.ts), which is
+# what Litestream needs. Leave it that way.
+
+dbs:
+  - path: ${LITESTREAM_DB_PATH}
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: ${LITESTREAM_PATH}
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        # Cloudflare R2 and most S3-compatible stores want path-style URLs.
+        force-path-style: true

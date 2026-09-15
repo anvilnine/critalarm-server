@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../../index.js"; import { openDatabase } from "../../store/database.js"; import { migrate } from "../../store/migrations.js"; import { createHash } from "node:crypto";
-describe("V1 info",()=>{it("is public and reports hosted direct delivery",async()=>{const db=openDatabase(":memory:");migrate(db);const app=createApp({config:{baseUrl:"https://alerts.example.com",relayUrl:"https://relay.critalarm.app",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false},db,clock:{now:()=>1000},ids:{message:()=>"m",incident:()=>"i",timer:()=>"t"},dispatch:async()=>{}});expect(await (await app.request("/v1/info")).json()).toEqual({name:"critalarm",version:"0.1.0",base_url:"https://alerts.example.com",relay_url:"https://relay.critalarm.app",relay_content:"none",mode:"hosted"});});});
+import { readFileSync } from "node:fs";
+// /v1/info reports the package.json version, so the test reads it from there too.
+const packageVersion = (JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+describe("V1 info",()=>{it("is public and reports hosted direct delivery",async()=>{const db=openDatabase(":memory:");migrate(db);const app=createApp({config:{baseUrl:"https://alerts.example.com",relayUrl:"https://relay.critalarm.app",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false},db,clock:{now:()=>1000},ids:{message:()=>"m",incident:()=>"i",timer:()=>"t"},dispatch:async()=>{}});expect(await (await app.request("/v1/info")).json()).toEqual({name:"critalarm",version:packageVersion,base_url:"https://alerts.example.com",relay_url:"https://relay.critalarm.app",relay_content:"none",mode:"hosted"});});});
 
 describe("V1 incidents", () => {
   it("acks and closes an owned open incident while rejecting invalid state", async () => {

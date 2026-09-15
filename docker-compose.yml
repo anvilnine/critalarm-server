@@ -1,0 +1,61 @@
+# Two containers: the server, and a Litestream sidecar that streams the SQLite
+# file to S3-compatible storage. They share one named volume mounted at /data.
+#
+# This file is optional. The single-container path still works and is not
+# changed by anything here:
+#
+#   docker build -t critalarm-server .
+#   docker run -d --env-file .env -p 8080:8080 -v critalarm-data:/data critalarm-server
+#
+# Use compose when you want the off-box backup. To start:
+#
+#   cp .env.example .env    # then fill it in
+#   docker compose up -d
+#
+# To restore, stop both containers and run litestream restore into the volume
+# before starting them again.
+
+name: critalarm
+
+services:
+  server:
+    build: .
+    # Prebuilt image instead of building locally. Pin a version tag in
+    # production so an upgrade only happens when you ask for one:
+    # image: ghcr.io/anvilnine/critalarm:latest
+    restart: unless-stopped
+    env_file: .env
+    # The server listens on PORT (default 8080) and is published on the same
+    # port. The health check comes from the image.
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - data:/data
+
+  litestream:
+    # Pinned on purpose. A backup tool that upgrades itself by surprise is not
+    # a backup tool.
+    image: litestream/litestream:0.3.13
+    restart: unless-stopped
+    # Litestream needs the database file to exist, and the server creates it on
+    # first boot. Until then Litestream retries, so a restart loop on a brand
+    # new volume is expected and clears itself.
+    depends_on:
+      - server
+    # Only the replication settings, read from .env by compose. The push
+    # credentials stay in the server container.
+    environment:
+      LITESTREAM_DB_PATH: ${LITESTREAM_DB_PATH:-/data/critalarm.sqlite}
+      LITESTREAM_BUCKET: ${LITESTREAM_BUCKET:?set LITESTREAM_BUCKET in .env}
+      LITESTREAM_PATH: ${LITESTREAM_PATH:-critalarm}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:?set LITESTREAM_ENDPOINT in .env}
+      LITESTREAM_REGION: ${LITESTREAM_REGION:-auto}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID:?set LITESTREAM_ACCESS_KEY_ID in .env}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY:?set LITESTREAM_SECRET_ACCESS_KEY in .env}
+    command: ["replicate"]
+    volumes:
+      - data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+
+volumes:
+  data:
