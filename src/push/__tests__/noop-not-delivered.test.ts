@@ -27,8 +27,12 @@ const event: DeliveryEvent = {
   topic: "prod",
   incidentId: "inc_1",
   messageId: "m_1",
-  baseUrl: "https://alerts.example.com",
   priority: 5,
+  maxRingS: 60,
+  server: "https://alerts.example.com",
+  title: "prod",
+  body: "the database is down",
+  critical: true,
 };
 
 describe("a platform with no push provider", () => {
