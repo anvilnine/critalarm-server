@@ -116,13 +116,19 @@ Rules:
 
 | ntfy priority | Topic critical toggle | iOS | Android |
 |---|---|---|---|
-| 5 | on | Critical Alert, incident opened | Full-screen alarm, incident opened |
+| 5 | on | Time-Sensitive, incident opened | Full-screen alarm, incident opened |
 | 5 | off | Time-Sensitive, no incident | High-priority notification, no incident |
 | 4 | off or on | Time-Sensitive | High-priority |
 | 1 to 3 | off or on | Standard, app polls | Standard, app polls |
 
 Only priority 5 on a critical topic creates an incident and enters the retry
 loop. Everything else is fire and forget, ntfy-style.
+
+Apple denied the Critical Alerts entitlement for `app.critalarm`, so iOS never
+rings through the silent switch or Do Not Disturb. The loudest iOS delivery is a
+Time-Sensitive push. The topic critical switch still decides whether an incident
+opens and whether the repeat loop runs, and it still drives the Android
+full-screen alarm.
 
 ## 6. API
 
@@ -249,11 +255,11 @@ sequenceDiagram
     S->>S: open incident, schedule repeat+expire
     S->>R: POST /relay/v1/push {hash, id, 5, open}
     R->>R: lookup devices by hash, check caps
-    R->>A: critical push, collapse-id = id, body = fallback
+    R->>A: time-sensitive push, collapse-id = id, body = fallback
     A->>N: deliver (mutable-content)
     N->>S: GET /v1/incidents/id
     S-->>N: title, body
-    N->>P: display with real body, critical sound
+    N->>P: display with real body and the alarm sound
     loop every repeat_interval until ack
         S->>R: {..., repeat}
         R->>A: same collapse-id
@@ -264,7 +270,8 @@ sequenceDiagram
 
 If the NSE fetch fails (server down, proxy misconfigured, 30 s budget), the
 fallback body is shown. The sound still plays because it is in the APNs payload,
-not the fetched body.
+not the fetched body. It plays at the phone's notification volume and it obeys
+the silent switch, because Apple denied the Critical Alerts entitlement.
 
 `relay-content: full` skips the NSE fetch: title and body are in the push.
 
@@ -282,8 +289,10 @@ behind-proxy: true
 `relay-url` may be overridden with `RELAY_URL`. `relay-content` accepts `none`
 or `full`; environment override is `RELAY_CONTENT`.
 
-The startup log prints all five, so a reverse-proxy mistake is visible in the
-first line instead of in a 401 an hour later.
+Nothing is printed at startup except the admin token on first boot. To see what
+a running server actually loaded, call `GET /v1/info`. It needs no auth and it
+answers with `base_url`, `relay_url`, `relay_content` and `mode`, so a
+reverse-proxy mistake shows up there instead of in a 401 an hour later.
 
 `LOG_REQUESTS=true` adds one line per request: method, path, status, duration.
 Off by default. It carries no tokens, no message bodies and no push tokens, so
@@ -318,8 +327,8 @@ operator nothing at all to go on.
 | User's server down | Nothing new is sent, and an already-open incident stops repeating, because repeats originate on the server. | Accept for v1. Document it. P2: relay-side repeat. |
 | Relay down | Self-hosted pushes stop. | The relay is one container behind Cloudflare. A second instance is the fix, and it is not v1. Document it. |
 | APNs rejects token | Device never rings. | The relay marks the device stale on 410, the app re-registers on next launch, and "Ring me now" surfaces it. |
-| Reverse proxy strips headers | Ingress 401s, or the topic hash does not match. | Startup log, the `behind-proxy` setting, and a docs page for Caddy, Traefik and nginx. |
-| Entitlement denied | iOS priority 5 becomes Time-Sensitive. | Same code path, one flag. |
+| Reverse proxy strips headers | Ingress 401s, or the topic hash does not match. | `GET /v1/info`, the `behind-proxy` setting, and a docs page for Caddy, Traefik and nginx. |
+| iOS cannot ring through silent mode | Apple denied the Critical Alerts entitlement, so iOS priority 5 arrives as a Time-Sensitive push. | Same code path. Android keeps the full-screen alarm. |
 | Phone offline | Push queued by APNs and FCM up to their TTL. | Set `apns-expiration` to `max_ring_duration`. |
 
 The first row is the honest weakness. If the box running Crit Alarm is the box
