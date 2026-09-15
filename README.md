@@ -24,7 +24,7 @@ Status: early implementation. Contract-compatible publish, incidents, timers, an
 
 ```bash
 npm install
-npm start          # listens on PORT, default 4100
+npm start          # listens on PORT, default 8080
 ```
 
 ```bash

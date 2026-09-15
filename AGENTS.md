@@ -1,8 +1,8 @@
-# Crit Alarm — rules for every agent
+# Crit Alarm: rules for every agent
 
 You are building Crit Alarm. Read, in this order, before touching code:
-1. docs/api.md          — the contract. Build to this. Never edit it inside a task. (In the app and site repos it is a generated copy; the source is critalarm-server/docs/api.md.)
-2. docs/ARCHITECTURE.md — how the pieces fit and the folder layout.
+1. docs/api.md          is the contract. Build to this. Never edit it inside a task. (In the app and site repos it is a generated copy; the source is critalarm-server/docs/api.md.)
+2. docs/ARCHITECTURE.md is how the pieces fit and the folder layout.
 3. The task file you were given. It is self-contained; it includes the product commitments that apply to you.
 
 Commitments made to Apple that no task may break: critical delivery defaults OFF per topic; every topic has a token; the app never generates alerts and never inspects content; the alarm stops on acknowledge; the user can disable critical delivery per topic or in Settings.
@@ -23,7 +23,7 @@ Commitments made to Apple that no task may break: critical delivery defaults OFF
 
 ## Code
 - TypeScript strict. No `any`. Node 22.
-- Flutter: follow the design system in the repo. Cubit/Bloc, go_router, freezed — as the template does. Do not introduce a state-management library.
+- Flutter: follow the design system in the repo. Cubit/Bloc, go_router, freezed, as the template does. Do not introduce a state-management library.
 - Astro: follow the template. No new frameworks.
 - Small commits with plain messages. One task = one branch = one PR.
 
@@ -60,7 +60,7 @@ database rows. No build step in dev: `tsx` runs the TypeScript directly.
 | Test | `npm test` |
 | Build | `npm run build` (this is `tsc --noEmit`; nothing is emitted, the runtime is `tsx`) |
 | Type check | `npm run type-check` |
-| Run it | `npm start`, listens on `PORT` or 4100 |
+| Run it | `npm start`, listens on `PORT` or 8080 |
 
 **Folder layout** (ARCHITECTURE §12). Today only `src/index.ts`,
 `src/server-node.ts`, `src/rate-limit.ts`, `src/middleware/` and
