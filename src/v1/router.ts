@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { ParseError, parseJsonPublish } from "../ingress/headers.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
@@ -10,10 +9,7 @@ import { PublishService } from "../ingress/service.js";
 import type { TopicRecord } from "../ingress/types.js";
 import { requireDevice, type V1Env } from "./auth.js";
 import { addToken, createTopic, deleteToken, deleteTopic, listTopics, ownedTopic, patchTopic, view } from "./topics.js";
-// The binary's version, read from package.json so it cannot drift from the
-// image tag. tsx runs the TypeScript in place, in dev and in the image alike,
-// so package.json is always two levels up from this file.
-const version = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+import { version } from "../version.js";
 type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS, relay_content AS relayContent FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
