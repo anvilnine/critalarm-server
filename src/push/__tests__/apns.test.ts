@@ -1,6 +1,7 @@
 import { generateKeyPairSync, verify } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApnsSender } from "../apns.js";
+import type { ApnsTransport, ApnsTransportResponse } from "../apns.js";
 import type { PushDevice } from "../types.js";
 import type { DeliveryEvent } from "../../domain-events.js";
 
@@ -12,6 +13,35 @@ const device: PushDevice = {
   platform: "ios",
   pushToken: "device/token?one",
 };
+
+type Sent = { path: string; headers: Record<string, string>; body: string };
+
+// The HTTP/2 stand-in. No socket is opened anywhere in this file: the sender
+// only ever talks to an ApnsTransport, and this is one.
+class FakeTransport implements ApnsTransport {
+  readonly sent: Sent[] = [];
+  closed = 0;
+
+  constructor(private readonly reply: (sent: Sent) => Promise<ApnsTransportResponse>) {}
+
+  async send(path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
+    const sent = { path, headers, body };
+    this.sent.push(sent);
+    return this.reply(sent);
+  }
+
+  close(): void {
+    this.closed += 1;
+  }
+}
+
+function replies(status: number, body = ""): FakeTransport {
+  return new FakeTransport(async () => ({ status, headers: { ":status": String(status) }, body }));
+}
+
+function jsonBody(sent: Sent): Record<string, unknown> {
+  return JSON.parse(sent.body) as Record<string, unknown>;
+}
 
 function event(overrides: Partial<DeliveryEvent> = {}): DeliveryEvent {
   return {
@@ -36,7 +66,7 @@ function decodeJwtPart(part: string): Record<string, unknown> {
 
 describe("ApnsSender", () => {
   it("sends a critical none-content incident with APNs headers and fallback payload", async () => {
-    const requests: Request[] = [];
+    const transport = replies(200);
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -44,33 +74,30 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_000 },
-      fetch: async (request) => {
-        requests.push(request);
-        return new Response(null, { status: 200 });
-      },
+      transport,
     });
 
     const result = await sender.send(device, event());
 
     expect(result).toEqual({ status: 200, stale: false });
-    expect(requests).toHaveLength(1);
-    const request = requests[0];
-    expect(request.url).toBe("https://api.sandbox.push.apple.com/3/device/device%2Ftoken%3Fone");
-    expect(request.headers.get("apns-topic")).toBe("app.critalarm");
-    expect(request.headers.get("apns-push-type")).toBe("alert");
-    expect(request.headers.get("apns-priority")).toBe("10");
-    expect(request.headers.get("apns-collapse-id")).toBe("inc_1");
-    expect(request.headers.get("apns-expiration")).toBe("1060");
-    const authorization = request.headers.get("authorization");
+    expect(transport.sent).toHaveLength(1);
+    const sent = transport.sent[0]!;
+    expect(sent.path).toBe("/3/device/device%2Ftoken%3Fone");
+    expect(sent.headers["apns-topic"]).toBe("app.critalarm");
+    expect(sent.headers["apns-push-type"]).toBe("alert");
+    expect(sent.headers["apns-priority"]).toBe("10");
+    expect(sent.headers["apns-collapse-id"]).toBe("inc_1");
+    expect(sent.headers["apns-expiration"]).toBe("1060");
+    const authorization = sent.headers.authorization;
     expect(authorization).toMatch(/^bearer [^.]+\.[^.]+\.[^.]+$/);
     const [, compactJwt] = authorization!.split(" ");
-    const [header, claims, signature] = compactJwt.split(".");
-    expect(decodeJwtPart(header)).toEqual({ alg: "ES256", kid: "key_1" });
-    expect(decodeJwtPart(claims)).toEqual({ iss: "team_1", iat: 1_000 });
+    const [header, claims, signature] = compactJwt!.split(".");
+    expect(decodeJwtPart(header!)).toEqual({ alg: "ES256", kid: "key_1" });
+    expect(decodeJwtPart(claims!)).toEqual({ iss: "team_1", iat: 1_000 });
     expect(
-      verify("sha256", Buffer.from(`${header}.${claims}`), { key: publicKey, dsaEncoding: "ieee-p1363" }, Buffer.from(signature, "base64url")),
+      verify("sha256", Buffer.from(`${header}.${claims}`), { key: publicKey, dsaEncoding: "ieee-p1363" }, Buffer.from(signature!, "base64url")),
     ).toBe(true);
-    await expect(request.json()).resolves.toEqual({
+    expect(jsonBody(sent)).toEqual({
       aps: {
         alert: { title: "Crit Alarm", body: "Critical alert on prod — open to see details" },
         sound: "alarm.caf",
@@ -87,7 +114,7 @@ describe("ApnsSender", () => {
   // Apple denied the Critical Alerts entitlement. A payload that asks for one
   // is rejected, so no send may carry a critical sound or interruption level.
   it("never asks for a critical alert on a critical topic", async () => {
-    const bodies: Record<string, unknown>[] = [];
+    const transport = replies(200);
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -95,17 +122,14 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      fetch: async (request) => {
-        bodies.push((await request.json()) as Record<string, unknown>);
-        return new Response(null, { status: 200 });
-      },
+      transport,
     });
 
     await sender.send(device, event());
     await sender.send(device, event({ relayContent: "full" }));
 
-    for (const body of bodies) {
-      const aps = body.aps as Record<string, unknown>;
+    for (const sent of transport.sent) {
+      const aps = jsonBody(sent).aps as Record<string, unknown>;
       expect(aps["interruption-level"]).toBe("time-sensitive");
       expect(aps.sound).toBe("alarm.caf");
       expect(typeof aps.sound).toBe("string");
@@ -114,7 +138,7 @@ describe("ApnsSender", () => {
   });
 
   it("uses a time-sensitive payload without critical sound for p4 and noncritical p5", async () => {
-    const bodies: unknown[] = [];
+    const transport = replies(200);
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -122,16 +146,13 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      fetch: async (request) => {
-        bodies.push(await request.json());
-        return new Response(null, { status: 200 });
-      },
+      transport,
     });
 
     await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
     await sender.send(device, event({ kind: "p5", critical: false }));
 
-    expect(bodies).toEqual([
+    expect(transport.sent.map(jsonBody)).toEqual([
       {
         aps: {
           alert: { title: "Crit Alarm", body: "Critical alert on prod — open to see details" },
@@ -157,7 +178,7 @@ describe("ApnsSender", () => {
   });
 
   it("marks an unregistered APNs token stale and reuses its provider JWT within fifty minutes", async () => {
-    const authorizations: string[] = [];
+    const transport = replies(410, JSON.stringify({ reason: "Unregistered" }));
     let now = 1_000;
     const sender = new ApnsSender({
       teamId: "team_1",
@@ -166,23 +187,78 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => now },
-      fetch: async (request) => {
-        authorizations.push(request.headers.get("authorization")!);
-        return new Response(null, { status: 410 });
-      },
+      transport,
     });
 
     expect(await sender.send(device, event())).toEqual({ status: 410, stale: true });
     now = 3_999;
     await sender.send(device, event());
 
+    const authorizations = transport.sent.map((sent) => sent.headers.authorization);
     expect(authorizations).toHaveLength(2);
     expect(authorizations[1]).toBe(authorizations[0]);
+  });
+
+  it("reports a rejection that is not a 410 without marking the device stale, and logs Apple's reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const transport = replies(400, JSON.stringify({ reason: "BadDeviceToken" }));
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    expect(await sender.send(device, event())).toEqual({ status: 400, stale: false });
+    expect(warn).toHaveBeenCalledWith("apns_rejected", { status: 400, reason: "BadDeviceToken" });
+    // The push token rides in the path, so nothing logged may contain it.
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("device%2Ftoken");
+    warn.mockRestore();
+  });
+
+  it("surfaces a transport failure as an error with a readable message", async () => {
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport: new FakeTransport(async () => {
+        throw new Error("apns transport failed: connect ECONNREFUSED 17.0.0.1:443");
+      }),
+    });
+
+    // The publish path logs error.message, so an empty or opaque error there
+    // is the failure this guards against.
+    const error = await sender.send(device, event()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("apns transport failed: connect ECONNREFUSED 17.0.0.1:443");
+  });
+
+  it("closes its transport on shutdown", () => {
+    const transport = replies(200);
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    sender.close();
+
+    expect(transport.closed).toBe(1);
   });
 });
 
 describe("ApnsSender Live Activity pushes", () => {
-  function senderFor(requests: Request[]) {
+  function senderFor(transport: ApnsTransport) {
     return new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -190,10 +266,7 @@ describe("ApnsSender Live Activity pushes", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_757_740_800 },
-      fetch: async (request) => {
-        requests.push(request);
-        return new Response(null, { status: 200 });
-      },
+      transport,
     });
   }
 
@@ -208,15 +281,16 @@ describe("ApnsSender Live Activity pushes", () => {
   };
 
   it("starts an activity on the Live Activity topic with attributes", async () => {
-    const requests: Request[] = [];
+    const transport = replies(200);
 
-    await senderFor(requests).sendLiveActivity({ ...push, event: "start" });
+    await senderFor(transport).sendLiveActivity({ ...push, event: "start" });
 
-    expect(requests[0]!.url).toBe("https://api.sandbox.push.apple.com/3/device/la%2Ftoken");
-    expect(requests[0]!.headers.get("apns-topic")).toBe("app.critalarm.push-type.liveactivity");
-    expect(requests[0]!.headers.get("apns-push-type")).toBe("liveactivity");
-    expect(requests[0]!.headers.get("apns-priority")).toBe("10");
-    expect(await requests[0]!.json()).toEqual({
+    const sent = transport.sent[0]!;
+    expect(sent.path).toBe("/3/device/la%2Ftoken");
+    expect(sent.headers["apns-topic"]).toBe("app.critalarm.push-type.liveactivity");
+    expect(sent.headers["apns-push-type"]).toBe("liveactivity");
+    expect(sent.headers["apns-priority"]).toBe("10");
+    expect(jsonBody(sent)).toEqual({
       aps: {
         timestamp: 1_757_740_800,
         event: "start",
@@ -228,11 +302,11 @@ describe("ApnsSender Live Activity pushes", () => {
   });
 
   it("updates an activity with content-state only", async () => {
-    const requests: Request[] = [];
+    const transport = replies(200);
 
-    await senderFor(requests).sendLiveActivity({ ...push, event: "update", state: "acked" });
+    await senderFor(transport).sendLiveActivity({ ...push, event: "update", state: "acked" });
 
-    expect(await requests[0]!.json()).toEqual({
+    expect(jsonBody(transport.sent[0]!)).toEqual({
       aps: {
         timestamp: 1_757_740_800,
         event: "update",
@@ -242,11 +316,11 @@ describe("ApnsSender Live Activity pushes", () => {
   });
 
   it("ends an activity with a dismissal date", async () => {
-    const requests: Request[] = [];
+    const transport = replies(200);
 
-    await senderFor(requests).sendLiveActivity({ ...push, event: "end", state: "closed" });
+    await senderFor(transport).sendLiveActivity({ ...push, event: "end", state: "closed" });
 
-    expect(await requests[0]!.json()).toEqual({
+    expect(jsonBody(transport.sent[0]!)).toEqual({
       aps: {
         timestamp: 1_757_740_800,
         event: "end",
@@ -257,6 +331,7 @@ describe("ApnsSender Live Activity pushes", () => {
   });
 
   it("reports a gone Live Activity token as stale", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -264,9 +339,10 @@ describe("ApnsSender Live Activity pushes", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_757_740_800 },
-      fetch: async () => new Response(null, { status: 410 }),
+      transport: replies(410),
     });
 
     expect(await sender.sendLiveActivity({ ...push, event: "update" })).toEqual({ status: 410, stale: true });
+    warn.mockRestore();
   });
 });

@@ -26,7 +26,7 @@ const ids: IdGenerator = { message: () => `m_${crypto.randomUUID()}`, incident: 
 // when none had been sent. Before FCM was added to the dev server, every
 // Android push was counted and none went out.
 const noop: PushSender = { send: async () => ({ status: 501, stale: false }) };
-const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock, fetch });
+const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock });
 const apns: PushSender = apnsSender ?? noop;
 const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clock, fetch });
 const dispatcher = new PushDispatcher(db, { apns, fcm, liveActivity: apnsSender }, clock);
@@ -58,6 +58,6 @@ const handler: typeof app.fetch = logRequests
     }
   : app.fetch;
 serve({ fetch: handler, port: config.port });
-const shutdown = () => { stop(); db.close(); process.exit(0); };
+const shutdown = () => { stop(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
