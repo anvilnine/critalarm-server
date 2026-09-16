@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.8.0
+**Version:** 1.9.0
 **Status:** draft, 2026-09-16. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.9.0** writes down what `limit` on `GET /v1/incidents` does (§3.2). It defaults to 20 when the parameter is absent and its maximum is 200; ask for more and the server gives you 200. The default was already the server's behaviour and was never documented, so a client that left the parameter off got 20 rows while believing it had asked for everything. There is no paging in v1, so 200 is the most incidents a client can read in one call.
 
 **1.8.0** fixes a contradiction in the `critical_topics` cap. The prose said the cap counts topics with the critical switch on; the enforcement table said a subscription counted against it once it was the account's n+1th distinct topic. The server implemented the table, so a device hit "critical topics limit reached" on its third ordinary topic. Subscribing does not change how many critical topics an account owns, so subscribe is no longer a cap point. `POST /relay/v1/devices/{id}/subscriptions` no longer answers 429.
 
@@ -250,7 +252,7 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 ### 3.2 Incidents
 
 ```
-GET  /v1/incidents?limit=20[&state=open|acked|closed|expired][&topic=prod]
+GET  /v1/incidents[?limit=20][&state=open|acked|closed|expired][&topic=prod]
 → 200 [{ "id":"inc_9a8b7c", "topic":"prod", "state":"open",
           "opened_at":..., "acked_at":null, "closed_at":null, "last_message_at":...,
           "messages":[ { ...message object } ] }]
@@ -266,6 +268,17 @@ POST /v1/incidents/{id}/close               // stage 2, "At my desk"
 → 200 { ...incident, "state":"closed" }
 → 409 if state is not acked
 ```
+
+**`limit` defaults to 20 and stops at 200.** Leave it off and you get 20, which is the trap: a
+client that omits it is not asking for everything, it is asking for 20. Ask for more than 200 and
+you get 200. Below 1, or anything that is not a whole number, answers
+`400 {"error":"invalid request"}`.
+
+Newest first, by `opened_at`. There is no paging in v1, so 200 is the most incidents one call can
+return, and a client that wants a longer history cannot reach past it yet. Send `limit` explicitly
+on every call. `caps.history_incidents` is what the tier allows a client to *show*; it is not sent
+to the server and does not change what this endpoint returns.
+
 
 State machine:
 
