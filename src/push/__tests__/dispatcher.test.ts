@@ -49,11 +49,11 @@ function setup() {
   db.prepare(
     "INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_other', 'acc_1', 'hash_other', 'ios', 'other-token', 1)",
   ).run();
-  db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_ios', 'hash_prod')").run();
-  db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_android', 'hash_prod')").run();
-  db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_other', 'hash_other')").run();
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_ios', 'hash_prod')").run();
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_android', 'hash_prod')").run();
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_other', 'hash_other')").run();
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_cross','acc_2','hash_cross','ios','cross-token',1)").run();
-  db.prepare("INSERT INTO subscriptions (account_id,device_id,topic_hash) VALUES ('acc_2','dev_cross','hash_prod')").run();
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_cross','hash_prod')").run();
   return db;
 }
 

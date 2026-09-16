@@ -1,6 +1,12 @@
 import type Database from "better-sqlite3";
 
-const migrations = [
+// A migration is either plain SQL or a step that needs to do something SQL
+// alone cannot express. `foreignKeysOff` asks the runner to turn foreign key
+// enforcement off before it opens the transaction, because PRAGMA foreign_keys
+// is a no-op once a transaction is open.
+type Migration = string | { foreignKeysOff: true; up: (db: Database.Database) => void };
+
+const migrations: Migration[] = [
   `
     CREATE TABLE accounts (
       id TEXT PRIMARY KEY,
@@ -148,9 +154,167 @@ const migrations = [
     ALTER TABLE accounts ADD COLUMN join_token_hash TEXT;
     CREATE UNIQUE INDEX accounts_join_token_hash ON accounts(join_token_hash);
   `,
+  // The tombstone a merge needs. Without it a merge has to delete the losing
+  // account, and that delete cascades through devices, topics, subscriptions
+  // and relay_p4_usage. A merged account keeps its row, points at the winner,
+  // and a late RevenueCat id for it resolves one hop to the winner.
+  `ALTER TABLE accounts ADD COLUMN merged_into TEXT REFERENCES accounts(id);`,
+  // The device cap counts rows in devices by account on every registration and
+  // had no index for it. subscriptions(topic_hash) already has one, added in
+  // version 7, so it is not repeated here.
+  `CREATE INDEX devices_by_account ON devices(account_id);`,
+  // Billing moves off accounts.rc_app_user_id, which is UNIQUE and so cannot
+  // hold two subscribers on one account. entitled_tier is what this one billing
+  // id pays for right now; the account's tier is the highest of them, so one
+  // lapsed subscription no longer downgrades an account another still pays for.
+  // last_event_at is per billing id, because subscriptions on one account
+  // expire independently.
+  //
+  // billing_events is the dedup and ordering log: a repeat event id is skipped
+  // and an event older than its billing id's last_event_at is dropped, and both
+  // are recorded with applied = 0 so a support question has an answer.
+  // tier_changes names the event behind every tier move.
+  `
+    CREATE TABLE account_billing_ids (
+      app_user_id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      linked_at INTEGER NOT NULL,
+      last_event_at INTEGER,
+      entitled_tier TEXT NOT NULL DEFAULT 'free' CHECK (entitled_tier IN ('free', 'relay', 'hosted'))
+    );
+    CREATE INDEX account_billing_ids_by_account ON account_billing_ids(account_id);
+
+    CREATE TABLE billing_events (
+      event_id TEXT PRIMARY KEY,
+      app_user_id TEXT NOT NULL,
+      account_id TEXT REFERENCES accounts(id),
+      type TEXT NOT NULL,
+      event_at INTEGER NOT NULL,
+      applied INTEGER NOT NULL,
+      received_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE tier_changes (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id),
+      from_tier TEXT,
+      to_tier TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      event_id TEXT,
+      changed_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE account_merges (
+      id TEXT PRIMARY KEY,
+      from_account TEXT NOT NULL,
+      into_account TEXT NOT NULL,
+      merged_at INTEGER NOT NULL,
+      detail TEXT NOT NULL
+    );
+
+    INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier)
+      SELECT rc_app_user_id, id, created_at, NULL, tier FROM accounts WHERE rc_app_user_id IS NOT NULL;
+  `,
+  // A stale copy of devices.account_id, written once when the row was inserted
+  // and never updated. Left in place, a merge makes unsubscribeDevice filter on
+  // the old account, delete nothing, and still answer 204: the user taps "stop
+  // alerting this device" and the alarm keeps ringing. No index on the column,
+  // so a native DROP COLUMN works and every reader now joins devices.
+  `ALTER TABLE subscriptions DROP COLUMN account_id;`,
+  { foreignKeysOff: true, up: rebuildAccountsWithoutRcAppUserId },
 ];
 
-export function migrate(db: Database.Database): void {
+// Which tables name `table` in a REFERENCES clause right now. Read from the
+// stored schema rather than assumed, because the whole point of the assertion
+// below is that a rename can move these without saying so.
+function referencingTables(db: Database.Database, table: string): string[] {
+  const rows = db
+    .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL")
+    .all() as { name: string; sql: string }[];
+  const clause = new RegExp(`REFERENCES\\s+"?${table}"?\\s*\\(`);
+  return rows.filter((row) => clause.test(row.sql)).map((row) => row.name).sort();
+}
+
+// Drops accounts.rc_app_user_id. The column is UNIQUE, so it carries an
+// implicit index and SQLite refuses a native DROP COLUMN; the table has to be
+// rebuilt. Four things make the obvious rebuild eat the schema, all four
+// measured on SQLite 3.53.4 rather than assumed:
+//
+//   1. migrate() runs every migration inside db.transaction().
+//   2. PRAGMA foreign_keys is a no-op inside a transaction, so enforcement
+//      cannot be turned off in here. This entry carries foreignKeysOff, which
+//      the runner honours before it opens the transaction. PRAGMA
+//      legacy_alter_table is a no-op inside a transaction too, so it is no help
+//      either.
+//   3. With enforcement on, DROP TABLE accounts runs an implicit DELETE FROM
+//      first, and every ON DELETE CASCADE child empties: devices, topics,
+//      relay_p4_usage, account_billing_ids, and whatever hangs off those.
+//   4. ALTER TABLE accounts RENAME TO x rewrites the REFERENCES clause of every
+//      table that points at accounts, so the children follow the old table to
+//      its temporary name. This happens with enforcement off as well.
+//
+// So (4) is used on purpose instead of fought:
+//
+//   1. Rename accounts to accounts_s16_old. Every child clause now reads
+//      REFERENCES accounts_s16_old.
+//   2. Create accounts_s16_new without rc_app_user_id, carrying join_token_hash
+//      and merged_into. Its own merged_into clause names `accounts`, the name
+//      it ends up with, and SQLite allows a clause naming a table that does not
+//      exist yet.
+//   3. Copy every row across.
+//   4. Drop accounts_s16_old. Enforcement is off, so there is no implicit
+//      DELETE and nothing cascades. The unique index on join_token_hash
+//      followed the rename in step 1 and dies with the table.
+//   5. Rename accounts_s16_new to accounts_s16_old. Nothing references
+//      accounts_s16_new, so no clause moves, and the children's REFERENCES
+//      accounts_s16_old now resolve to the new table.
+//   6. Rename accounts_s16_old to accounts. The rewrite from (4) now works for
+//      us and puts every child clause back on accounts.
+//   7. Recreate the unique index on join_token_hash, or the account join token
+//      loses its uniqueness guarantee.
+//   8. Check it. Every table that referenced accounts before step 1 must
+//      reference it again, and PRAGMA foreign_key_check must come back empty.
+//      Either check failing throws, and the transaction rolls all of it back.
+function rebuildAccountsWithoutRcAppUserId(db: Database.Database): void {
+  const before = referencingTables(db, "accounts");
+  db.exec(`
+    ALTER TABLE accounts RENAME TO accounts_s16_old;
+
+    CREATE TABLE accounts_s16_new (
+      id TEXT PRIMARY KEY,
+      tier TEXT NOT NULL CHECK (tier IN ('free', 'relay', 'hosted')),
+      created_at INTEGER NOT NULL,
+      join_token_hash TEXT,
+      merged_into TEXT REFERENCES accounts(id)
+    );
+
+    INSERT INTO accounts_s16_new (id, tier, created_at, join_token_hash, merged_into)
+      SELECT id, tier, created_at, join_token_hash, merged_into FROM accounts_s16_old;
+
+    DROP TABLE accounts_s16_old;
+    ALTER TABLE accounts_s16_new RENAME TO accounts_s16_old;
+    ALTER TABLE accounts_s16_old RENAME TO accounts;
+
+    CREATE UNIQUE INDEX accounts_join_token_hash ON accounts(join_token_hash);
+  `);
+
+  const after = referencingTables(db, "accounts");
+  const lost = before.filter((name) => !after.includes(name));
+  if (lost.length > 0) {
+    throw new Error(`accounts rebuild left ${lost.join(", ")} pointing at something else`);
+  }
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length > 0) {
+    throw new Error(`accounts rebuild broke foreign keys: ${JSON.stringify(violations)}`);
+  }
+}
+
+export const migrationCount = migrations.length;
+
+// `upTo` stops after that version. Production always runs the whole list; the
+// schema tests use it to build a database at an older version, fill it, and
+// then migrate the rest of the way.
+export function migrate(db: Database.Database, upTo: number = migrations.length): void {
   db.exec(
     "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)",
   );
@@ -158,13 +322,31 @@ export function migrate(db: Database.Database): void {
   const applied = db.prepare("SELECT version FROM schema_migrations WHERE version = ?");
   const markApplied = db.prepare("INSERT INTO schema_migrations (version) VALUES (?)");
 
-  for (const [index, sql] of migrations.entries()) {
+  for (const [index, migration] of migrations.entries()) {
     const version = index + 1;
-    if (applied.get(version) === undefined) {
+    if (version > upTo) break;
+    if (applied.get(version) !== undefined) continue;
+    const step = typeof migration === "string"
+      ? { foreignKeysOff: false as const, up: (target: Database.Database) => target.exec(migration) }
+      : migration;
+    // Has to happen out here: PRAGMA foreign_keys does nothing once a
+    // transaction is open, and a migration that rebuilds a parent table needs
+    // enforcement off or DROP TABLE cascades the parent's children away.
+    const wasEnforcing = step.foreignKeysOff && db.pragma("foreign_keys", { simple: true }) === 1;
+    if (wasEnforcing) db.pragma("foreign_keys = OFF");
+    // The pragma does nothing if a transaction is already open, and it does it
+    // silently. A rebuild that runs with enforcement still on drops the parent
+    // table and cascades its children away, so stop here instead.
+    if (step.foreignKeysOff && db.pragma("foreign_keys", { simple: true }) !== 0) {
+      throw new Error(`migration ${version} needs foreign keys off and could not turn them off; is a transaction already open?`);
+    }
+    try {
       db.transaction(() => {
-        db.exec(sql);
+        step.up(db);
         markApplied.run(version);
       })();
+    } finally {
+      if (wasEnforcing) db.pragma("foreign_keys = ON");
     }
   }
 }

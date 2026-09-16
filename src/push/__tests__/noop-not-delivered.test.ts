@@ -17,7 +17,7 @@ function setup() {
   migrate(db);
   db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1', 'free', 1)").run();
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen, app_version) VALUES ('dev_1', 'acc_1', 'hash', 'android', 'push_token', 1, '1.0.0')").run();
-  db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_1', 'hash_prod')").run();
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_1', 'hash_prod')").run();
   return db;
 }
 
