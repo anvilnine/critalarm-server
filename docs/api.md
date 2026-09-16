@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.7.0
+**Version:** 1.8.0
 **Status:** draft, 2026-09-16. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.8.0** fixes a contradiction in the `critical_topics` cap. The prose said the cap counts topics with the critical switch on; the enforcement table said a subscription counted against it once it was the account's n+1th distinct topic. The server implemented the table, so a device hit "critical topics limit reached" on its third ordinary topic. Subscribing does not change how many critical topics an account owns, so subscribe is no longer a cap point. `POST /relay/v1/devices/{id}/subscriptions` no longer answers 429.
 
 **1.7.0** adds `"content-available": 1` to the iOS payload on a critical topic (§5.1). Without it iOS never wakes the app, and the app is the only thing that schedules the alarm, so the phone played a sound and never rang. Additive: no field changed or went away, and Android is untouched.
 
@@ -372,7 +374,6 @@ POST   /relay/v1/devices/{device_id}/subscriptions
   Authorization: Bearer dv_...
   { "topic_hash":"sha256hex" }
 → 204
-→ 429 {"error":"cap", "cap":"critical_topics"}
 
 DELETE /relay/v1/devices/{device_id}/subscriptions/{topic_hash}
   Authorization: Bearer dv_...
@@ -406,13 +407,16 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 
 **Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
-**`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in three places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
+**`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in two places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
 
 | Where | When |
 |---|---|
 | `POST /v1/topics` (§3.1) | the new topic is created with `critical: true` |
 | `PATCH /v1/topics/{name}` (§3.1) | the patch flips `critical` from `false` to `true` |
-| `POST /relay/v1/devices/{id}/subscriptions` (§4.2) | the new subscription would be the account's `n+1`th distinct topic |
+
+Subscribing is not one of them. A subscription does not change how many topics the account
+has the switch on for, so counting them there contradicted the rule above. A topic is already
+capped when it is created or when its switch is flipped on, so there is no way around the cap.
 
 Turning a topic's switch off frees a slot at once. Deleting a critical topic frees one too.
 
