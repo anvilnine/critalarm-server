@@ -15,7 +15,7 @@ function setup() {
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_one', 'acc_1', ?, 'ios', 'one', 1)").run(createHash("sha256").update("dv_one").digest("hex"));
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_two', 'acc_1', ?, 'android', 'two', 1)").run(createHash("sha256").update("dv_two").digest("hex"));
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_other', 'acc_2', ?, 'ios', 'other', 1)").run(createHash("sha256").update("dv_other").digest("hex"));
-  return { app: createTierRouter({ db, clock: { now: () => 1_000 }, ids: { account: () => "acc_unused", deviceToken: () => "dv_unused" }, revenueCat: { sharedSecret: "secret", entitlements: {} } }), db };
+  return { app: createTierRouter({ db, clock: { now: () => 1_000 }, ids: { account: () => "acc_unused", deviceToken: () => "dv_unused", accountJoinToken: () => "aj_unused" }, revenueCat: { sharedSecret: "secret", entitlements: {} } }), db };
 }
 
 function subscribe(app: ReturnType<typeof createTierRouter>, deviceId: string, token: string, topicHash: string) {

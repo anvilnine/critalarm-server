@@ -12,8 +12,10 @@ class FakeClock {
 class FixedIds {
   private accountNumber = 0;
   private tokenNumber = 0;
+  private joinNumber = 0;
   account(): string { this.accountNumber += 1; return `acc_${this.accountNumber}`; }
   deviceToken(): string { this.tokenNumber += 1; return `dv_test_${this.tokenNumber}`; }
+  accountJoinToken(): string { this.joinNumber += 1; return `aj_test_${this.joinNumber}`; }
 }
 
 const deviceId = "dev_123e4567-e89b-12d3-a456-426614174000";

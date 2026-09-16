@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import type Database from "better-sqlite3";
+import type { Hono } from "hono";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { CapError, registerDevice } from "../devices.js";
@@ -14,8 +16,10 @@ class FakeClock {
 class FixedIds {
   private accountNumber = 0;
   private tokenNumber = 0;
+  private joinNumber = 0;
   account(): string { this.accountNumber += 1; return `acc_${this.accountNumber}`; }
   deviceToken(): string { this.tokenNumber += 1; return `dv_test_${this.tokenNumber}`; }
+  accountJoinToken(): string { this.joinNumber += 1; return `aj_test_${this.joinNumber}`; }
 }
 
 function setup() {
@@ -36,8 +40,10 @@ describe("device registry", () => {
     const response = await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(device) });
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({ device_token: "dv_test_1", account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_incidents: 20, history_days: 7 } });
+    expect(await response.json()).toEqual({ device_token: "dv_test_1", account_join_token: "aj_test_1", account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_incidents: 20, history_days: 7 } });
     expect(db.prepare("SELECT id, tier, created_at FROM accounts").all()).toEqual([{ id: "acc_1", tier: "free", created_at: 1_000 }]);
+    expect(db.prepare("SELECT join_token_hash FROM accounts").get()).toEqual({ join_token_hash: createHash("sha256").update("aj_test_1").digest("hex") });
+    expect(JSON.stringify(db.prepare("SELECT * FROM accounts").all())).not.toContain("aj_test_1");
     expect(db.prepare("SELECT id, account_id, device_token_hash, platform, push_token, last_seen FROM devices").all()).toEqual([{
       id: device.device_id,
       account_id: "acc_1",
@@ -178,5 +184,165 @@ describe("known-device POST", () => {
       const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: "Bearer dv_test_1" }, body: JSON.stringify({ ...device, device_id: `dev_123e4567-e89b-12d3-a456-42661417400${i}` }) });
       expect(response.status).toBe(i < 5 ? 201 : 429);
     }
+  });
+});
+
+const secondDeviceId = "dev_123e4567-e89b-12d3-a456-426614174009";
+const freeCaps = { devices: 5, critical_topics: 2, p4_daily: 50, history_incidents: 20, history_days: 7 };
+
+function insertTopic(db: Database.Database, accountId: string, topicHash: string, name = "prod"): void {
+  db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES (?, ?, ?, 'https://alerts.example.com', ?, 1, 30, 300, 60, 'none', 1)").run(`top_${name}`, accountId, name, topicHash);
+  db.prepare("INSERT INTO topic_tokens (id, topic_id, hash, created_at) VALUES (?, ?, ?, 1)").run(`tok_${name}`, `top_${name}`, createHash("sha256").update(`tk_${name}`).digest("hex"));
+}
+
+async function registerFirst(app: Hono): Promise<{ deviceToken: string; joinToken: string }> {
+  const response = await app.request("/relay/v1/devices", { method: "POST", body: JSON.stringify(device) });
+  const body = await response.json() as { device_token: string; account_join_token: string };
+  return { deviceToken: body.device_token, joinToken: body.account_join_token };
+}
+
+describe("account join token", () => {
+  it("attaches an unknown device to the aj_'s account and mints it its own device token", async () => {
+    const { app, db } = setup();
+    const { joinToken } = await registerFirst(app);
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId, platform: "android", push_token: "fcm-token" }) });
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+    expect(body).not.toHaveProperty("account_join_token");
+    expect(db.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT account_id, device_token_hash FROM devices WHERE id = ?").get(secondDeviceId)).toEqual({ account_id: "acc_1", device_token_hash: createHash("sha256").update("dv_test_2").digest("hex") });
+  });
+
+  it("returns no join token when an existing device's dv_ adds a second handset", async () => {
+    const { app } = setup();
+    const { deviceToken } = await registerFirst(app);
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${deviceToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+  });
+
+  it("still creates a new anonymous account when no bearer is sent", async () => {
+    const { app, db } = setup();
+    await registerFirst(app);
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_join_token: "aj_test_2", account_id: "acc_2", tier: "free", caps: freeCaps });
+    expect(db.prepare("SELECT id FROM accounts ORDER BY id").all()).toEqual([{ id: "acc_1" }, { id: "acc_2" }]);
+    expect(db.prepare("SELECT account_id FROM devices WHERE id = ?").get(secondDeviceId)).toEqual({ account_id: "acc_2" });
+  });
+
+  it("rejects an aj_ that matches no account and mints nothing", async () => {
+    const { app, db } = setup();
+    await registerFirst(app);
+    const before = db.prepare("SELECT * FROM devices").all();
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: "Bearer aj_nobody" }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(response.status).toBe(401);
+    expect(db.prepare("SELECT * FROM devices").all()).toEqual(before);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual({ count: 1 });
+    expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_2");
+  });
+
+  it("answers 429 and mints nothing when a join would pass caps.devices", async () => {
+    const { app, db } = setup();
+    const { joinToken } = await registerFirst(app);
+    for (let i = 1; i <= 4; i++) {
+      const filling = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: `dev_123e4567-e89b-12d3-a456-42661417400${i}` }) });
+      expect(filling.status).toBe(201);
+    }
+    const before = db.prepare("SELECT id, device_token_hash FROM devices ORDER BY id").all();
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ error: "cap", cap: "devices" });
+    expect(db.prepare("SELECT id, device_token_hash FROM devices ORDER BY id").all()).toEqual(before);
+    expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_6");
+  });
+
+  it("gives a joined device a subscription row for a topic the account already had", async () => {
+    const { app, db } = setup();
+    const { joinToken } = await registerFirst(app);
+    const topicHash = "a".repeat(64);
+    insertTopic(db, "acc_1", topicHash);
+
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(response.status).toBe(201);
+    expect(db.prepare("SELECT account_id, device_id, topic_hash FROM subscriptions WHERE device_id = ?").all(secondDeviceId)).toEqual([{ account_id: "acc_1", device_id: secondDeviceId, topic_hash: topicHash }]);
+  });
+});
+
+describe("releasing a device", () => {
+  it("drops the device row, its push tokens and its subscriptions and leaves the account, its topics and its tk_ tokens", async () => {
+    const { app, db } = setup();
+    const { deviceToken } = await registerFirst(app);
+    const topicHash = "b".repeat(64);
+    insertTopic(db, "acc_1", topicHash);
+    db.prepare("INSERT OR IGNORE INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', ?, ?)").run(device.device_id, topicHash);
+    db.prepare("INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at) VALUES (?, 'la_update', 'act_1', 'inc_1', 'la-token', 1)").run(device.device_id);
+
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "DELETE", headers: { Authorization: `Bearer ${deviceToken}` } });
+
+    expect(response.status).toBe(204);
+    expect(db.prepare("SELECT * FROM devices").all()).toEqual([]);
+    expect(db.prepare("SELECT * FROM device_tokens").all()).toEqual([]);
+    expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
+    expect(db.prepare("SELECT id, tier FROM accounts").all()).toEqual([{ id: "acc_1", tier: "free" }]);
+    expect(db.prepare("SELECT id, topic_hash FROM topics").all()).toEqual([{ id: "top_prod", topic_hash: topicHash }]);
+    expect(db.prepare("SELECT id, topic_id FROM topic_tokens").all()).toEqual([{ id: "tok_prod", topic_id: "top_prod" }]);
+  });
+
+  it("leaves the account joinable after its last device is released", async () => {
+    const { app, db } = setup();
+    const { deviceToken, joinToken } = await registerFirst(app);
+    const release = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "DELETE", headers: { Authorization: `Bearer ${deviceToken}` } });
+    expect(release.status).toBe(204);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM devices").get()).toEqual({ count: 0 });
+
+    const rejoin = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+
+    expect(rejoin.status).toBe(201);
+    expect(await rejoin.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+  });
+
+  it("answers 401 for another device's token on the same account and keeps the row", async () => {
+    const { app, db } = setup();
+    const { joinToken } = await registerFirst(app);
+    const join = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
+    const { device_token: otherToken } = await join.json() as { device_token: string };
+
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "DELETE", headers: { Authorization: `Bearer ${otherToken}` } });
+
+    expect(response.status).toBe(401);
+    expect(db.prepare("SELECT id FROM devices ORDER BY id").all()).toEqual([{ id: device.device_id }, { id: secondDeviceId }]);
+  });
+
+  it.each([undefined, "dv_wrong"])("answers 401 for %s and keeps the row", async token => {
+    const { app, db } = setup();
+    await registerFirst(app);
+
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "DELETE", headers: token === undefined ? {} : { Authorization: `Bearer ${token}` } });
+
+    expect(response.status).toBe(401);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM devices").get()).toEqual({ count: 1 });
+  });
+
+  it("answers 404 for a device_id the server has never issued", async () => {
+    const { app, db } = setup();
+    const { deviceToken } = await registerFirst(app);
+
+    const response = await app.request(`/relay/v1/devices/${secondDeviceId}`, { method: "DELETE", headers: { Authorization: `Bearer ${deviceToken}` } });
+
+    expect(response.status).toBe(404);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM devices").get()).toEqual({ count: 1 });
   });
 });
