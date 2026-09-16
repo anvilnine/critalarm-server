@@ -13,6 +13,7 @@ import { FcmSender } from "./push/fcm.js";
 import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
 import { RelayClient } from "./relay/client.js";
+import { createAuthHandler } from "./auth/better-auth.js";
 
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
@@ -39,7 +40,11 @@ const dispatch = async (events: readonly DeliveryEvent[]) => {
   }
   return dispatcher.dispatch(events);
 };
-const app = createApp({ config, db, clock, ids, dispatch });
+// api.md §3.7. Undefined when no Apple or Google credential is configured, and
+// that is the normal state today: the provider apps do not exist yet, so the
+// server starts and serves everything else with no sign-in surface mounted.
+const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db);
+const app = createApp({ config, db, clock, ids, dispatch, ...(authHandler === undefined ? {} : { authHandler }) });
 
 await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);

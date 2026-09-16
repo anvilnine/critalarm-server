@@ -222,6 +222,79 @@ const migrations: Migration[] = [
   // so a native DROP COLUMN works and every reader now joins devices.
   `ALTER TABLE subscriptions DROP COLUMN account_id;`,
   { foreignKeysOff: true, up: rebuildAccountsWithoutRcAppUserId },
+  // api.md §3.7, the identity storage. The first four tables and three indexes
+  // are better-auth's own schema, copied verbatim from what better-auth 1.7.5
+  // generates for SQLite. They are created here rather than by `npx auth
+  // migrate` so one `migrate()` call still leaves a complete database and the
+  // server needs no second migration tool at boot.
+  //
+  // Note the name clash: better-auth's `user`/`session`/`account` are the human
+  // and their OAuth credentials, while our `accounts` (plural) is the tenant
+  // that owns topics, devices and billing. They are different things.
+  //
+  // account_identities is the map between them, and it is ours. One better-auth
+  // user points at exactly one `accounts` row, and one `accounts` row carries at
+  // most one identity. Both constraints exist as a backstop only: every caller
+  // checks first and answers 409, because a constraint firing would be a 500 and
+  // api.md §3.7 says these two cases must not be decided that way.
+  `
+    CREATE TABLE "user" (
+      "id" text not null primary key,
+      "name" text not null,
+      "email" text not null unique,
+      "emailVerified" integer not null,
+      "image" text,
+      "createdAt" date not null,
+      "updatedAt" date not null
+    );
+
+    CREATE TABLE "session" (
+      "id" text not null primary key,
+      "expiresAt" date not null,
+      "token" text not null unique,
+      "createdAt" date not null,
+      "updatedAt" date not null,
+      "ipAddress" text,
+      "userAgent" text,
+      "userId" text not null references "user" ("id") on delete cascade
+    );
+    CREATE INDEX "session_userId_idx" on "session" ("userId");
+
+    CREATE TABLE "account" (
+      "id" text not null primary key,
+      "accountId" text not null,
+      "providerId" text not null,
+      "userId" text not null references "user" ("id") on delete cascade,
+      "accessToken" text,
+      "refreshToken" text,
+      "idToken" text,
+      "accessTokenExpiresAt" date,
+      "refreshTokenExpiresAt" date,
+      "scope" text,
+      "password" text,
+      "createdAt" date not null,
+      "updatedAt" date not null
+    );
+    CREATE INDEX "account_userId_idx" on "account" ("userId");
+
+    CREATE TABLE "verification" (
+      "id" text not null primary key,
+      "identifier" text not null,
+      "value" text not null,
+      "expiresAt" date not null,
+      "createdAt" date not null,
+      "updatedAt" date not null
+    );
+    CREATE INDEX "verification_identifier_idx" on "verification" ("identifier");
+
+    -- No foreign key on user_id. better-auth owns the "user" table and may
+    -- rebuild it on a version upgrade; a reference from here would block that.
+    CREATE TABLE account_identities (
+      user_id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL UNIQUE REFERENCES accounts(id) ON DELETE CASCADE,
+      linked_at INTEGER NOT NULL
+    );
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
