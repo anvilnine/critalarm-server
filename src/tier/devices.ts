@@ -81,9 +81,6 @@ export function subscribeDevice(deps: TierDependencies, context: AccountContext,
   if (account === null) throw new Error("not found");
   const existing = deps.db.prepare("SELECT 1 FROM subscriptions WHERE device_id = ? AND topic_hash = ?").get(context.deviceId, topicHash);
   if (existing !== undefined) return;
-  const count = deps.db.prepare("SELECT COUNT(DISTINCT topic_hash) AS count FROM subscriptions WHERE account_id = ? AND topic_hash <> ?").get(context.accountId, topicHash) as { count: number };
-  const limit = capsFor(account.tier).critical_topics;
-  if (limit !== null && count.count >= limit) throw new CapError("critical_topics");
   deps.db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES (?, ?, ?)").run(context.accountId, context.deviceId, topicHash);
 }
 
