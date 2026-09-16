@@ -3,6 +3,37 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.8.0 - 2026-09-16
+
+### Fixed
+
+- `critical_topics` no longer counts ordinary topics. Subscribing is no longer
+  a cap point (§4.2, §7).
+
+The contract said two different things. The prose read "`critical_topics` counts
+topics with the critical switch on. Not subscriptions, not topics in total." The
+enforcement table right below it listed a third place, the subscribe endpoint,
+tripping when "the new subscription would be the account's `n+1`th distinct
+topic". That row counted every topic, critical or not.
+
+The server implemented the table. `subscribeDevice` counted
+`COUNT(DISTINCT topic_hash)` across the account's subscriptions and compared it
+to `critical_topics`. On the free tier that cap is 2, so creating a third topic
+of any kind answered `429 {"error":"cap","cap":"critical_topics"}`, even with
+the critical switch off. The app creates a topic and then subscribes its own
+device to it, so users saw "Critical topics limit reached" on a plain topic.
+
+The prose wins. The cap counts topics with the switch on, and it is enforced in
+two places: creating a topic with `critical: true`, and patching `critical` from
+false to true. `POST /relay/v1/devices/{id}/subscriptions` no longer answers
+429.
+
+Nothing gets past the cap. A topic is counted when it is created or when its
+switch is flipped on, and a subscription cannot change either of those.
+
+Clients lose an error response they could receive. A client that handled 429 on
+subscribe keeps compiling; that branch stops being reachable.
+
 ## 1.7.0 - 2026-09-16
 
 ### Added
