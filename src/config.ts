@@ -56,6 +56,7 @@ const fcmSchema = z.object({
 }).optional();
 
 const fileSchema = z.object({
+  mode: z.string().optional(),
   "base-url": z.string().optional(),
   "relay-url": z.string().optional(),
   "relay-content": z.string().optional(),
@@ -168,7 +169,14 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   }
   const relayUrlExplicit = stringValue(env, "RELAY_URL", file["relay-url"]) !== undefined;
   const hasProvider = apns !== undefined || fcm !== undefined;
-  const mode = hasProvider ? (relayUrlExplicit ? "hosted" : "relay") : "selfhosted";
+  // api.md §3.4: mode is a setting, not a guess. The inference below is kept for
+  // deployments that never set it, and it reads one operator wrong: someone
+  // self-hosting with their own APNs key has a provider and no relay URL, so the
+  // guess says "relay" and mounts accounts, caps and billing on their hardware.
+  // Writing mode down stops the guess from running at all.
+  const configuredMode = stringValue(env, "MODE", file.mode);
+  if (configuredMode !== undefined && configuredMode !== "selfhosted" && configuredMode !== "relay" && configuredMode !== "hosted") throw configError("mode");
+  const mode = (configuredMode as Config["mode"]) ?? (hasProvider ? (relayUrlExplicit ? "hosted" : "relay") : "selfhosted");
   // An empty secret is a configuration error in every mode. It is defined, so it
   // passed the production check below, and then the webhook compared "" with the
   // "" of a request that carried no Authorization header.
