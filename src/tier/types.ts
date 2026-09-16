@@ -31,7 +31,10 @@ export interface TierDependencies {
   db: Database.Database;
   clock: Clock;
   ids: TierIds;
-  revenueCat: RevenueCatConfig;
+  // Absent when the operator configured no shared secret. The RevenueCat
+  // webhook is then not mounted at all, rather than mounted with a secret that
+  // an empty Authorization header matches.
+  revenueCat?: RevenueCatConfig;
 }
 
 export type TierRouter = Hono;

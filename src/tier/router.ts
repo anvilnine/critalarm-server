@@ -5,7 +5,8 @@ import { authenticateDevice, bearerFromHeader } from "./auth.js";
 import { capsFor } from "./caps.js";
 import { CapError, deviceUpdateSchema, registerDevice, registrationSchema, subscribeDevice, subscriptionSchema, unsubscribeDevice, updateDevice } from "./devices.js";
 import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from "./device-tokens.js";
-import { applyRevenueCatEvent, parseRevenueCatEvent, sharedSecretMatches } from "./revenuecat.js";
+import { applyRevenueCatEvent, parseRevenueCatEvent } from "./revenuecat.js";
+import { bearerSecretMatches } from "../bearer.js";
 import type { TierDependencies } from "./types.js";
 
 async function requestJson(request: Request): Promise<unknown> {
@@ -113,8 +114,12 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.delete("/relay/v1/devices/:deviceId/tokens/:kind", deleteToken);
   router.delete("/relay/v1/devices/:deviceId/tokens/:kind/:activityId", deleteToken);
 
-  router.post("/webhooks/revenuecat", async (c) => {
-    if (!sharedSecretMatches(c.req.header("authorization"), deps.revenueCat.sharedSecret)) return c.json({ error: "unauthorized" }, 401);
+  // api.md §4.3. No secret means no route: an empty one used to match a request
+  // that carried no Authorization header at all, which let anyone set any
+  // account's tier.
+  const revenueCatSecret = deps.revenueCat?.sharedSecret ?? "";
+  if (revenueCatSecret !== "") router.post("/webhooks/revenuecat", async (c) => {
+    if (!bearerSecretMatches(c.req.header("authorization"), revenueCatSecret)) return c.json({ error: "unauthorized" }, 401);
     try {
       applyRevenueCatEvent(deps, parseRevenueCatEvent(await requestJson(c.req.raw)));
       return c.body(null, 200);
