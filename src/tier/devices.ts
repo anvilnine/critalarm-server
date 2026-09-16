@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { authenticateDevice, credentialHash } from "./auth.js";
+import { authenticateAccountJoin, authenticateDevice, credentialHash } from "./auth.js";
 import { setAlarmToken } from "./device-tokens.js";
 import { capsFor } from "./caps.js";
 import { sweepDeviceIntoTopics } from "./subscriptions.js";
@@ -43,7 +43,7 @@ function insertDeviceForAccount(deps: TierDependencies, input: z.infer<typeof re
   return token;
 }
 
-export function registerDevice(deps: TierDependencies, input: z.infer<typeof registrationSchema>, bearer: string | undefined, accountContext?: AccountContext): { deviceToken?: string; accountId: string; tier: "free" | "relay" | "hosted" } {
+export function registerDevice(deps: TierDependencies, input: z.infer<typeof registrationSchema>, bearer: string | undefined, accountContext?: AccountContext, joinBearer?: string): { deviceToken?: string; accountJoinToken?: string; accountId: string; tier: "free" | "relay" | "hosted" } {
   const existing = deps.db.prepare("SELECT id FROM devices WHERE id = ?").get(input.device_id) as { id: string } | undefined;
   if (existing !== undefined) {
     const account = updateDevice(deps, input.device_id, input, bearer, input.platform);
@@ -59,13 +59,36 @@ export function registerDevice(deps: TierDependencies, input: z.infer<typeof reg
     })();
   }
 
+  // api.md §4.2, joining an account that already exists. No account_join_token
+  // comes back: the caller is holding the one it just presented.
+  if (joinBearer !== undefined) {
+    return deps.db.transaction(() => {
+      const account = authenticateAccountJoin(deps.db, joinBearer);
+      if (account === null) throw new Error("unauthorized");
+      return { deviceToken: insertDeviceForAccount(deps, input, account.accountId, account.tier), accountId: account.accountId, tier: account.tier };
+    })();
+  }
+
   const accountId = deps.ids.account();
+  const joinToken = deps.ids.accountJoinToken();
   const now = deps.clock.now();
   const token = deps.db.transaction(() => {
-    deps.db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, 'free', ?)").run(accountId, now);
+    deps.db.prepare("INSERT INTO accounts (id, tier, join_token_hash, created_at) VALUES (?, 'free', ?, ?)").run(accountId, credentialHash(joinToken), now);
     return insertDeviceForAccount(deps, input, accountId, "free");
   })();
-  return { deviceToken: token, accountId, tier: "free" };
+  return { deviceToken: token, accountJoinToken: joinToken, accountId, tier: "free" };
+}
+
+// api.md §4.2, releasing a device. The account, its topics and its tk_ tokens
+// stay, even when this was the last device, so the account is still joinable
+// with aj_. device_tokens.incident_id is not a foreign key and nothing else
+// sweeps those rows, so they go here.
+export function deleteDevice(deps: TierDependencies, deviceIdValue: string): void {
+  deps.db.transaction(() => {
+    deps.db.prepare("DELETE FROM device_tokens WHERE device_id = ?").run(deviceIdValue);
+    deps.db.prepare("DELETE FROM subscriptions WHERE device_id = ?").run(deviceIdValue);
+    deps.db.prepare("DELETE FROM devices WHERE id = ?").run(deviceIdValue);
+  })();
 }
 
 export function updateDevice(deps: TierDependencies, deviceIdValue: string, input: z.infer<typeof deviceUpdateSchema>, bearer: string | undefined, platform?: "ios" | "android"): DeviceAccountRow | null {

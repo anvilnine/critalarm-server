@@ -20,6 +20,7 @@ export interface Caps {
 export interface TierIds {
   account(): string;
   deviceToken(): string;
+  accountJoinToken(): string;
 }
 
 export interface RevenueCatConfig {
