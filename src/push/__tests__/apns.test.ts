@@ -103,12 +103,36 @@ describe("ApnsSender", () => {
         sound: "alarm.caf",
         "interruption-level": "time-sensitive",
         "mutable-content": 1,
+        "content-available": 1,
         category: "INCIDENT",
       },
       incident_id: "inc_1",
       server: "https://alerts.example.com",
       kind: "open",
     });
+  });
+
+  // The app schedules the AlarmKit alarm from its background-push handler, and
+  // iOS only calls that handler when the push carries content-available. Drop
+  // this and the phone plays a sound and never rings an alarm.
+  it("wakes the app on a critical incident and leaves other pushes asleep", async () => {
+    const transport = replies(200);
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    await sender.send(device, event());
+    await sender.send(device, event({ kind: "p5", critical: false, messageId: "m_quiet" }));
+    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
+
+    const wakes = transport.sent.map((sent) => (jsonBody(sent).aps as Record<string, unknown>)["content-available"]);
+    expect(wakes).toEqual([1, undefined, undefined]);
   });
 
   // Apple denied the Critical Alerts entitlement. A payload that asks for one
