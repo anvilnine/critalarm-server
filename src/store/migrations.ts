@@ -139,6 +139,7 @@ const migrations = [
     );
   `,
   `ALTER TABLE devices ADD COLUMN app_version TEXT;`,
+  `CREATE INDEX subscriptions_by_topic_hash ON subscriptions(topic_hash);`,
 ];
 
 export function migrate(db: Database.Database): void {

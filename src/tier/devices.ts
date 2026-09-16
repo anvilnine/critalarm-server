@@ -2,6 +2,7 @@ import { z } from "zod";
 import { authenticateDevice, credentialHash } from "./auth.js";
 import { setAlarmToken } from "./device-tokens.js";
 import { capsFor } from "./caps.js";
+import { sweepDeviceIntoTopics } from "./subscriptions.js";
 import type { AccountContext, TierDependencies } from "./types.js";
 
 const deviceId = z.string().regex(/^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
@@ -22,7 +23,7 @@ export const subscriptionSchema = z.object({
 type DeviceAccountRow = { account_id: string; tier: "free" | "relay" | "hosted" };
 
 export class CapError extends Error {
-  constructor(readonly cap: "devices" | "critical_topics" | "p4_daily") {
+  constructor(readonly cap: "devices" | "p4_daily") {
     super("cap");
   }
 }
@@ -38,6 +39,7 @@ function insertDeviceForAccount(deps: TierDependencies, input: z.infer<typeof re
   const token = deps.ids.deviceToken();
   deps.db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, app_version, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)").run(input.device_id, accountId, credentialHash(token), input.platform, input.push_token, input.app_version, deps.clock.now());
   setAlarmToken(deps.db, deps.clock, input.device_id, input.platform, input.push_token);
+  sweepDeviceIntoTopics(deps.db, accountId, input.device_id);
   return token;
 }
 
