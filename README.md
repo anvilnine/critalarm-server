@@ -53,6 +53,48 @@ docker run -d --name critalarm \
 Tags: `latest` and the short commit sha on `main`, plus the semver tags
 (`1.2.3`, `1.2`, `1`) when a `v*` tag is pushed.
 
+## Releasing
+
+```bash
+npm run release            # patch, 0.1.0 -> 0.1.1
+npm run release -- minor
+npm run release -- major
+```
+
+The script bumps the version in `package.json`, runs the tests and the type
+check, asks you to confirm, then commits, tags `v<version>` and pushes both
+`main` and the tag. It refuses to run if you are not on `main`, if the working
+tree is dirty, if `main` and `origin/main` disagree, if the tag already exists,
+or if the checks fail.
+
+Pushing a `v*` tag does two things: it publishes the semver image tags, and it
+deploys the hosted production server. **A push to `main` does not deploy
+production.** It publishes `latest` and `sha-*` and stops there. This is an
+alarm server, so the copy that wakes people up changes when someone asks for it
+and not before.
+
+The deploy writes the released version into the image tag variable on the
+hosting platform, starts the service, then polls `GET /v1/info` until it reports
+the version that was just released. `/v1/info` reads the version from
+`package.json`, so a deploy that quietly kept the old container fails the
+workflow instead of going green.
+
+A maintainer has to set four repository secrets for the deploy to work. Without
+them the deploy job stops on its first step and says which one is missing.
+
+| Secret | What goes in it |
+|---|---|
+| `COOLIFY_URL` | Base URL of the Coolify instance, no trailing slash |
+| `COOLIFY_TOKEN` | Coolify API token with read, write and deploy permission |
+| `COOLIFY_SERVICE_UUID` | UUID of the production service in Coolify |
+| `PRODUCTION_BASE_URL` | Public base URL of the production server, no trailing slash |
+
+The service's compose file in Coolify has to pin the image through a variable,
+`image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`, with
+`pull_policy: always` on that entry. The variable is what the workflow rewrites,
+and the pull policy is what stops compose from reusing an old image that is
+already on the host.
+
 ## Docs
 
 - `docs/api.md` is the contract. The app's client code and tests pin to it, and
