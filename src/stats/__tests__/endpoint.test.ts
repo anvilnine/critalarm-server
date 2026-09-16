@@ -44,8 +44,8 @@ function setup(mode: "relay" | "selfhosted" = "relay", statsKey: string | null =
   db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1','hosted',1)").run();
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_ios','acc_1','h_ios','ios','ios-token',?)").run(noon);
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_android','acc_1','h_android','android','android-token',?)").run(noon);
-  db.prepare("INSERT INTO subscriptions (account_id,device_id,topic_hash) VALUES ('acc_1','dev_ios',?)").run(TOPIC_HASH);
-  db.prepare("INSERT INTO subscriptions (account_id,device_id,topic_hash) VALUES ('acc_1','dev_android',?)").run(TOPIC_HASH);
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_ios',?)").run(TOPIC_HASH);
+  db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_android',?)").run(TOPIC_HASH);
   db.prepare("INSERT INTO relay_servers (id, base_url, version, relay_key_hash, created_at) VALUES ('rly_1','https://alerts.example.com','0.1.0',?,1)").run(KEY_HASH);
   const clock = { now: () => noon };
   const dispatcher = new PushDispatcher(

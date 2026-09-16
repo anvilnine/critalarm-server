@@ -106,9 +106,13 @@ export function subscribeDevice(deps: TierDependencies, context: AccountContext,
   if (account === null) throw new Error("not found");
   const existing = deps.db.prepare("SELECT 1 FROM subscriptions WHERE device_id = ? AND topic_hash = ?").get(context.deviceId, topicHash);
   if (existing !== undefined) return;
-  deps.db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES (?, ?, ?)").run(context.accountId, context.deviceId, topicHash);
+  deps.db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES (?, ?)").run(context.deviceId, topicHash);
 }
 
+// The account comes from the device row, not from a copy on the subscription, so
+// a device whose account changed in a merge still deletes its own row. The old
+// filter matched a stale account_id, deleted nothing, and the route still
+// answered 204.
 export function unsubscribeDevice(deps: TierDependencies, context: AccountContext, topicHash: string): void {
-  deps.db.prepare("DELETE FROM subscriptions WHERE account_id = ? AND device_id = ? AND topic_hash = ?").run(context.accountId, context.deviceId, topicHash);
+  deps.db.prepare("DELETE FROM subscriptions WHERE device_id = ? AND topic_hash = ? AND EXISTS (SELECT 1 FROM devices d WHERE d.id = subscriptions.device_id AND d.account_id = ?)").run(context.deviceId, topicHash, context.accountId);
 }
