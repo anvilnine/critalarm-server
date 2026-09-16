@@ -43,7 +43,7 @@ const dispatch = async (events: readonly DeliveryEvent[]) => {
 // api.md §3.7. Undefined when no Apple or Google credential is configured, and
 // that is the normal state today: the provider apps do not exist yet, so the
 // server starts and serves everything else with no sign-in surface mounted.
-const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db);
+const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db, clock);
 const app = createApp({ config, db, clock, ids, dispatch, ...(authHandler === undefined ? {} : { authHandler }) });
 
 await dispatch(incidents.scanDue());

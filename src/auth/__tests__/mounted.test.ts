@@ -25,8 +25,8 @@ const config = loadConfig({
   // selfhosted server does not mount the sign-in surface at all.
   MODE: "relay",
   AUTH_SECRET: "a".repeat(32),
-  GOOGLE_CLIENT_ID: "not-a-real-client",
-  GOOGLE_CLIENT_SECRET: "not-a-real-secret",
+  AUTH_GOOGLE_CLIENT_ID: "not-a-real-client",
+  AUTH_GOOGLE_CLIENT_SECRET: "not-a-real-secret",
 });
 const authHandler = createAuthHandler(config, db);
 const app = createApp({
