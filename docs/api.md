@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.11.0
+**Version:** 1.12.0
 **Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.12.0** adds sign-in (§3.7). An account already exists before anyone signs in, so signing in attaches a human identity to an account rather than creating one. Three routes: `POST /v1/account/link`, `POST /v1/account/merge` and `POST /v1/account/switch`. Identities are Sign in with Apple and Google; there is no email or password on any tier. Sign-out needs no route, because `DELETE /relay/v1/devices/{device_id}` plus a fresh registration is exactly what it is. `app_user_id` on the RevenueCat webhook stops being the `account_id` and becomes a lookup, so one account can hold more than one subscription and a webhook arriving after a merge still lands on the surviving account (§4.3). Sign-in replaces the support path for a lost token (§4.2).
 
 **1.11.0** adds `aj_`, the account join token, so a second handset can attach itself to an account it can already see (§4.1, §4.2), and `DELETE /relay/v1/devices/{device_id}`, so a device can be released from one (§4.2). `caps.devices` on `free` goes from 1 to 5, the same as every other tier. The iOS row of the device storage table splits in two, because one iCloud-synced Keychain item holding both the account and the device identity makes an iPad restore an iPhone's `device_id`, which puts two handsets on one device row where each overwrites the other's push token. `mode` becomes a setting rather than something the server infers, and a self-hosted server is now promised in writing to have no caps, no tiers and no billing, permanently.
 
@@ -350,6 +352,69 @@ For a load balancer, a container health check, or an uptime probe. It touches no
 
 ---
 
+### 3.7 Accounts and sign-in
+
+**Not available in `selfhosted` mode.** A self-hosted server has one operator, one `ad_` token and no accounts to sign in to. Every route in this section answers `501 {"error":"not supported in selfhosted mode"}` there. It is `501` and not `404` so that a client can tell "this server does not do sign-in" apart from "you typed the path wrong", which means these routes are mounted in `selfhosted` mode purely to refuse.
+
+**Signing in does not create an account.** The account already exists: registration made it (§4.2) and it has owned topics, subscriptions, caps and billing ever since. Signing in attaches an identity to it. Reading it the other way round is the single most expensive mistake available here, because it implies moving data that never has to move.
+
+**The credential.** Two things are proven at once: who the person is, and which account this handset brings. One `Authorization` header cannot carry two secrets, so the device token stays in the header exactly as on every other `/v1/` route, and the identity travels in the body. The `identity_token` is issued by the server's own auth surface, not by Apple or Google directly.
+
+```
+POST /v1/account/link                                   // sign up, or sign in
+  Authorization: Bearer dv_...
+  { "identity_token":"..." }
+→ 200 { "account_id":"acc_...", "outcome":"claimed" }
+        // the identity was new. It now points at this device's own account.
+        // Nothing moved. This is the common path and it is cheap.
+→ 200 { "account_id":"acc_...", "outcome":"attached" }
+        // the identity already had an account, and this device's account was
+        // empty, so there was nothing to decide. The device now belongs to the
+        // identity's account and the empty one is tombstoned. dv_ does not change.
+→ 409 { "error":"choose",                               // the app must ask, per device
+        "into_account":"acc_...",                       // the identity's account
+        "topics":3, "incidents":12 }                    // what this device's account would bring
+→ 409 { "error":"account has another identity" }        // this device's account is already claimed
+→ 401
+```
+
+An empty account means no topics and no incidents. That test matters more than it looks: registration runs long before any sign-in screen and creates an account unconditionally, so "a device with no account" cannot happen, and without the empty case every second-handset sign-in would prompt about an account holding nothing.
+
+```
+POST /v1/account/merge                                  // fold this device's account into the identity's
+  Authorization: Bearer dv_...
+  { "identity_token":"...", "into_account":"acc_..." }
+→ 200 { "account_id":"acc_...", "merged_from":"acc_..." }
+→ 409 { "error":"live incident", "incident_id":"inc_..." }   // acknowledge it first, then retry
+→ 409 { "error":"already merged" }                      // either side is already a tombstone
+→ 409 { "error":"same account" }                        // both credentials resolve to one account
+→ 401
+```
+
+A merge keeps every `tk_` token working, on both sides. Topics are merged row by row and never renamed: a rename would make every live token answer `401` and would change the `topic_hash` every device is subscribed to, so a webhook would keep publishing while nobody was paged.
+
+A merge is refused, not forced, while either side has an `open` or `acked` incident. Closing an alarm to tidy up an account is the wrong trade, and the person is the only one who should acknowledge it.
+
+Merged history becomes mutually readable back to the beginning, because polling reads by topic. That is a reason to word the confirmation plainly, not to hide it.
+
+```
+POST /v1/account/switch                                 // start fresh instead of merging
+  Authorization: Bearer dv_...
+  { "identity_token":"...", "into_account":"acc_..." }
+→ 200 { "account_id":"acc_..." }
+→ 401
+```
+
+The device joins the identity's account and its old account is tombstoned, carrying nothing with it.
+
+**This is the branch that can silently stop paging somebody.** Publishing authenticates on the topic token alone and never looks at the account, so an abandoned account's `tk_` tokens keep accepting publishes, keep opening incidents, and have no device left to ring. A `200` and nobody woken. So either the old account's tokens are revoked as part of the switch, or publishing to a topic whose account is tombstoned or deviceless answers `410 {"error":"account is gone"}`. One of the two is required. The prompt must also say the old tokens will stop working, because that is the part a person cannot guess.
+
+**Signing out needs no route.** It is `DELETE /relay/v1/devices/{device_id}` (§4.2) followed by a fresh registration with a new `device_id`. That leaves the old account intact and reachable by signing in again, and it gives the handset a working credential on a new anonymous account.
+
+Doing it any other way bricks the handset. Clearing `dv_` while keeping `device_id` is a permanent `401`: the app only registers when it has no token, and registering a known `device_id` needs the token it no longer has. Keeping the token is not a sign-out at all, because every `/v1/` route authenticates on it.
+
+**Two cases are deliberately undefined and must answer `409`, never `500`.** Signing in to one account on a device whose account is already claimed by a different identity, which is the shared-handset case; and signing up with an identity that already exists elsewhere. Both are decisions about whose data wins, and a unique constraint is not allowed to make them.
+
 ## 4. Relay API
 
 Only served when push credentials are configured (relay and hosted modes).
@@ -435,7 +500,9 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 
 `aj_` is the account join token. It is minted when an account is created, returned once alongside `device_token`, and it authorises one thing: attaching a new device to that account. It is account-scoped, so revoking it touches no device and removing a device breaks no future join. It is not `account_id`, which is returned on every registration and is not a secret. It never publishes and it never manages a topic.
 
-**Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. There is no sign-up screen and no email on any tier. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count. Adding sign-in later means filling in one column on the account row, with no migration of topics or tokens.
+**Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count.
+
+An account can also carry a human identity, which is what §3.7 is for. Signing up on a device writes an identity against the account that device already has, so no topic, token or subscription moves. Signing in on a device whose own account already holds content asks the person to merge or start fresh. Identities are Sign in with Apple and Google. There is no email or password on any tier.
 
 **Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
@@ -528,7 +595,7 @@ DELETE /relay/v1/devices/{device_id}
 
 Deleting a device never deletes the account, its topics or its `tk_` tokens, even when it was the last device. The account stays reachable through `aj_` or through sign-in. Two things need this route: signing out has to release the device server-side, or the handset holds a `device_id` the server knows with no token to prove it owns it and is locked out for good; and the iOS two-item migration has to retire the shared row that an iPhone and an iPad were both using, or that row lingers holding one of their push tokens and rings the wrong phone.
 
-Recovery from a genuinely lost token is a support path, not an API call, in v1. The storage rule above is what keeps that path close to unused.
+Signing in is the recovery path for a lost token (§3.7). Someone who signs in on a replacement handset gets a new `device_id` and a new `dv_` attached to the account their identity points at. The storage rule above is still what keeps that path rare, because it is the only path back for someone who never signed up.
 
 ### 4.3 RevenueCat → relay
 
@@ -537,7 +604,13 @@ POST /webhooks/revenuecat
 Authorization: Bearer <shared secret from RevenueCat dashboard>
 ```
 
-Body is RevenueCat's webhook event. `app_user_id` is the **`account_id`**, which the app sets on the RevenueCat SDK right after registration. Updates `tier` on the account, so every device under it changes tier in one write.
+Body is RevenueCat's webhook event. `app_user_id` is **looked up** to find the account it belongs to. The app sets it to the `account_id` right after registration, so for an account that has never merged the two are the same string, but the server resolves it through its own record rather than treating it as a primary key. That record survives a merge: after account A folds into B, a webhook for A's old `app_user_id` lands on B.
+
+An account may hold more than one `app_user_id`, because a merge brings both sides' subscriptions with it. Tier is then the **highest live entitlement** across them, never the last event to arrive. Without that rule, one lapsed subscription downgrades an account somebody else is still paying for.
+
+Two things the server must not do with this webhook. It must not apply an event it has already applied, because events are retried. And it must not apply an event older than the last one applied for that `app_user_id`, because they arrive out of order, and an `EXPIRATION` overtaking a renewal cancels a live subscription. A billing failure is not an expiry: no event that only reports a payment problem may lower a tier. Crit Alarm is an alarm, and a card that failed on a Tuesday is not a reason to stop ringing.
+
+Updates `tier` on the resolved account, so every device under it changes tier in one write.
 
 Using `device_id` here would attach the purchase to a handset. A reinstall or a second handset would then leave the server with two records for one paying person and no way to join them.
 

@@ -3,6 +3,57 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.12.0 - 2026-09-17
+
+### Added
+
+- Sign-in (§3.7). `POST /v1/account/link` attaches an identity, and answers 409
+  with the choice when the person has to decide. `POST /v1/account/merge` folds
+  the device's account into the identity's. `POST /v1/account/switch` starts
+  fresh instead. Identities are Sign in with Apple and Google.
+- All three answer `501` in `selfhosted` mode, and are mounted there only to
+  refuse, so a client can tell "this server does not do sign-in" apart from a
+  wrong path.
+
+### Changed
+
+- `app_user_id` on the RevenueCat webhook is a lookup, not the `account_id`
+  (§4.3). An account may hold several, tier is the highest live entitlement
+  across them, repeat and out-of-order events must not apply, and no
+  payment-problem event may lower a tier.
+- Signing in is the documented recovery path for a lost device token (§4.2),
+  replacing the support path.
+- The accounts paragraph in §4.2 no longer says there is no sign-up screen, and
+  no longer claims sign-in is one column on the account row.
+
+### Not added, on purpose
+
+- No sign-out route. Signing out is `DELETE /relay/v1/devices/{device_id}` plus
+  a fresh registration, both of which already exist as of 1.11.0. Any other
+  shape bricks the handset: clearing `dv_` while keeping `device_id` is a
+  permanent 401, and keeping the token is not a sign-out at all.
+
+### Why
+
+Crit Alarm's anonymous account was always a real account that happened to lack a
+human. So sign-in attaches an identity to an account that exists, and the common
+path moves no data at all. Writing it the other way round, as "sign-in creates an
+account and the device's data migrates into it", is the expensive reading and it
+is the one the old §4.2 wording implied.
+
+Two branches carry the real risk and both are written down as requirements rather
+than left to an implementer. A merge is refused while either side has a live
+incident, because ending somebody's alarm to tidy an account is the wrong trade.
+And "start fresh" must revoke the abandoned account's publish tokens, or answer
+410 on publish to a tombstoned account, because publishing authenticates on the
+topic token alone: otherwise a webhook keeps succeeding, incidents keep opening,
+and there is no device left to ring.
+
+Two cases stay undefined and must answer 409: signing in on a handset whose
+account another identity already claimed, and signing up with an identity that
+exists elsewhere. Both decide whose data wins, and a unique constraint is not
+allowed to decide that at 500.
+
 ## 1.11.0 - 2026-09-17
 
 ### Added
