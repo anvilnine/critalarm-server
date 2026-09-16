@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.9.0
-**Status:** draft, 2026-09-16. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.10.0
+**Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.10.0** adds `GET /v1/topics/{name}/tokens`, so a client can see which tokens a topic has (§3.1). `DELETE /v1/topics/{name}/tokens/{token_id}` has existed since 1.5.0 and is keyed on a `token_id`, but nothing ever handed one out except topic creation and `POST .../tokens`, both of which return it once. A client that did not write it down at that moment could never revoke anything. The listing returns `token_id` and `created_at` only. The server stores a SHA-256 hash of each token and not the token, so it cannot return a token value here even if it wanted to, and a token is still shown exactly once, when it is made.
 
 **1.9.0** writes down what `limit` on `GET /v1/incidents` does (§3.2). It defaults to 20 when the parameter is absent and its maximum is 200; ask for more and the server gives you 200. The default was already the server's behaviour and was never documented, so a client that left the parameter off got 20 rows while believing it had asked for everything. There is no paging in v1, so 200 is the most incidents a client can read in one call.
 
@@ -231,6 +233,10 @@ PATCH  /v1/topics/{name}
 DELETE /v1/topics/{name}
 → 204
 
+GET    /v1/topics/{name}/tokens
+→ 200 [{ "token_id":"tok_...", "created_at":... }]  // ids only; never a token value
+→ 404 {"error":"not found"}
+
 POST   /v1/topics/{name}/tokens
 → 201 { "token":"tk_...", "token_id":"tok_..." }   // additional token; token returned once
 
@@ -244,6 +250,8 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 `relay_content` is read-only here; it is server config.
 
 **Every token has a `token_id`, including the one creation hands back.** `DELETE /v1/topics/{name}/tokens/{token_id}` is keyed on it, so a token returned without one could never be revoked, and the creation token is the one that actually ships out to a monitoring tool. A topic always keeps at least one token; deleting the last one answers `409`.
+
+**A token value is returned once and never again.** The server keeps a SHA-256 hash of the token, not the token, so it has nothing to show a second time. `GET /v1/topics/{name}/tokens` lists `token_id` and `created_at` and nothing else. It is how a client that lost the value still finds the id to revoke, ordered oldest first. There is no paging: a topic holds few enough tokens that the whole list fits in one answer.
 
 **Creating a topic that already exists answers `409`, not `500`.** Names are unique per account. A client that retries after a dropped `201` will hit this, so it must be a clean, JSON answer.
 
