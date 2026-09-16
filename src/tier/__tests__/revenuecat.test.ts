@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
@@ -62,6 +62,24 @@ describe("RevenueCat webhook", () => {
 
     expect(missing.status).toBe(401);
     expect(wrong.status).toBe(401);
+  });
+
+  // An empty secret is defined, so it passed the startup check, and then the
+  // sha256 of "" matched the sha256 of a request with no Authorization header.
+  it("is not mounted when the shared secret is empty or unset", async () => {
+    const db = openDatabase(":memory:");
+    migrate(db);
+    const ids = { account: () => "acc_unused", deviceToken: () => "dv_unused" };
+    const empty = createTierRouter({ db, clock: { now: () => 1_000 }, ids, revenueCat: { sharedSecret: "", entitlements: {} } });
+    const unset = createTierRouter({ db, clock: { now: () => 1_000 }, ids });
+
+    const unauthenticated = await empty.request("/webhooks/revenuecat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(event()) });
+    const guessed = await empty.request("/webhooks/revenuecat", { method: "POST", headers: { Authorization: "Bearer ", "content-type": "application/json" }, body: JSON.stringify(event()) });
+
+    expect([unauthenticated.status, guessed.status]).toEqual([404, 404]);
+    expect((await unset.request("/webhooks/revenuecat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(event()) })).status).toBe(404);
+    expect((await unset.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "p", app_version: "1.0.0" }) })).status).toBe(201);
+    db.close();
   });
 
   it("rejects malformed webhook bodies", async () => {
