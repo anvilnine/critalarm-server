@@ -9,13 +9,14 @@ import type Database from "better-sqlite3";
 // a user asking for something, and the cap was already applied where the device
 // or the topic was created.
 //
-// account_id is written because the p4 quota query in relay/router.ts and
-// unsubscribeDevice still read the row by it.
+// A row holds no account of its own. devices.account_id is the one copy, so a
+// merge that moves a device to another account moves its subscriptions with it
+// and nothing goes stale.
 
 export function sweepDeviceIntoTopics(db: Database.Database, accountId: string, deviceId: string): void {
-  db.prepare("INSERT OR IGNORE INTO subscriptions (account_id, device_id, topic_hash) SELECT account_id, ?, topic_hash FROM topics WHERE account_id = ?").run(deviceId, accountId);
+  db.prepare("INSERT OR IGNORE INTO subscriptions (device_id, topic_hash) SELECT ?, topic_hash FROM topics WHERE account_id = ?").run(deviceId, accountId);
 }
 
 export function sweepTopicIntoDevices(db: Database.Database, accountId: string, topicHash: string): void {
-  db.prepare("INSERT OR IGNORE INTO subscriptions (account_id, device_id, topic_hash) SELECT account_id, id, ? FROM devices WHERE account_id = ?").run(topicHash, accountId);
+  db.prepare("INSERT OR IGNORE INTO subscriptions (device_id, topic_hash) SELECT id, ? FROM devices WHERE account_id = ?").run(topicHash, accountId);
 }

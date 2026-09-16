@@ -19,7 +19,7 @@ export function ensureSelfHostedIdentity(db: Database.Database): { token: string
 }
 
 function ensureAccount(db: Database.Database): void {
-  db.prepare("INSERT OR IGNORE INTO accounts (id, tier, rc_app_user_id, created_at) VALUES (?, 'hosted', NULL, ?)").run(ACCOUNT_ID, Math.floor(Date.now() / 1000));
+  db.prepare("INSERT OR IGNORE INTO accounts (id, tier, created_at) VALUES (?, 'hosted', ?)").run(ACCOUNT_ID, Math.floor(Date.now() / 1000));
 }
 
 export function showAdminToken(db: Database.Database): string | undefined {

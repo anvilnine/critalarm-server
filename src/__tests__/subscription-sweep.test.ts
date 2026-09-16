@@ -88,8 +88,11 @@ function accountOf(db: Db): string {
   return (db.prepare("SELECT id FROM accounts").get() as { id: string }).id;
 }
 
+// The account comes from devices now, not from a column on the subscription, so
+// reading it back through the join is also what proves the sweep put the row on
+// the right account's device.
 function rows(db: Db) {
-  return db.prepare("SELECT account_id, device_id, topic_hash FROM subscriptions ORDER BY device_id, topic_hash").all();
+  return db.prepare("SELECT d.account_id, s.device_id, s.topic_hash FROM subscriptions s JOIN devices d ON d.id = s.device_id ORDER BY s.device_id, s.topic_hash").all();
 }
 
 function expectRows(db: Db, accountId: string, pairs: [string, string][]) {
