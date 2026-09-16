@@ -16,7 +16,8 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "release": "./scripts/release.sh"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
