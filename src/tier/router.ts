@@ -64,7 +64,6 @@ export function createTierRouter(deps: TierDependencies): Hono {
       return c.body(null, 204);
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
-      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       if (error instanceof Error && error.message === "not found") return c.json({ error: "not found" }, 404);
       throw error;
     }

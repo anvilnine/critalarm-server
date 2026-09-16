@@ -34,16 +34,16 @@ describe("device subscriptions", () => {
     expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
   });
 
-  it("counts distinct topic hashes across the account before applying the critical topic cap", async () => {
+  it("lets a free account subscribe past the critical topic cap", async () => {
     const { app, db } = setup();
+    const thirdHash = "f".repeat(64);
     db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_one', ?)").run(firstHash);
 
     expect((await subscribe(app, "dev_two", "dv_two", secondHash)).status).toBe(204);
-    const response = await subscribe(app, "dev_two", "dv_two", "f".repeat(64));
+    const response = await subscribe(app, "dev_two", "dv_two", thirdHash);
 
-    expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ error: "cap", cap: "critical_topics" });
-    expect(db.prepare("SELECT topic_hash FROM subscriptions ORDER BY topic_hash").all()).toEqual([{ topic_hash: firstHash }, { topic_hash: secondHash }]);
+    expect(response.status).toBe(204);
+    expect(db.prepare("SELECT topic_hash FROM subscriptions ORDER BY topic_hash").all()).toEqual([{ topic_hash: firstHash }, { topic_hash: secondHash }, { topic_hash: thirdHash }]);
   });
 
   it("allows a second device on the same account to subscribe to an existing topic hash", async () => {
@@ -75,7 +75,7 @@ describe("device subscriptions", () => {
   });
 });
 
-it.each(["relay", "hosted"])("%s null critical topic cap allows more than two topics", async tier => {
+it.each(["free", "relay", "hosted"])("a %s account subscribes to as many topics as it likes", async tier => {
   const { app, db } = setup();
   db.prepare("UPDATE accounts SET tier = ? WHERE id = 'acc_1'").run(tier);
   for (let i = 0; i < 10; i++) {
