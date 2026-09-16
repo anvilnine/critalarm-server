@@ -239,6 +239,69 @@ describe("ApnsSender", () => {
     expect((error as Error).message).toBe("apns transport failed: connect ECONNREFUSED 17.0.0.1:443");
   });
 
+  it("retries once on a transport failure and delivers on the second try", async () => {
+    let attempts = 0;
+    const transport = new FakeTransport(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("apns transport failed: no answer from apple in 5000ms");
+      return { status: 200, headers: { ":status": "200" }, body: "" };
+    });
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "sandbox",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    const result = await sender.send(device, event());
+
+    expect(result).toEqual({ status: 200, stale: false });
+    expect(attempts).toBe(2);
+    expect(transport.sent).toHaveLength(2);
+    expect(transport.sent[0]!.body).toBe(transport.sent[1]!.body);
+  });
+
+  it("gives up after one retry so a real outage does not hang twice over", async () => {
+    let attempts = 0;
+    const transport = new FakeTransport(async () => {
+      attempts += 1;
+      throw new Error("apns transport failed: apple is down");
+    });
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "sandbox",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    await expect(sender.send(device, event())).rejects.toThrow("apple is down");
+    expect(attempts).toBe(2);
+  });
+
+  it("does not retry a push Apple refused", async () => {
+    const transport = replies(400, JSON.stringify({ reason: "BadDeviceToken" }));
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "sandbox",
+      clock: { now: () => 1_000 },
+      transport,
+    });
+
+    const result = await sender.send(device, event());
+
+    expect(result).toEqual({ status: 400, stale: false });
+    expect(transport.sent).toHaveLength(1);
+  });
+
   it("closes its transport on shutdown", () => {
     const transport = replies(200);
     const sender = new ApnsSender({
