@@ -53,6 +53,48 @@ async function expectCap(response: Response) {
   expect(await response.json()).toEqual({ error: "cap", cap: "critical_topics" });
 }
 
+describe("contract 1.10.0 topic tokens", () => {
+  it("lists a topic's token ids and never a token value", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const original = await made.json() as { token: string; token_id: string };
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens");
+    const second = await extra.json() as { token: string; token_id: string };
+
+    const listed = await request(app, "GET", "/v1/topics/prod/tokens");
+    expect(listed.status).toBe(200);
+    const rows = await listed.json() as { token_id: string; created_at: number }[];
+    expect(rows).toEqual([
+      { token_id: original.token_id, created_at: 1000 },
+      { token_id: second.token_id, created_at: 1000 },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain(original.token);
+    expect(JSON.stringify(rows)).not.toContain(second.token);
+  });
+
+  it("drops a revoked token from the listing", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const { token_id } = await made.json() as { token_id: string };
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens");
+    const second = await extra.json() as { token_id: string };
+
+    expect((await request(app, "DELETE", `/v1/topics/prod/tokens/${token_id}`)).status).toBe(204);
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id: second.token_id, created_at: 1000 },
+    ]);
+  });
+
+  it("answers 404 for a topic this account does not own", async () => {
+    const { app } = setup();
+    await create(app, "prod");
+    const other = await request(app, "GET", "/v1/topics/prod/tokens", undefined, { ...headers, Authorization: "Bearer dv_b" });
+    expect(other.status).toBe(404);
+    expect(await other.json()).toEqual({ error: "not found" });
+    expect((await request(app, "GET", "/v1/topics/never-made/tokens")).status).toBe(404);
+  });
+});
+
 describe("contract 1.5.0 topics", () => {
   it("returns the numeric duplicate error without creating another token", async () => {
     const { app, db } = setup();
