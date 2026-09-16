@@ -28,7 +28,7 @@ describe("device subscriptions", () => {
 
     expect((await subscribe(app, "dev_one", "dv_one", firstHash)).status).toBe(204);
     expect((await subscribe(app, "dev_one", "dv_one", firstHash)).status).toBe(204);
-    expect(db.prepare("SELECT account_id, device_id, topic_hash FROM subscriptions").all()).toEqual([{ account_id: "acc_1", device_id: "dev_one", topic_hash: firstHash }]);
+    expect(db.prepare("SELECT device_id, topic_hash FROM subscriptions").all()).toEqual([{ device_id: "dev_one", topic_hash: firstHash }]);
     const deletion = await app.request(`/relay/v1/devices/dev_one/subscriptions/${firstHash}`, { method: "DELETE", headers: { Authorization: "Bearer dv_one" } });
     expect(deletion.status).toBe(204);
     expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
@@ -37,7 +37,7 @@ describe("device subscriptions", () => {
   it("lets a free account subscribe past the critical topic cap", async () => {
     const { app, db } = setup();
     const thirdHash = "f".repeat(64);
-    db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_one', ?)").run(firstHash);
+    db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_one', ?)").run(firstHash);
 
     expect((await subscribe(app, "dev_two", "dv_two", secondHash)).status).toBe(204);
     const response = await subscribe(app, "dev_two", "dv_two", thirdHash);
@@ -48,7 +48,7 @@ describe("device subscriptions", () => {
 
   it("allows a second device on the same account to subscribe to an existing topic hash", async () => {
     const { app, db } = setup();
-    db.prepare("INSERT INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', 'dev_one', ?)").run(firstHash);
+    db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_one', ?)").run(firstHash);
 
     const response = await subscribe(app, "dev_two", "dv_two", firstHash);
 
@@ -62,6 +62,21 @@ describe("device subscriptions", () => {
     const response = await subscribe(app, "dev_other", "dv_one", firstHash);
 
     expect(response.status).toBe(404);
+    expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
+  });
+
+  // The row used to carry a copy of the account, written once at insert and
+  // never updated. After a merge moved the device, the delete filtered on the
+  // old account, removed nothing, and the route still answered 204: the user
+  // taps "stop alerting this device" and the alarm keeps ringing.
+  it("deletes the row for a device whose account changed", async () => {
+    const { app, db } = setup();
+    expect((await subscribe(app, "dev_one", "dv_one", firstHash)).status).toBe(204);
+
+    db.prepare("UPDATE devices SET account_id = 'acc_2' WHERE id = 'dev_one'").run();
+    const response = await app.request(`/relay/v1/devices/dev_one/subscriptions/${firstHash}`, { method: "DELETE", headers: { Authorization: "Bearer dv_one" } });
+
+    expect(response.status).toBe(204);
     expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
   });
 

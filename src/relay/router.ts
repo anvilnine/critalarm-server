@@ -36,7 +36,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     // relay already serves a topic for is not a remote topic: base_url is
     // server-wide, so a stranger can compute a hosted account's topic_hash from
     // the topic name, and a push for it is dropped rather than rung.
-    const accounts = db.prepare("SELECT DISTINCT s.account_id, a.tier FROM subscriptions s JOIN accounts a ON a.id = s.account_id WHERE s.topic_hash = ? AND NOT EXISTS (SELECT 1 FROM topics t WHERE t.account_id = s.account_id AND t.topic_hash = s.topic_hash)").all(body.topic_hash) as { account_id: string; tier: Tier }[];
+    const accounts = db.prepare("SELECT DISTINCT d.account_id, a.tier FROM subscriptions s JOIN devices d ON d.id = s.device_id JOIN accounts a ON a.id = d.account_id WHERE s.topic_hash = ? AND NOT EXISTS (SELECT 1 FROM topics t WHERE t.account_id = d.account_id AND t.topic_hash = s.topic_hash)").all(body.topic_hash) as { account_id: string; tier: Tier }[];
     if (body.kind === "p4") {
       const day = Math.floor(Date.now() / 1000 / 86400) * 86400;
       let eligible = 0;

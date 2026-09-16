@@ -277,7 +277,7 @@ describe("account join token", () => {
     const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
 
     expect(response.status).toBe(201);
-    expect(db.prepare("SELECT account_id, device_id, topic_hash FROM subscriptions WHERE device_id = ?").all(secondDeviceId)).toEqual([{ account_id: "acc_1", device_id: secondDeviceId, topic_hash: topicHash }]);
+    expect(db.prepare("SELECT device_id, topic_hash FROM subscriptions WHERE device_id = ?").all(secondDeviceId)).toEqual([{ device_id: secondDeviceId, topic_hash: topicHash }]);
   });
 });
 
@@ -287,7 +287,7 @@ describe("releasing a device", () => {
     const { deviceToken } = await registerFirst(app);
     const topicHash = "b".repeat(64);
     insertTopic(db, "acc_1", topicHash);
-    db.prepare("INSERT OR IGNORE INTO subscriptions (account_id, device_id, topic_hash) VALUES ('acc_1', ?, ?)").run(device.device_id, topicHash);
+    db.prepare("INSERT OR IGNORE INTO subscriptions (device_id, topic_hash) VALUES (?, ?)").run(device.device_id, topicHash);
     db.prepare("INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at) VALUES (?, 'la_update', 'act_1', 'inc_1', 'la-token', 1)").run(device.device_id);
 
     const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "DELETE", headers: { Authorization: `Bearer ${deviceToken}` } });
