@@ -31,27 +31,27 @@ describe("sign-in credentials", () => {
     db.close();
   });
 
-  it("are refused when only half a provider pair is set", () => {
-    expect(() => loadConfig(env({ APPLE_CLIENT_ID: "app.id" }))).toThrow("invalid configuration: APPLE sign-in credentials");
-    expect(() => loadConfig(env({ GOOGLE_CLIENT_SECRET: "s" }))).toThrow("invalid configuration: GOOGLE sign-in credentials");
+  it("are refused when only part of a credential is set", () => {
+    expect(() => loadConfig(env({ AUTH_APPLE_CLIENT_ID: "app.id" }))).toThrow("invalid configuration: AUTH_APPLE sign-in credentials");
+    expect(() => loadConfig(env({ AUTH_GOOGLE_CLIENT_SECRET: "s" }))).toThrow("invalid configuration: AUTH_GOOGLE sign-in credentials");
   });
 
   it("are refused without AUTH_SECRET, because a session cannot be signed", () => {
-    expect(() => loadConfig(env({ APPLE_CLIENT_ID: "app.id", APPLE_CLIENT_SECRET: "s" }))).toThrow("invalid configuration: AUTH_SECRET");
+    expect(() => loadConfig(env({ AUTH_APPLE_CLIENT_ID: "app.id", AUTH_APPLE_CLIENT_SECRET: "s" }))).toThrow("invalid configuration: AUTH_SECRET");
   });
 
   it("are read from the environment when whole", () => {
     const config = loadConfig(env({
       AUTH_SECRET: "a".repeat(32),
-      APPLE_CLIENT_ID: "app.critalarm.signin",
-      APPLE_CLIENT_SECRET: "apple-jwt",
-      APPLE_APP_BUNDLE_IDENTIFIER: "app.critalarm",
-      GOOGLE_CLIENT_ID: "google-id",
-      GOOGLE_CLIENT_SECRET: "google-secret",
+      AUTH_APPLE_CLIENT_ID: "app.critalarm.signin",
+      AUTH_APPLE_CLIENT_SECRET: "apple-jwt",
+      AUTH_APPLE_APP_BUNDLE_IDENTIFIER: "app.critalarm",
+      AUTH_GOOGLE_CLIENT_ID: "google-id",
+      AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
     }));
     expect(config.auth).toEqual({
       secret: "a".repeat(32),
-      apple: { clientId: "app.critalarm.signin", clientSecret: "apple-jwt", appBundleIdentifier: "app.critalarm" },
+      apple: { clientId: "app.critalarm.signin", credential: { kind: "secret", clientSecret: "apple-jwt" }, appBundleIdentifier: "app.critalarm" },
       google: { clientId: "google-id", clientSecret: "google-secret" },
     });
     expect(authIsConfigured(config.auth)).toBe(true);
@@ -60,7 +60,7 @@ describe("sign-in credentials", () => {
   it("build a handler when one provider is whole", () => {
     const db = openDatabase(":memory:");
     migrate(db);
-    const config = loadConfig(env({ AUTH_SECRET: "a".repeat(32), GOOGLE_CLIENT_ID: "id", GOOGLE_CLIENT_SECRET: "secret" }));
+    const config = loadConfig(env({ AUTH_SECRET: "a".repeat(32), AUTH_GOOGLE_CLIENT_ID: "id", AUTH_GOOGLE_CLIENT_SECRET: "secret" }));
     expect(createAuthHandler(config, db)).toBeInstanceOf(Function);
     db.close();
   });
