@@ -2,7 +2,7 @@ name: Release
 
 # Builds the image for amd64 and arm64 and pushes it to GitHub's registry.
 # Pushes to main get the short sha and `latest`. A `v*` tag gets the semver
-# tags as well.
+# tags as well, and only a `v*` tag deploys production.
 on:
   push:
     branches: [main]
@@ -61,3 +61,132 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  deploy:
+    # Only a `v*` tag deploys production. A push to main builds `latest` and
+    # `sha-*` and stops there. This is an alarm server: the thing that wakes
+    # people up does not get replaced every time someone merges a branch.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    # How the deploy makes the host run the new code:
+    #
+    # The Coolify service pins its image through a variable,
+    # `image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`, and the
+    # server entry sets `pull_policy: always`. This job writes the released
+    # version into that variable and then starts the service. Coolify's start
+    # runs `docker compose up -d --force-recreate`, and `pull_policy: always`
+    # makes compose fetch the tag from the registry first, so the container
+    # cannot come back on a stale image that happened to be on the host.
+    #
+    # Do not swap the start call for the restart call with `latest=true`.
+    # Coolify's restart stops the containers and fires a host-wide docker
+    # cleanup in parallel with the pull. The cleanup deletes the image it is
+    # still downloading, compose then has nothing to start, and production
+    # stays down. Seen on 2026-09-16.
+    env:
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+      COOLIFY_SERVICE_UUID: ${{ secrets.COOLIFY_SERVICE_UUID }}
+      PRODUCTION_BASE_URL: ${{ secrets.PRODUCTION_BASE_URL }}
+      IMAGE_TAG_VARIABLE: CRITALARM_IMAGE_TAG
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the secrets are set
+        run: |
+          missing=""
+          for name in COOLIFY_URL COOLIFY_TOKEN COOLIFY_SERVICE_UUID PRODUCTION_BASE_URL; do
+            if [ -z "${!name}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing repository secrets:$missing" >&2
+            echo "See the Releasing section of README.md." >&2
+            exit 1
+          fi
+
+      - name: Check the tag matches package.json
+        id: version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$package_version" ]; then
+            echo "Tag $GITHUB_REF_NAME carries version $tag_version but package.json says $package_version." >&2
+            echo "The running server reports package.json, so the two must agree. Cut releases with scripts/release.sh." >&2
+            exit 1
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Point the service at the new image
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -o /tmp/patch-env.json -w '%{http_code}' \
+            -X PATCH \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json' \
+            -d "{\"key\":\"$IMAGE_TAG_VARIABLE\",\"value\":\"${{ steps.version.outputs.version }}\",\"is_literal\":true}" \
+            "$COOLIFY_URL/api/v1/services/$COOLIFY_SERVICE_UUID/envs")
+          echo "HTTP $status"
+          cat /tmp/patch-env.json
+          echo
+          case "$status" in
+            2*) ;;
+            *) echo "Coolify refused the image tag update." >&2; exit 1 ;;
+          esac
+
+      - name: Start the service
+        run: |
+          set -euo pipefail
+          status=$(curl -sS -o /tmp/start.json -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            -H 'Accept: application/json' \
+            "$COOLIFY_URL/api/v1/services/$COOLIFY_SERVICE_UUID/start")
+          echo "HTTP $status"
+          cat /tmp/start.json
+          echo
+          case "$status" in
+            2*) ;;
+            *) echo "Coolify refused the start request." >&2; exit 1 ;;
+          esac
+
+      - name: Wait for production to report the new version
+        # A 200 from Coolify only means the job was queued. The old container
+        # answers /v1/info too, with the old version, so this step is what
+        # tells a real deploy from a stale one. It fails the workflow if the
+        # version never changes.
+        run: |
+          set -uo pipefail
+          expected='${{ steps.version.outputs.version }}'
+          deadline=$(( $(date +%s) + 300 ))
+          read_version='
+            const url = process.env.PRODUCTION_BASE_URL + "/v1/info";
+            fetch(url, { signal: AbortSignal.timeout(10000) })
+              .then((r) => r.json())
+              .then((info) => process.stdout.write(String(info.version ?? "")))
+              .catch(() => {});
+          '
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            reported=$(node -e "$read_version" || true)
+            echo "$(date -u +%H:%M:%S) /v1/info reports '${reported:-nothing}', waiting for '$expected'"
+            if [ "$reported" = "$expected" ]; then
+              echo "Production is running $expected."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Production never reported $expected within 5 minutes." >&2
+          echo "Check the service in Coolify before assuming the release shipped." >&2
+          exit 1
