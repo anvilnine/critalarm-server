@@ -3,6 +3,22 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.7.0 - 2026-09-16
+
+### Added
+
+- `"content-available": 1` in the iOS payload on a critical topic (§5.1).
+
+The iOS app schedules the AlarmKit alarm from its background-push handler.
+iOS only calls that handler when the push carries `content-available`. Without
+it the phone showed a notification, played `alarm.caf`, and no alarm ever rang.
+
+It goes out on exactly the same pushes as the sound: priority 5, `critical` on,
+with an incident id. Quieter pushes stay asleep, because waking the app costs
+battery and Apple throttles background pushes.
+
+Additive. No field changed or went away. FCM is untouched.
+
 ## 1.6.0 - 2026-09-16
 
 Apple Critical Alerts is gone. Apple turned the entitlement down, and APNs
