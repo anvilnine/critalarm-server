@@ -26,7 +26,10 @@ export class RelayClient {
   private async key(): Promise<string> {
     const row = this.options.db.prepare("SELECT relay_key FROM relay_client_credentials WHERE relay_url = ?").get(this.options.relayUrl) as { relay_key: string } | undefined;
     if (row !== undefined) return row.relay_key;
-    const response = await (this.options.fetch ?? fetch)(new Request(`${this.options.relayUrl.replace(/\/$/, "")}/relay/v1/servers`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ base_url: this.options.baseUrl, version }) }));
+    // A relay that gates registration hands its operator's secret to the people
+    // it wants forwarding to it, and refuses a caller without it.
+    const registration = this.options.registrationSecret;
+    const response = await (this.options.fetch ?? fetch)(new Request(`${this.options.relayUrl.replace(/\/$/, "")}/relay/v1/servers`, { method: "POST", headers: { "content-type": "application/json", ...(registration === undefined ? {} : { authorization: `Bearer ${registration}` }) }, body: JSON.stringify({ base_url: this.options.baseUrl, version }) }));
     if (!response.ok) throw new Error(`relay key request failed: ${response.status}`);
     const body = await response.json() as unknown;
     if (typeof body !== "object" || body === null || typeof (body as { relay_key?: unknown }).relay_key !== "string") throw new Error("relay key missing");

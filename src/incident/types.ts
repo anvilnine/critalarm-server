@@ -21,6 +21,10 @@ export interface DeliveryEvent {
   body: string;
   critical: boolean;
   relayContent?: "none" | "full";
+  // The account that owns the topic. Set by whoever builds the event when the
+  // message is not stored in this database, which is every relayed push
+  // (api.md §4.1). Absent means the dispatcher resolves it from the message.
+  accountId?: string;
 }
 
 export interface StoredMessageInput {

@@ -24,4 +24,14 @@ describe("rate limiter client keys", () => {
     expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.1, 10.0.0.1" } })).status).toBe(200);
     expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.2, 10.0.0.1" } })).status).toBe(200);
   });
+
+  // Cloudflare appends to x-forwarded-for, so the left-most hop is whatever the
+  // client typed. Changing it every request used to mean the limiter never
+  // fired.
+  it("keys on cf-connecting-ip when a client forges x-forwarded-for behind Cloudflare", async () => {
+    const server = app(true);
+    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.1", "cf-connecting-ip": "203.0.113.7" } })).status).toBe(200);
+    expect((await server.request("/", { headers: { "x-forwarded-for": "198.51.100.2", "cf-connecting-ip": "203.0.113.7" } })).status).toBe(429);
+    expect((await server.request("/", { headers: { "cf-connecting-ip": "203.0.113.8" } })).status).toBe(200);
+  });
 });
