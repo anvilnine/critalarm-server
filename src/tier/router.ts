@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { authenticateDevice, bearerFromHeader } from "./auth.js";
+import { authenticateDevice, bearerFromHeader, joinBearerFromHeader } from "./auth.js";
 import { capsFor } from "./caps.js";
-import { CapError, deviceUpdateSchema, registerDevice, registrationSchema, subscribeDevice, subscriptionSchema, unsubscribeDevice, updateDevice } from "./devices.js";
+import { CapError, deleteDevice, deviceUpdateSchema, registerDevice, registrationSchema, subscribeDevice, subscriptionSchema, unsubscribeDevice, updateDevice } from "./devices.js";
 import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from "./device-tokens.js";
 import { applyRevenueCatEvent, parseRevenueCatEvent } from "./revenuecat.js";
 import { bearerSecretMatches } from "../bearer.js";
@@ -25,12 +25,15 @@ export function createTierRouter(deps: TierDependencies): Hono {
       const input = registrationSchema.parse(await requestJson(c.req.raw));
       const authorization = c.req.header("authorization");
       const bearer = bearerFromHeader(authorization);
-      if (authorization !== undefined && bearer === undefined) return c.json({ error: "unauthorized" }, 401);
+      const joinBearer = joinBearerFromHeader(authorization);
+      if (authorization !== undefined && bearer === undefined && joinBearer === undefined) return c.json({ error: "unauthorized" }, 401);
       const context = bearer === undefined ? undefined : authenticateDevice(deps.db, bearer);
       if (bearer !== undefined && context === null) return c.json({ error: "unauthorized" }, 401);
-      const registration = registerDevice(deps, input, bearer, context ?? undefined);
+      const registration = registerDevice(deps, input, bearer, context ?? undefined, joinBearer);
       const response = { account_id: registration.accountId, tier: registration.tier, caps: capsFor(registration.tier) };
-      return c.json(registration.deviceToken === undefined ? response : { device_token: registration.deviceToken, ...response }, registration.deviceToken === undefined ? 200 : 201);
+      if (registration.deviceToken === undefined) return c.json(response, 200);
+      const join = registration.accountJoinToken === undefined ? {} : { account_join_token: registration.accountJoinToken };
+      return c.json({ device_token: registration.deviceToken, ...join, ...response }, 201);
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
       if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
@@ -53,6 +56,21 @@ export function createTierRouter(deps: TierDependencies): Hono {
       if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
       throw error;
     }
+  });
+
+  // api.md §4.2. 401 for a wrong or another device's token, 404 for a device_id
+  // the server has never issued.
+  router.delete("/relay/v1/devices/:deviceId", (c) => {
+    const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
+    if (context === null) return c.json({ error: "unauthorized" }, 401);
+    const target = c.req.param("deviceId");
+    if (target !== context.deviceId) {
+      const known = deps.db.prepare("SELECT 1 FROM devices WHERE id = ?").get(target);
+      if (known === undefined) return c.json({ error: "not found" }, 404);
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    deleteDevice(deps, context.deviceId);
+    return c.body(null, 204);
   });
 
   router.post("/relay/v1/devices/:deviceId/subscriptions", async (c) => {
