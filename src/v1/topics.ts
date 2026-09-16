@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import type { Config } from "../config.js";
 import type { Clock } from "../incident/types.js";
 import { capsFor } from "../tier/caps.js";
+import { sweepTopicIntoDevices } from "../tier/subscriptions.js";
 import type { Tier } from "../tier/types.js";
 const namePattern=/^[-_A-Za-z0-9]{1,64}$/;
 type Row={id:string;name:string;critical:number;repeat_interval_s:number;max_ring_s:number;desk_timer_s:number;relay_content:"none"|"full";created_at:number};
@@ -25,8 +26,10 @@ export function createTopic(db: Database.Database, config: Config, clock: Clock,
     const tokenId = `tok_${randomUUID()}`;
     const id = `top_${randomUUID()}`;
     const now = clock.now();
-    db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES (?,?,?,?,?,?,30,1800,600,?,?)").run(id,accountId,name,config.baseUrl,createHash("sha256").update(`${config.baseUrl}/${name}`).digest("hex"),critical ? 1 : 0,config.relayContent,now);
+    const topicHash = createHash("sha256").update(`${config.baseUrl}/${name}`).digest("hex");
+    db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES (?,?,?,?,?,?,30,1800,600,?,?)").run(id,accountId,name,config.baseUrl,topicHash,critical ? 1 : 0,config.relayContent,now);
     db.prepare("INSERT INTO topic_tokens (id,topic_id,hash,created_at) VALUES (?,?,?,?)").run(tokenId,id,createHash("sha256").update(token).digest("hex"),now);
+    sweepTopicIntoDevices(db, accountId, topicHash);
     return {...view(ownedTopic(db, accountId, name)!), token, token_id: tokenId};
   })();
 }
@@ -48,5 +51,7 @@ export function patchTopic(db: Database.Database, config: Config, accountId: str
 export function listTokens(db: Database.Database, accountId: string, name: string) { const topic=ownedTopic(db,accountId,name); if(topic===undefined)return undefined; return db.prepare("SELECT id AS token_id, created_at FROM topic_tokens WHERE topic_id=? ORDER BY created_at, rowid").all(topic.id) as {token_id:string;created_at:number}[]; }
 export function addToken(db: Database.Database, clock: Clock, accountId: string, name: string) { const topic = ownedTopic(db, accountId, name); if (topic === undefined) return undefined; const token = `tk_${randomUUID().replaceAll("-", "")}`; const tokenId=`tok_${randomUUID()}`; db.prepare("INSERT INTO topic_tokens (id,topic_id,hash,created_at) VALUES (?,?,?,?)").run(tokenId,topic.id,createHash("sha256").update(token).digest("hex"),clock.now()); return { token, token_id: tokenId }; }
 export function deleteToken(db: Database.Database, accountId: string, name: string, tokenId: string): "deleted" | "final" | "missing" { const topic=ownedTopic(db,accountId,name); if(topic===undefined)return "missing"; return db.transaction(()=>{const row=db.prepare("SELECT id FROM topic_tokens WHERE topic_id=? AND id=?").get(topic.id,tokenId);if(row===undefined)return "missing";const count=(db.prepare("SELECT COUNT(*) AS count FROM topic_tokens WHERE topic_id=?").get(topic.id) as {count:number}).count;if(count===1)return "final";db.prepare("DELETE FROM topic_tokens WHERE id=?").run(tokenId);return "deleted";})(); }
-export function deleteTopic(db: Database.Database, accountId: string, name: string) { return db.prepare("DELETE FROM topics WHERE account_id=? AND name=?").run(accountId,name).changes>0; }
+// subscriptions has no foreign key to topics, so its rows outlive the topic
+// unless they go in the same transaction.
+export function deleteTopic(db: Database.Database, accountId: string, name: string) { return db.transaction(()=>{const topic=db.prepare("SELECT id,topic_hash FROM topics WHERE account_id=? AND name=?").get(accountId,name) as {id:string;topic_hash:string}|undefined;if(topic===undefined)return false;db.prepare("DELETE FROM subscriptions WHERE account_id=? AND topic_hash=?").run(accountId,topic.topic_hash);db.prepare("DELETE FROM topics WHERE id=?").run(topic.id);return true;})(); }
 export { view };
