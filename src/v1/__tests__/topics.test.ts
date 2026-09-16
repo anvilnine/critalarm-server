@@ -72,6 +72,20 @@ describe("contract 1.10.0 topic tokens", () => {
     expect(JSON.stringify(rows)).not.toContain(second.token);
   });
 
+  it("orders by created_at, not by the order the rows went in", async () => {
+    const { app, db } = setup();
+    const made = await create(app, "prod");
+    const original = await made.json() as { token_id: string };
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens");
+    const second = await extra.json() as { token_id: string };
+    db.prepare("UPDATE topic_tokens SET created_at=? WHERE id=?").run(900, second.token_id);
+
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id: second.token_id, created_at: 900 },
+      { token_id: original.token_id, created_at: 1000 },
+    ]);
+  });
+
   it("drops a revoked token from the listing", async () => {
     const { app } = setup();
     const made = await create(app, "prod");
