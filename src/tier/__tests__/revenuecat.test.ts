@@ -69,7 +69,7 @@ describe("RevenueCat webhook", () => {
   it("is not mounted when the shared secret is empty or unset", async () => {
     const db = openDatabase(":memory:");
     migrate(db);
-    const ids = { account: () => "acc_unused", deviceToken: () => "dv_unused" };
+    const ids = { account: () => "acc_unused", deviceToken: () => "dv_unused", accountJoinToken: () => "aj_unused" };
     const empty = createTierRouter({ db, clock: { now: () => 1_000 }, ids, revenueCat: { sharedSecret: "", entitlements: {} } });
     const unset = createTierRouter({ db, clock: { now: () => 1_000 }, ids });
 
