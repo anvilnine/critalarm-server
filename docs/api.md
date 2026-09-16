@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.6.0
+**Version:** 1.7.0
 **Status:** draft, 2026-09-16. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.7.0** adds `"content-available": 1` to the iOS payload on a critical topic (§5.1). Without it iOS never wakes the app, and the app is the only thing that schedules the alarm, so the phone played a sound and never rang. Additive: no field changed or went away, and Android is untouched.
 
 **1.6.0** drops Apple Critical Alerts. Apple turned the entitlement down, so every iOS alert now carries `"interruption-level": "time-sensitive"` and a plain `alarm.caf` sound (§5.1). This is a wire change: the server used to send a critical payload, and APNs was rejecting it. Nothing else moved. The priority ladder, the per-topic `critical` switch, incidents, and `caps.critical_topics` all behave exactly as they did in 1.5.0.
 
@@ -563,6 +565,7 @@ payload (relay_content: none):
     "sound": "alarm.caf",                                               // only on a critical topic
     "interruption-level": "time-sensitive",
     "mutable-content": 1,
+    "content-available": 1,                                             // only on a critical topic
     "category": "INCIDENT"
   },
   "incident_id": "inc_9a8b7c",
@@ -572,6 +575,8 @@ payload (relay_content: none):
 ```
 
 **iOS alerts are time-sensitive, never critical.** Apple turned the Critical Alerts entitlement down, and APNs rejects a critical payload from an app that does not hold it. So `"interruption-level"` is always `"time-sensitive"`, and the sound is the plain string `"alarm.caf"` rather than a critical sound object. When the sound is attached is unchanged: a priority-5 message on a topic whose `critical` switch is on, opening or joining an incident. The switch still decides that, and still decides whether Android rings through with a full-screen intent. Only the shape of the iOS payload changed.
+
+**`content-available` is what makes the phone ring.** The iOS app schedules the alarm from its background-push handler, and iOS only calls that handler when the push carries `"content-available": 1`. A payload without it delivers a notification with a sound and no alarm. It goes out on the same pushes as the sound: a priority-5 message on a topic whose `critical` switch is on, opening or joining an incident. Everything quieter is left asleep, because waking the app costs battery and Apple throttles background pushes.
 
 `relay_content: full` puts the real title/body in `alert` and drops `mutable-content`.
 
