@@ -204,8 +204,15 @@ erDiagram
     ACCOUNT {
         text id PK
         text tier
-        text rc_app_user_id
+        text join_token_hash
+        text merged_into FK
         datetime created_at
+    }
+    ACCOUNT_BILLING_ID {
+        text app_user_id PK
+        text account_id FK
+        text entitled_tier
+        datetime last_event_at
     }
     DEVICE {
         text id PK
@@ -216,14 +223,25 @@ erDiagram
         datetime last_seen
     }
     SUBSCRIPTION {
-        text account_id FK
         text device_id FK
         text topic_hash
     }
 ```
 
-`ACCOUNT`, `DEVICE` and `SUBSCRIPTION` exist only in relay and hosted mode.
-Self-hosted never stores a device.
+`ACCOUNT`, `ACCOUNT_BILLING_ID`, `DEVICE` and `SUBSCRIPTION` exist only in relay
+and hosted mode. Self-hosted never stores a device, and has no tier, no caps and
+no billing at all.
+
+An account owns a subscription through its devices, not directly: a subscription
+names only the device. Holding the account on the row as well meant a device
+whose account changed kept a stale copy, so unsubscribing filtered on the old
+value, deleted nothing, and still answered 204.
+
+Billing is a lookup, not an identity. One account can hold several
+`ACCOUNT_BILLING_ID` rows, because merging two accounts brings both sides'
+subscriptions, and the account's tier is the highest live entitlement across
+them. `merged_into` is how a webhook that arrives after a merge still finds the
+surviving account.
 
 **Why the account row exists.** A device is a handset. It gets replaced, wiped
 and reinstalled. The account is the thing that owns topics, subscriptions, caps
