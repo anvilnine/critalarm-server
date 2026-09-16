@@ -11,6 +11,10 @@ import type {
   MessageRecord,
 } from "./types.js";
 
+/** GET /v1/incidents, api.md 3.2: no limit means 20 rows, and asking for more than 200 gives 200. */
+export const DEFAULT_INCIDENT_LIMIT = 20;
+export const MAX_INCIDENT_LIMIT = 200;
+
 type IncidentRow = {
   id: string;
   topic_id: string;
@@ -231,7 +235,7 @@ export class IncidentService {
       clauses.push("t.name = ?");
       parameters.push(filter.topic);
     }
-    const limit = filter.limit ?? 20;
+    const limit = filter.limit ?? DEFAULT_INCIDENT_LIMIT;
     parameters.push(limit);
     const rows = this.db
       .prepare(

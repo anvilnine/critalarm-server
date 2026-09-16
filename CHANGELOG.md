@@ -3,6 +3,38 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.9.0 - 2026-09-17
+
+### Added
+
+- `limit` on `GET /v1/incidents` has a written default (20) and a maximum (200),
+  and the server now holds to both (§3.2).
+
+The default was real but undocumented. `list()` read `filter.limit ?? 20` and
+the route read `limit === undefined ? 20 : Number(limit)`, so a client that left
+the parameter off got 20 rows while believing it had asked for everything. The
+app did exactly that: it dropped `limit` from the query when a tier's
+`history_incidents` cap was `null`, which is every paid tier. So History on a
+paid plan showed 20 incidents, and `"history_incidents": null` meaning "no
+limit" was never true through this endpoint.
+
+There was also no ceiling. The route checked the value was a whole number of at
+least 1 and passed it to SQL `LIMIT ?`, so `limit=99999999` was a question the
+server would try to answer.
+
+Now: absent means 20, above 200 gives 200, and below 1 or non-numeric still
+answers `400 {"error":"invalid request"}`. Clamping rather than rejecting keeps
+existing clients working.
+
+No paging in v1, so 200 is the most one call can return. A cursor is the next
+step and is not in this version. Until it lands, a client cannot read further
+back than 200 incidents, and the contract says so rather than leaving clients
+to find out.
+
+Clients should send `limit` explicitly on every call. `caps.history_incidents`
+is what a tier may show; it is not sent to the server and does not change what
+this endpoint returns.
+
 ## 1.8.0 - 2026-09-16
 
 ### Fixed
