@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
+import { parseApplePrivateKey, type AppleSigningKey } from "./auth/apple-client-secret.js";
 
 export interface ApnsConfig {
   teamId: string;
@@ -26,9 +27,24 @@ export interface RevenueCatConfig {
 // magic link, no email on any tier. `secret` is what better-auth signs sessions
 // with. A provider needs both halves of its credential or it is not a provider,
 // and with no provider at all the /api/auth surface is not mounted.
+// Apple sign-in is credentialed one of two ways, and never both at once.
+// `secret` is a client-secret JWT the operator signed and pasted in; it is used
+// as given and nobody replaces it when it expires. `key` is the three values
+// Apple actually hands out, and the server mints the JWT from them and re-mints
+// it before it expires (auth/apple-client-secret.ts).
+export type AppleCredential =
+  | { kind: "secret"; clientSecret: string }
+  | { kind: "key"; signingKey: AppleSigningKey };
+
+export interface AppleAuthConfig {
+  clientId: string;
+  credential: AppleCredential;
+  appBundleIdentifier?: string;
+}
+
 export interface AuthConfig {
   secret: string;
-  apple?: { clientId: string; clientSecret: string; appBundleIdentifier?: string };
+  apple?: AppleAuthConfig;
   google?: { clientId: string; clientSecret: string };
 }
 
@@ -164,30 +180,79 @@ function fcmConfig(env: NodeJS.ProcessEnv, file: FileConfig): FcmConfig | undefi
   return values as FcmConfig;
 }
 
-// api.md §3.7. Secrets only, so this reads the environment and never the YAML
-// file. A provider is either whole or absent: half a credential is a typo, not a
-// configuration, and it fails startup loudly rather than mounting a sign-in
-// surface that answers 500 on the callback.
+function setValue(value: string | undefined): string | undefined {
+  return value === undefined || value === "" ? undefined : value;
+}
+
+// A `.p8` is multi-line, and a multi-line environment variable is where
+// operators lose an afternoon, so the key can be a path instead. Same shape as
+// CONFIG_PATH above, including the injected reader the tests use.
+function applePrivateKey(env: NodeJS.ProcessEnv, readFile: ((path: string) => string) | undefined): string | undefined {
+  const path = setValue(env.AUTH_APPLE_PRIVATE_KEY_FILE);
+  if (path === undefined) return pemNewlines(setValue(env.AUTH_APPLE_PRIVATE_KEY));
+  try {
+    return (readFile ?? ((target) => readFileSync(target, "utf8")))(path);
+  } catch {
+    // The path is in the message, the key is not: the file could not be read,
+    // so there is nothing to leak, and the operator needs to know which path
+    // was tried.
+    throw configError(`AUTH_APPLE_PRIVATE_KEY_FILE: cannot read ${path}`);
+  }
+}
+
+// api.md §3.7. Either a client secret the operator signed themselves, or the
+// three values Apple hands out for the server to sign with. Half a credential
+// is a typo, not a configuration, and it fails startup rather than mounting a
+// sign-in surface that answers 500 on the callback.
+function appleAuthConfig(env: NodeJS.ProcessEnv, readFile: ((path: string) => string) | undefined): AppleAuthConfig | undefined {
+  const clientId = setValue(env.AUTH_APPLE_CLIENT_ID);
+  const clientSecret = setValue(env.AUTH_APPLE_CLIENT_SECRET);
+  const teamId = setValue(env.AUTH_APPLE_TEAM_ID);
+  const keyId = setValue(env.AUTH_APPLE_KEY_ID);
+  const privateKey = applePrivateKey(env, readFile);
+  if ([clientId, clientSecret, teamId, keyId, privateKey].every((value) => value === undefined)) return undefined;
+  if (clientId === undefined) throw configError("AUTH_APPLE sign-in credentials");
+  const bundle = setValue(env.AUTH_APPLE_APP_BUNDLE_IDENTIFIER);
+  const rest = bundle === undefined ? {} : { appBundleIdentifier: bundle };
+  if (clientSecret !== undefined) {
+    // An explicit secret wins, so a deployment that already works keeps
+    // working. Nothing rotates it, which is worth saying once at startup:
+    // Apple's ceiling is about six months and sign-in is the account-recovery
+    // path. Neither the secret nor the key is in the line.
+    if (teamId !== undefined || keyId !== undefined || privateKey !== undefined) {
+      console.warn("auth_apple_explicit_client_secret", { rotated: false, reason: "AUTH_APPLE_CLIENT_SECRET is set, so the signing key is unused" });
+    }
+    return { clientId, credential: { kind: "secret", clientSecret }, ...rest };
+  }
+  if (teamId === undefined || keyId === undefined || privateKey === undefined) throw configError("AUTH_APPLE sign-in credentials");
+  try {
+    parseApplePrivateKey(privateKey);
+  } catch (error: unknown) {
+    throw configError(`AUTH_APPLE_PRIVATE_KEY: ${error instanceof Error ? error.message : "unreadable"}`);
+  }
+  return { clientId, credential: { kind: "key", signingKey: { teamId, keyId, privateKey } }, ...rest };
+}
+
+// Secrets only, so this reads the environment and never the YAML file.
 //
 // Absent AUTH_SECRET means no sign-in at all, whatever the provider variables
 // say, because better-auth cannot sign a session without it.
-function authConfig(env: NodeJS.ProcessEnv): AuthConfig | undefined {
-  const pair = (name: string): { clientId: string; clientSecret: string } | undefined => {
-    const clientId = env[`${name}_CLIENT_ID`];
-    const clientSecret = env[`${name}_CLIENT_SECRET`];
-    if ((clientId ?? "") === "" && (clientSecret ?? "") === "") return undefined;
-    if ((clientId ?? "") === "" || (clientSecret ?? "") === "") throw configError(`${name} sign-in credentials`);
-    return { clientId: clientId as string, clientSecret: clientSecret as string };
-  };
-  const apple = pair("APPLE");
-  const google = pair("GOOGLE");
+function authConfig(env: NodeJS.ProcessEnv, readFile: ((path: string) => string) | undefined): AuthConfig | undefined {
+  const apple = appleAuthConfig(env, readFile);
+  const googleClientId = setValue(env.AUTH_GOOGLE_CLIENT_ID);
+  const googleClientSecret = setValue(env.AUTH_GOOGLE_CLIENT_SECRET);
+  let google: { clientId: string; clientSecret: string } | undefined;
+  if (googleClientId !== undefined && googleClientSecret !== undefined) {
+    google = { clientId: googleClientId, clientSecret: googleClientSecret };
+  } else if (googleClientId !== undefined || googleClientSecret !== undefined) {
+    throw configError("AUTH_GOOGLE sign-in credentials");
+  }
   if (apple === undefined && google === undefined) return undefined;
-  const secret = env.AUTH_SECRET;
-  if (secret === undefined || secret === "") throw configError("AUTH_SECRET");
-  const bundle = env.APPLE_APP_BUNDLE_IDENTIFIER;
+  const secret = setValue(env.AUTH_SECRET);
+  if (secret === undefined) throw configError("AUTH_SECRET");
   return {
     secret,
-    ...(apple === undefined ? {} : { apple: { ...apple, ...(bundle === undefined || bundle === "" ? {} : { appBundleIdentifier: bundle }) } }),
+    ...(apple === undefined ? {} : { apple }),
     ...(google === undefined ? {} : { google }),
   };
 }
@@ -221,7 +286,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   // "" of a request that carried no Authorization header.
   if (revenueCatSecret === "") throw configError("RevenueCat shared secret");
   if (env.NODE_ENV === "production" && mode !== "selfhosted" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
-  const authSettings = authConfig(env);
+  const authSettings = authConfig(env, readFile);
   return {
     mode,
     baseUrl: urlValue("base-url", stringValue(env, "BASE_URL", file["base-url"])),
