@@ -10,6 +10,8 @@ import { createRelayRouter } from "./relay/router.js";
 import { createStatsRouter } from "./stats/router.js";
 import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
+import type { AuthHandler } from "./auth/better-auth.js";
+import type { IdentityResolver } from "./auth/identity.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -25,10 +27,18 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; authHandler?: AuthHandler; }
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
+  // api.md §3.7. better-auth's OAuth surface, gated twice: main.ts builds the
+  // handler only when Apple or Google credentials are configured, and it is
+  // mounted only outside selfhosted mode. A self-hosted server must not carry
+  // the sign-in routes at all.
+  if (deps.authHandler !== undefined && (deps.config.mode ?? "relay") !== "selfhosted") {
+    const handler = deps.authHandler;
+    app.on(["POST", "GET"], "/api/auth/*", c => handler(c.req.raw));
+  }
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }) }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
   // key, so it counts under LOCAL_KEY. Forwarded pushes are counted in the

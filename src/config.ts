@@ -22,6 +22,16 @@ export interface RevenueCatConfig {
   entitlements: Record<string, "free" | "relay" | "hosted">;
 }
 
+// api.md §3.7. Sign in with Apple and Google, nothing else: no password, no
+// magic link, no email on any tier. `secret` is what better-auth signs sessions
+// with. A provider needs both halves of its credential or it is not a provider,
+// and with no provider at all the /api/auth surface is not mounted.
+export interface AuthConfig {
+  secret: string;
+  apple?: { clientId: string; clientSecret: string; appBundleIdentifier?: string };
+  google?: { clientId: string; clientSecret: string };
+}
+
 export interface Config {
   mode?: "selfhosted" | "relay" | "hosted";
   baseUrl: string;
@@ -38,6 +48,7 @@ export interface Config {
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
+  auth?: AuthConfig;
 }
 
 const providerSchema = z.object({
@@ -153,6 +164,34 @@ function fcmConfig(env: NodeJS.ProcessEnv, file: FileConfig): FcmConfig | undefi
   return values as FcmConfig;
 }
 
+// api.md §3.7. Secrets only, so this reads the environment and never the YAML
+// file. A provider is either whole or absent: half a credential is a typo, not a
+// configuration, and it fails startup loudly rather than mounting a sign-in
+// surface that answers 500 on the callback.
+//
+// Absent AUTH_SECRET means no sign-in at all, whatever the provider variables
+// say, because better-auth cannot sign a session without it.
+function authConfig(env: NodeJS.ProcessEnv): AuthConfig | undefined {
+  const pair = (name: string): { clientId: string; clientSecret: string } | undefined => {
+    const clientId = env[`${name}_CLIENT_ID`];
+    const clientSecret = env[`${name}_CLIENT_SECRET`];
+    if ((clientId ?? "") === "" && (clientSecret ?? "") === "") return undefined;
+    if ((clientId ?? "") === "" || (clientSecret ?? "") === "") throw configError(`${name} sign-in credentials`);
+    return { clientId: clientId as string, clientSecret: clientSecret as string };
+  };
+  const apple = pair("APPLE");
+  const google = pair("GOOGLE");
+  if (apple === undefined && google === undefined) return undefined;
+  const secret = env.AUTH_SECRET;
+  if (secret === undefined || secret === "") throw configError("AUTH_SECRET");
+  const bundle = env.APPLE_APP_BUNDLE_IDENTIFIER;
+  return {
+    secret,
+    ...(apple === undefined ? {} : { apple: { ...apple, ...(bundle === undefined || bundle === "" ? {} : { appBundleIdentifier: bundle }) } }),
+    ...(google === undefined ? {} : { google }),
+  };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => string): Config {
   const file = readConfiguration(env, readFile);
   const listen = stringValue(env, "LISTEN", file.listen) ?? ":8080";
@@ -182,6 +221,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   // "" of a request that carried no Authorization header.
   if (revenueCatSecret === "") throw configError("RevenueCat shared secret");
   if (env.NODE_ENV === "production" && mode !== "selfhosted" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
+  const authSettings = authConfig(env);
   return {
     mode,
     baseUrl: urlValue("base-url", stringValue(env, "BASE_URL", file["base-url"])),
@@ -200,5 +240,6 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: file.revenuecat?.entitlements ?? {} } }),
+    ...(authSettings === undefined ? {} : { auth: authSettings }),
   };
 }
