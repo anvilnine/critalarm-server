@@ -28,7 +28,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -77,7 +77,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -161,7 +161,7 @@ jobs:
       IMAGE_TAG_VARIABLE: CRITALARM_IMAGE_TAG
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
