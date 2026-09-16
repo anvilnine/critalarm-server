@@ -283,6 +283,12 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
   // and silenced by the silent switch like any other notification sound.
   if (isCritical) {
     aps.sound = "alarm.caf";
+    // Wakes the app so it can schedule the AlarmKit alarm. Without this iOS
+    // shows the notification and never calls the app, so the phone plays a
+    // sound and no alarm ever rings. The extension cannot do this job: the
+    // spike in critalarm-app (docs/specs/remote-alarm-ios-spike.md) found the
+    // app's background-push handler is the only path that schedules.
+    aps["content-available"] = 1;
   }
   return {
     aps,
