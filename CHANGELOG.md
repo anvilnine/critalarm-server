@@ -3,6 +3,25 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.10.0 - 2026-09-17
+
+### Added
+
+- `GET /v1/topics/{name}/tokens` lists a topic's tokens as `token_id` and
+  `created_at`, oldest first (§3.1). It never returns a token value: the server
+  keeps a SHA-256 hash of each token, not the token itself.
+
+### Why
+
+`DELETE /v1/topics/{name}/tokens/{token_id}` has been in the contract since
+1.5.0, but a `token_id` was only ever handed out by topic creation and by
+`POST /v1/topics/{name}/tokens`, each of which returns it once. A client that
+did not save it at that moment had no way to name a token again, so revoking
+was unreachable in practice. The app is about to show a topic's tokens and let
+one be revoked, and this is the read it needs.
+
+Additive. No existing route, field or status changed.
+
 ## 1.9.0 - 2026-09-17
 
 ### Added
