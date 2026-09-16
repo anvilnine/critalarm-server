@@ -16,7 +16,8 @@ Status: early implementation. Contract-compatible publish, incidents, timers, an
 | Option | Environment | Default | Purpose |
 |---|---|---|---|
 | `base-url` | `BASE_URL` | required | Public URL used for topic hashes |
-| `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; explicit value enables hosted mode with push credentials |
+| `mode` | `MODE` | inferred | `selfhosted`, `relay` or `hosted`. Unset means the server infers it from the push credentials and `relay-url`; set it to `selfhosted` if you bring your own APNs or FCM key |
+| `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; with push credentials and no `mode`, an explicit value means hosted mode |
 | `relay-content` | `RELAY_CONTENT` | `none` | `none` keeps body on server; `full` includes title/body in push |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
