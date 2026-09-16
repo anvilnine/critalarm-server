@@ -31,3 +31,6 @@ firebase-adminsdk*.json
 
 # os
 .DS_Store
+
+# agent worktree state. Never commit this to a public repo.
+.claude/worktrees/
