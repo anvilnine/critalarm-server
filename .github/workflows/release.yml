@@ -78,10 +78,10 @@ jobs:
     # The Coolify service pins its image through a variable,
     # `image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`, and the
     # server entry sets `pull_policy: always`. This job writes the released
-    # version into that variable and then starts the service. Coolify's start
-    # runs `docker compose up -d --force-recreate`, and `pull_policy: always`
-    # makes compose fetch the tag from the registry first, so the container
-    # cannot come back on a stale image that happened to be on the host.
+    # version into that variable and then calls Coolify's deploy, which runs
+    # `docker compose up -d --force-recreate`. `pull_policy: always` makes
+    # compose fetch the tag from the registry first, so the container cannot
+    # come back on a stale image that happened to be on the host.
     #
     # Do not swap the start call for the restart call with `latest=true`.
     # Coolify's restart stops the containers and fires a host-wide docker
