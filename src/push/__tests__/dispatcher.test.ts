@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DeliveryEvent } from "../../domain-events.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
@@ -85,6 +85,34 @@ describe("PushDispatcher", () => {
     const db = setup(); const apns = new RecordingSender({ status: 200, stale: false }); const fcm = new RecordingSender({ status: 200, stale: false });
     await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
     expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_ios"]);
+  });
+
+  // acc_1 and acc_2 both own a topic called prod, so both hold the same
+  // topic_hash. A relayed push carries a message_id from the pushing server
+  // (api.md §4.1), which has no row here, and that used to drop the account
+  // filter and ring every account subscribed to the hash.
+  it("rings only the account the relay named when the message is not stored here", async () => {
+    const db = setup(); const apns = new RecordingSender({ status: 200, stale: false }); const fcm = new RecordingSender({ status: 200, stale: false });
+    await new PushDispatcher(db, { apns, fcm }).dispatch([{ ...event(), messageId: "m_remote", accountId: "acc_1" }]);
+    expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_ios"]);
+    expect(fcm.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_android"]);
+  });
+
+  it("rings only the other account when the relay names that one", async () => {
+    const db = setup(); const apns = new RecordingSender({ status: 200, stale: false }); const fcm = new RecordingSender({ status: 200, stale: false });
+    await new PushDispatcher(db, { apns, fcm }).dispatch([{ ...event(), messageId: "m_remote", accountId: "acc_2" }]);
+    expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_cross"]);
+    expect(fcm.deliveries).toEqual([]);
+  });
+
+  it("sends nothing and logs when the owning account cannot be established", async () => {
+    const db = setup(); const apns = new RecordingSender({ status: 200, stale: false }); const fcm = new RecordingSender({ status: 200, stale: false });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await new PushDispatcher(db, { apns, fcm }).dispatch([{ ...event(), messageId: "m_remote" }]);
+      expect([result, apns.deliveries, fcm.deliveries]).toEqual([{ delivered: 0 }, [], []]);
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally { log.mockRestore(); }
   });
 
   it("clears only the stale APNs token while preserving Android and unrelated subscriptions", async () => {

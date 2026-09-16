@@ -33,6 +33,9 @@ const event: DeliveryEvent = {
   title: "prod",
   body: "the database is down",
   critical: true,
+  // No message row in this fixture, which is the relayed shape, so the event
+  // carries the owning account itself.
+  accountId: "acc_1",
 };
 
 describe("a platform with no push provider", () => {

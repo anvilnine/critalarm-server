@@ -34,6 +34,7 @@ export interface Config {
   behindProxy: boolean;
   allowNoopPush?: boolean;
   statsKey?: string;
+  relayRegistrationSecret?: string;
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -168,6 +169,10 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const relayUrlExplicit = stringValue(env, "RELAY_URL", file["relay-url"]) !== undefined;
   const hasProvider = apns !== undefined || fcm !== undefined;
   const mode = hasProvider ? (relayUrlExplicit ? "hosted" : "relay") : "selfhosted";
+  // An empty secret is a configuration error in every mode. It is defined, so it
+  // passed the production check below, and then the webhook compared "" with the
+  // "" of a request that carried no Authorization header.
+  if (revenueCatSecret === "") throw configError("RevenueCat shared secret");
   if (env.NODE_ENV === "production" && mode !== "selfhosted" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
   return {
     mode,
@@ -181,6 +186,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
     allowNoopPush,
     ...(env.STATS_KEY === undefined || env.STATS_KEY === "" ? {} : { statsKey: env.STATS_KEY }),
+    // The secret POST /relay/v1/servers demands. Unset means the route is not
+    // mounted on a relay, and a self-hosted server registers without one.
+    ...(env.RELAY_REGISTRATION_SECRET === undefined || env.RELAY_REGISTRATION_SECRET === "" ? {} : { relayRegistrationSecret: env.RELAY_REGISTRATION_SECRET }),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: file.revenuecat?.entitlements ?? {} } }),

@@ -39,19 +39,21 @@ export class PushDispatcher {
   async dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult> {
     let delivered = 0;
     for (const event of events) {
+      const accountId = this.owningAccount(event);
+      if (accountId === undefined) continue;
       if (!silentKinds.has(event.kind)) {
-        delivered += await this.ringAlarm(event);
+        delivered += await this.ringAlarm(event, accountId);
       }
-      await this.updateLiveActivities(event);
+      await this.updateLiveActivities(event, accountId);
     }
     return { delivered };
   }
 
   // Returns how many alarm pushes the provider accepted. A refused push is not
   // counted, so a run of 500s or 410s never shows up as delivery.
-  private async ringAlarm(event: DeliveryEvent): Promise<number> {
+  private async ringAlarm(event: DeliveryEvent, accountId: string): Promise<number> {
     let delivered = 0;
-    for (const device of this.subscribedDevices(event.topicHash, event.messageId)) {
+    for (const device of this.subscribedDevices(event.topicHash, accountId)) {
       const result = await this.senderFor(device).send(device, event);
       if (result.status >= 200 && result.status < 300 && !result.stale) delivered += 1;
       if (device.platform === "ios" && result.stale) {
@@ -66,7 +68,7 @@ export class PushDispatcher {
     return delivered;
   }
 
-  private async updateLiveActivities(event: DeliveryEvent): Promise<void> {
+  private async updateLiveActivities(event: DeliveryEvent, accountId: string): Promise<void> {
     const action = liveActivityEvent[event.kind];
     const sender = this.senders.liveActivity;
     if (action === undefined || sender === undefined || event.incidentId === null) {
@@ -75,7 +77,7 @@ export class PushDispatcher {
     const incident = this.incidentState(event.incidentId);
     const state = incident?.state ?? fallbackState(event.kind);
     const openedAt = incident?.opened_at ?? this.clock.now();
-    for (const token of this.liveActivityTokens(action, event)) {
+    for (const token of this.liveActivityTokens(action, event, accountId)) {
       const push: LiveActivityPush = {
         token,
         event: action,
@@ -96,9 +98,9 @@ export class PushDispatcher {
   // A start goes to the push-to-start token of every device subscribed to the
   // topic. An update or an end goes to the update token of the activity that is
   // already running for this incident, wherever it is.
-  private liveActivityTokens(action: "start" | "update" | "end", event: DeliveryEvent): string[] {
+  private liveActivityTokens(action: "start" | "update" | "end", event: DeliveryEvent, accountId: string): string[] {
     if (action === "start") {
-      const deviceIds = this.subscribedDevices(event.topicHash, event.messageId).map((device) => device.id);
+      const deviceIds = this.subscribedDevices(event.topicHash, accountId).map((device) => device.id);
       if (deviceIds.length === 0) return [];
       const rows = this.db
         .prepare(
@@ -108,8 +110,10 @@ export class PushDispatcher {
       return rows.map((row) => row.token);
     }
     const rows = this.db
-      .prepare("SELECT token FROM device_tokens WHERE kind = 'la_update' AND incident_id = ?")
-      .all(event.incidentId) as { token: string }[];
+      .prepare(
+        "SELECT t.token FROM device_tokens t JOIN devices d ON d.id = t.device_id WHERE t.kind = 'la_update' AND t.incident_id = ? AND d.account_id = ?",
+      )
+      .all(event.incidentId, accountId) as { token: string }[];
     return rows.map((row) => row.token);
   }
 
@@ -119,10 +123,19 @@ export class PushDispatcher {
       | undefined;
   }
 
-  private subscribedDevices(topicHash: string, messageId: string): PushDevice[] {
-    const message = this.db.prepare("SELECT t.account_id FROM messages m JOIN topics t ON t.id = m.topic_id WHERE m.id = ?").get(messageId) as { account_id: string } | undefined;
-    const accountClause = message === undefined ? "" : " AND d.account_id = ?";
-    const parameters = message === undefined ? [topicHash] : [topicHash, message.account_id];
+  // The owning account, or nothing. A relayed push carries the pushing server's
+  // message_id (api.md §4.1), which has no row here, so the relay puts the
+  // account on the event. With neither, send nothing: the same topic name on two
+  // accounts is the same topic_hash, so an unfiltered query rings both.
+  private owningAccount(event: DeliveryEvent): string | undefined {
+    if (event.accountId !== undefined) return event.accountId;
+    const message = this.db.prepare("SELECT t.account_id FROM messages m JOIN topics t ON t.id = m.topic_id WHERE m.id = ?").get(event.messageId) as { account_id: string } | undefined;
+    if (message !== undefined) return message.account_id;
+    console.log(JSON.stringify({ event: "push_dropped", reason: "unknown account", kind: event.kind, topic_hash: event.topicHash, message_id: event.messageId }));
+    return undefined;
+  }
+
+  private subscribedDevices(topicHash: string, accountId: string): PushDevice[] {
     const rows = this.db
       .prepare(
         `SELECT d.id, d.account_id, d.platform,
@@ -130,9 +143,9 @@ export class PushDispatcher {
          FROM devices d JOIN subscriptions s ON s.device_id = d.id
          LEFT JOIN device_tokens alarm ON alarm.device_id = d.id AND alarm.activity_id = ''
            AND alarm.kind = CASE d.platform WHEN 'ios' THEN 'apns' ELSE 'fcm' END
-         WHERE s.topic_hash = ? AND COALESCE(alarm.token, d.push_token) <> ''${accountClause}`,
+         WHERE s.topic_hash = ? AND COALESCE(alarm.token, d.push_token) <> '' AND d.account_id = ?`,
       )
-      .all(...parameters) as DeviceRow[];
+      .all(topicHash, accountId) as DeviceRow[];
     return rows.map((row) => ({
       id: row.id,
       accountId: row.account_id,

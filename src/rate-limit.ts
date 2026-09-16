@@ -4,11 +4,19 @@ import type { Bindings, Variables } from "./index.js";
 
 type Ctx = { Bindings: Bindings; Variables: Variables };
 
-// Client IP behind Coolify/Traefik comes in via x-forwarded-for. Take the
-// left-most hop (the original client). Only trustworthy behind a reverse proxy
-// that sets the header — fine for the self-hosted dev box.
+// Only a configured proxy is allowed to say who the client is. Without
+// BEHIND_PROXY the forwarded headers are ignored and the socket peer is the key.
+//
+// Behind Cloudflare, prefer cf-connecting-ip. Cloudflare APPENDS to
+// x-forwarded-for instead of replacing it, so the left-most hop is whatever the
+// client typed, and a client that changes it every request never fills a bucket.
+// Cloudflare always overwrites cf-connecting-ip and a client cannot reach
+// through it. With no such header, fall back to the forwarded hops, so a
+// self-hoster behind a plain nginx still gets per-client limiting.
 function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
   if (!behindProxy) return c.env?.incoming?.socket?.remoteAddress ?? "anonymous";
+  const cloudflare = c.req.header("cf-connecting-ip")?.trim();
+  if (cloudflare) return cloudflare;
   const xff = c.req.header("x-forwarded-for");
   if (xff) {
     const first = xff.split(",")[0]?.trim();

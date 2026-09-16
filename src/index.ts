@@ -29,7 +29,7 @@ export interface AppDependencies { config: Config; db: Database.Database; clock:
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
-  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, revenueCat: { sharedSecret: deps.config.revenueCat?.sharedSecret ?? "", entitlements: deps.config.revenueCat?.entitlements ?? {} } }));
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }) }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
   // key, so it counts under LOCAL_KEY. Forwarded pushes are counted in the
   // relay router instead, where the pushing server's key is known.
@@ -42,7 +42,7 @@ export function createApp(deps: AppDependencies): Hono {
   };
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
-    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters));
+    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
