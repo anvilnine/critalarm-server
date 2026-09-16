@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.10.0
+**Version:** 1.11.0
 **Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.11.0** adds `aj_`, the account join token, so a second handset can attach itself to an account it can already see (§4.1, §4.2), and `DELETE /relay/v1/devices/{device_id}`, so a device can be released from one (§4.2). `caps.devices` on `free` goes from 1 to 5, the same as every other tier. The iOS row of the device storage table splits in two, because one iCloud-synced Keychain item holding both the account and the device identity makes an iPad restore an iPhone's `device_id`, which puts two handsets on one device row where each overwrites the other's push token. `mode` becomes a setting rather than something the server infers, and a self-hosted server is now promised in writing to have no caps, no tiers and no billing, permanently.
 
 **1.10.0** adds `GET /v1/topics/{name}/tokens`, so a client can see which tokens a topic has (§3.1). `DELETE /v1/topics/{name}/tokens/{token_id}` has existed since 1.5.0 and is keyed on a `token_id`, but nothing ever handed one out except topic creation and `POST .../tokens`, both of which return it once. A client that did not write it down at that moment could never revoke anything. The listing returns `token_id` and `created_at` only. The server stores a SHA-256 hash of each token and not the token, so it cannot return a token value here even if it wanted to, and a token is still shown exactly once, when it is made.
 
@@ -317,6 +319,8 @@ GET /v1/info                                 // no auth
 
 The app calls this first when a server URL is added, to validate the URL and read `base_url` for hash derivation.
 
+**`mode` is a setting, not a guess.** The operator sets it to `hosted`, `relay` or `selfhosted`. When it is absent the server infers it from whether push credentials and a relay URL are configured, which is what earlier versions always did. Inference gets one case wrong: an operator who self-hosts with their own APNs key has a push provider and no relay URL, so they are inferred as `relay`, which switches on anonymous accounts, caps and billing on their own hardware. Such an operator sets `mode: selfhosted` explicitly.
+
 ### 3.5 Send to a topic
 
 ```
@@ -383,7 +387,7 @@ POST /relay/v1/devices                                  // registration. no auth
 → 201 { "device_token":"dv_...",                        // returned ONCE, on first registration only
         "account_id":"acc_...",
         "tier":"free"|"relay"|"hosted",
-        "caps":{ "devices":1, "critical_topics":2, "p4_daily":50,
+        "caps":{ "devices":5, "critical_topics":2, "p4_daily":50,
                  "history_incidents":20, "history_days":7 } }
 
 PATCH  /relay/v1/devices/{device_id}                     // re-register: new push token, new app version
@@ -408,6 +412,10 @@ POST   /relay/v1/devices/{device_id}/tokens                 // add or replace on
     "incident_id":"inc_9a8b7c" }                            // la_update only, optional
 → 204
 
+DELETE /relay/v1/devices/{device_id}                        // release this device from its account
+  Authorization: Bearer dv_...
+→ 204
+
 DELETE /relay/v1/devices/{device_id}/tokens/{kind}          // drop every token of that kind
 DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
   Authorization: Bearer dv_...
@@ -422,7 +430,9 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 
 `incident_id` on an `la_update` token is how the server finds the right activity when an incident changes state. Without it the server can still start activities but cannot update or end them, so send it.
 
-**Two secrets, two jobs.** `tk_` (§1.2) is a publish token. It goes to Uptime Kuma, a cron job, a CI pipeline, anywhere outside the user's control, and it can only publish to one topic. `dv_` is the device's own secret. It manages topics, subscriptions and incidents, and it never leaves the app. Never send `dv_` to an alerting source and never publish with it.
+**Three secrets, three jobs.** `tk_` (§1.2) is a publish token. It goes to Uptime Kuma, a cron job, a CI pipeline, anywhere outside the user's control, and it can only publish to one topic. `dv_` is the device's own secret. It manages topics, subscriptions and incidents, and it never leaves the app. Never send `dv_` to an alerting source and never publish with it.
+
+`aj_` is the account join token. It is minted when an account is created, returned once alongside `device_token`, and it authorises one thing: attaching a new device to that account. It is account-scoped, so revoking it touches no device and removing a device breaks no future join. It is not `account_id`, which is returned on every registration and is not a secret. It never publishes and it never manages a topic.
 
 **Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. There is no sign-up screen and no email on any tier. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count. Adding sign-in later means filling in one column on the account row, with no migration of topics or tokens.
 
@@ -447,13 +457,17 @@ The app shows this as "N of M topics used", where N is the count of the account'
 
 | Cap | `free` | `relay` | `hosted` |
 |---|---|---|---|
-| `devices` | 1 | 5 | 5 |
+| `devices` | 5 | 5 | 5 |
 | `critical_topics` | 2 | `null` | `null` |
 | `p4_daily` | 50 | 1000 | 1000 |
 | `history_incidents` | 20 | `null` | `null` |
 | `history_days` | 7 | 90 | 90 |
 
 `null` means no limit. A client that does not understand `null` must treat it as no limit, never as zero.
+
+**`devices` is the same on every tier on purpose.** The cap never stopped anyone from using a second handset, because a second handset can register its own account and go on working. It only made that path uglier, and because `p4_daily` is counted per account, it paid a heavy user to split into two accounts and collect twice the quota. The field stays in the response so a later team tier can move it without a contract change.
+
+**A self-hosted server has no caps, no tiers and no billing.** It is never sent a tier, it never enforces one, and no plan exists on it. This is permanent, not a v1 limitation. The relay is the only place a plan lives.
 
 These are launch guesses, set by gut and adjusted from relay metrics after 30 days. One rule is not a guess and never changes: **no tier caps the alarm.** There is no cap on incidents opened, on repeats, or on how long a critical alarm rings. Plans cap the things a team needs, not the thing one person came for.
 
@@ -465,8 +479,11 @@ These are launch guesses, set by gut and adjusted from relay metrics after 30 da
 
 | Platform | Where | Survives |
 |---|---|---|
-| iOS | Keychain, `kSecAttrAccessibleAfterFirstUnlock`, iCloud Keychain sync on | reinstall, and moving to a new iPhone |
+| iOS, account | Keychain, `kSecAttrAccessibleAfterFirstUnlock`, iCloud Keychain sync **on**, service `app.critalarm.account` | reinstall, a new iPhone, and every other device on the same Apple ID |
+| iOS, device | Keychain, `kSecAttrAccessibleAfterFirstUnlock`, iCloud Keychain sync **off**, service `app.critalarm.device_identity` | reinstall and device-to-device transfer, on that handset only |
 | Android | `SharedPreferences` with `android:allowBackup="true"` | reinstall, when the user has Android backup on |
+
+**Two Keychain items on iOS, not one.** The synced item holds `account_id` and the account join token. The unsynced item holds this handset's `device_id` and its `dv_` token. One synced item holding all four makes an iPad restore the iPhone's `device_id`, which puts two handsets on one `devices` row, and each one overwrites the other's push token on registration. Whichever registered last is the only one that rings. Changing `kSecAttrSynchronizable` on an existing install needs a read with `kSecAttrSynchronizableAny` first, because the attribute is part of the lookup, so flipping it without that read makes the old item invisible and orphans the install.
 
 **Store `device_token` in the same place, with the same lifetime.** This is the rule that matters, and it is easy to get wrong in a way that bricks a phone. If the `device_id` outlives the `dv_` token, the app re-registers an id the server already knows, cannot present the token the server demands, and is locked out for good. Whatever holds one must hold the other, so that they are both there or both gone.
 
@@ -482,6 +499,33 @@ Android does not use Keystore-backed storage here, which is a change from 1.3.0 
 The `200` case is the same work as `PATCH /relay/v1/devices/{device_id}`, and an app that already holds a token should send the `PATCH`. `POST` accepts it so that a retry after a dropped response does the right thing instead of failing.
 
 A client must never read `device_token` as an empty string and store it. The field is absent on this path, not blank.
+
+**Joining an account that already exists.**
+
+```
+POST /relay/v1/devices
+  Authorization: Bearer aj_...
+  { "device_id":"dev_<uuid>", "platform":"ios", "push_token":"...", "app_version":"1.0.0" }
+→ 201 { "device_token":"dv_...",                        // this handset's own token
+        "account_id":"acc_...",                         // the account the aj_ belongs to
+        "tier":"...", "caps":{...} }
+```
+
+A `device_id` the server has never seen, presented with a valid `aj_`, joins that account instead of creating a new one. The same request with no bearer creates a new anonymous account, which is what every existing client does and which does not change. An `aj_` matching no account answers `401`. A join that would exceed `caps.devices` answers `429 {"error":"cap","cap":"devices"}` and issues no token.
+
+The registration response carries `account_join_token` only when the call created the account. A join never returns one, because the caller already holds it.
+
+**Releasing a device.**
+
+```
+DELETE /relay/v1/devices/{device_id}
+  Authorization: Bearer dv_...
+→ 204                                                   // the device row, its push tokens and its subscriptions are gone
+→ 401                                                   // wrong token, or another device's token
+→ 404                                                   // unknown device_id
+```
+
+Deleting a device never deletes the account, its topics or its `tk_` tokens, even when it was the last device. The account stays reachable through `aj_` or through sign-in. Two things need this route: signing out has to release the device server-side, or the handset holds a `device_id` the server knows with no token to prove it owns it and is locked out for good; and the iOS two-item migration has to retire the shared row that an iPhone and an iPad were both using, or that row lingers holding one of their push tokens and rings the wrong phone.
 
 Recovery from a genuinely lost token is a support path, not an API call, in v1. The storage rule above is what keeps that path close to unused.
 

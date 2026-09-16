@@ -3,6 +3,53 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.11.0 - 2026-09-17
+
+### Added
+
+- `aj_`, the account join token (§4.1, §4.2). Minted when an account is created
+  and returned once as `account_join_token`. Presented as a bearer on
+  `POST /relay/v1/devices`, it attaches a new `device_id` to that account
+  instead of creating a new one.
+- `DELETE /relay/v1/devices/{device_id}` (§4.2). Removes a device row, its push
+  tokens and its subscriptions. Never removes the account.
+
+### Changed
+
+- `caps.devices` on `free` goes from 1 to 5, the same as `relay` and `hosted`
+  (§4.2).
+- The iOS row of the device storage table splits in two (§4.2). The account item
+  syncs through iCloud Keychain; the device item does not.
+- `mode` is a setting the operator writes down, inferred only when it is absent
+  (§3.4).
+- Written down: a self-hosted server has no caps, no tiers and no billing, and
+  that is permanent (§4.2).
+
+### Why
+
+The device cap never stopped a second handset. It stopped a second handset from
+joining the same account, and that handset went on working under an account of
+its own. Because `p4_daily` is counted per account, the cap paid a heavy user to
+split in two and collect twice the quota. Raising free to 5 removes both.
+
+The Keychain split fixes a live bug. One synced item holds `device_id` and its
+token, so an iPad on the same Apple ID restores the iPhone's `device_id` and both
+handsets land on one `devices` row. Each registration overwrites the other's push
+token, and only the handset that registered last rings. Splitting the item needs a
+way for the second handset to join the account it can see, which is `aj_`, and a
+way to retire the shared row, which is the delete.
+
+`mode` was inferred from whether push credentials existed, so "self-hosted" meant
+"cannot send a push at all". An operator who self-hosts with their own APNs key
+was inferred as `relay`, which mounted anonymous accounts, the RevenueCat webhook
+and paid caps on their own box. Making it explicit fixes that, and writing down
+that self-hosting never costs a self-hoster anything removes the reason the
+distinction was load-bearing in the first place.
+
+Additive except `caps.devices`, which only widens what a client may do, and the
+iOS storage rows, which describe app behaviour rather than a wire format. No
+client change is required to keep working.
+
 ## 1.10.0 - 2026-09-17
 
 ### Added
