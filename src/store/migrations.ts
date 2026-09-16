@@ -140,6 +140,14 @@ const migrations = [
   `,
   `ALTER TABLE devices ADD COLUMN app_version TEXT;`,
   `CREATE INDEX subscriptions_by_topic_hash ON subscriptions(topic_hash);`,
+  // api.md §4.2. aj_, the account join token. Account-scoped, so it survives
+  // every device being removed, and stored as a sha256 hash like dv_ and tk_.
+  // The unique index counts NULLs as distinct, so accounts made before this
+  // migration keep a null and are simply not joinable until one is minted.
+  `
+    ALTER TABLE accounts ADD COLUMN join_token_hash TEXT;
+    CREATE UNIQUE INDEX accounts_join_token_hash ON accounts(join_token_hash);
+  `,
 ];
 
 export function migrate(db: Database.Database): void {

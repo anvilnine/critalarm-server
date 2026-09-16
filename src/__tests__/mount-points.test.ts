@@ -28,6 +28,25 @@ describe("health", () => {
   });
 });
 
+// api.md §4.2 is relay and hosted only. The tier router is not mounted in
+// selfhosted mode, so joining an account and releasing a device do not exist
+// there at all.
+describe("selfhosted mode", () => {
+  const selfhostedDb = openDatabase(":memory:");
+  migrate(selfhostedDb);
+  const selfhosted = createApp({ config: { mode: "selfhosted", baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false }, db: selfhostedDb, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {} });
+
+  it("does not serve POST /relay/v1/devices", async () => {
+    const res = await selfhosted.request("/relay/v1/devices", { method: "POST", body: JSON.stringify({ device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "t", app_version: "1.0.0" }) }, testEnv);
+    expect(res.status).toBe(404);
+  });
+
+  it("does not serve DELETE /relay/v1/devices/{device_id}", async () => {
+    const res = await selfhosted.request("/relay/v1/devices/dev_123e4567-e89b-12d3-a456-426614174000", { method: "DELETE", headers: { Authorization: "Bearer dv_anything" } }, testEnv);
+    expect(res.status).toBe(404);
+  });
+});
+
 describe("404s", () => {
   it("answers plain JSON", async () => {
     const res = await app.request("/v1/nope", {}, testEnv);
