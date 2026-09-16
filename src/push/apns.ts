@@ -77,13 +77,29 @@ export class ApnsSender implements PushSender, LiveActivitySender {
   }
 
   private async push(path: string, headers: Record<string, string>, body: string): Promise<PushResult> {
-    const response = await this.transport.send(path, headers, body);
+    const response = await this.sendWithRetry(path, headers, body);
     // Apple explains a refusal in the body, e.g. {"reason":"BadDeviceToken"}.
     // Without this line a rejected push is invisible: the dispatcher only
     // stops counting it as delivered. No path and no headers are logged,
     // because the path carries the push token.
     if (response.status >= 400) console.warn("apns_rejected", { status: response.status, reason: rejectionReason(response.body) });
     return { status: response.status, stale: response.status === 410 };
+  }
+
+  // One retry, on a fresh connection, because the transport drops a failed
+  // session before this runs. A connection that died while the server sat idle
+  // should cost a reconnect, not a missed alarm. Exactly one retry, so a real
+  // Apple outage still fails fast instead of hanging twice over.
+  //
+  // Only a transport failure lands here. A push Apple refuses comes back as a
+  // status, not a throw, so this never retries a rejection.
+  private async sendWithRetry(path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
+    try {
+      return await this.transport.send(path, headers, body);
+    } catch (error) {
+      console.warn("apns_retry", { reason: error instanceof Error ? error.message : String(error) });
+      return this.transport.send(path, headers, body);
+    }
   }
 
   private authorization(now: number): string {
@@ -103,12 +119,23 @@ export class ApnsSender implements PushSender, LiveActivitySender {
 
 // Apple asks providers to keep one connection open rather than dial per
 // notification, and this process is long lived, so the session is held and
-// reused. It is dropped on error, close or GOAWAY, so a dead session costs one
-// failed send and not every send after it.
+// reused.
+//
+// A session Apple or a NAT dropped quietly is not `closed` and not
+// `destroyed`, so it still looks usable and every send after it writes into a
+// dead socket. Two things stop that. A PING every keepaliveMs asks whether the
+// connection is really there and tears it down when it is not. And any failed
+// send drops the session, so the next send dials a fresh one instead of
+// repeating the same failure forever.
 export class Http2ApnsTransport implements ApnsTransport {
   private session: ClientHttp2Session | null = null;
+  private keepalive: NodeJS.Timeout | null = null;
 
-  constructor(private readonly authority: string, private readonly timeoutMs: number = 10_000) {}
+  constructor(
+    private readonly authority: string,
+    private readonly timeoutMs: number = 5_000,
+    private readonly keepaliveMs: number = 30_000,
+  ) {}
 
   async send(path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
     const session = this.sessionFor();
@@ -117,22 +144,39 @@ export class Http2ApnsTransport implements ApnsTransport {
       const chunks: Buffer[] = [];
       let status = 0;
       let responseHeaders: Record<string, string> = {};
-      const onSessionError = (error: Error) => { reject(transportError(error)); stream.destroy(); };
+      let settled = false;
+
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        session.off("error", onSessionError);
+        this.drop(session);
+        stream.destroy();
+        reject(transportError(error));
+      };
+      const onSessionError = (error: Error) => fail(error);
       session.once("error", onSessionError);
-      const done = () => session.off("error", onSessionError);
-      stream.setTimeout(this.timeoutMs, () => stream.destroy(new Error(`no answer from ${this.authority} in ${this.timeoutMs}ms`)));
+
+      stream.setTimeout(this.timeoutMs, () => fail(new Error(`no answer from ${this.authority} in ${this.timeoutMs}ms`)));
       stream.on("response", (received) => {
         status = Number(received[constants.HTTP2_HEADER_STATUS] ?? 0);
         responseHeaders = Object.fromEntries(Object.entries(received).map(([name, value]) => [name, String(value)]));
       });
       stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-      stream.on("error", (error: Error) => { done(); reject(transportError(error)); });
+      stream.on("error", (error: Error) => fail(error));
       stream.on("close", () => {
-        done();
-        // status stays 0 when the stream died before Apple answered. The error
-        // listener has already rejected; resolving here would be a no-op, but
-        // a zero status would look like a real reply to the dispatcher.
-        if (status !== 0) resolve({ status, headers: responseHeaders, body: Buffer.concat(chunks).toString("utf8") });
+        if (settled) return;
+        settled = true;
+        session.off("error", onSessionError);
+        // status stays 0 when the stream closed before Apple answered. A zero
+        // status would look like a real reply to the dispatcher, so this has
+        // to reject. Without it the send would never settle at all.
+        if (status === 0) {
+          this.drop(session);
+          reject(transportError(new Error(`${this.authority} closed the stream with no answer`)));
+          return;
+        }
+        resolve({ status, headers: responseHeaders, body: Buffer.concat(chunks).toString("utf8") });
       });
       stream.end(body);
     });
@@ -140,6 +184,7 @@ export class Http2ApnsTransport implements ApnsTransport {
 
   close(): void {
     const session = this.session;
+    this.stopKeepalive();
     this.session = null;
     if (session !== null && !session.destroyed) session.close();
   }
@@ -150,12 +195,56 @@ export class Http2ApnsTransport implements ApnsTransport {
     const session = connect(this.authority);
     // A session with no error listener throws on the next tick and takes the
     // process with it, so the listener is attached before anything is sent.
-    const forget = () => { if (this.session === session) this.session = null; };
-    session.on("error", forget);
-    session.on("close", forget);
-    session.on("goaway", forget);
+    session.on("error", () => this.drop(session));
+    session.on("close", () => this.drop(session));
+    session.on("goaway", () => this.drop(session));
     this.session = session;
+    this.startKeepalive(session);
     return session;
+  }
+
+  // Forgets a session so the next send dials a new one. It only forgets the
+  // session passed in, so a send that failed on an old session cannot throw
+  // away the fresh session a later send already opened.
+  private drop(session: ClientHttp2Session): void {
+    if (this.session !== session) return;
+    this.session = null;
+    this.stopKeepalive();
+    if (!session.destroyed) session.destroy();
+  }
+
+  // Apple never says a connection died; the socket just stops answering. A
+  // PING asks. If the last PING is still unanswered when the next one is due,
+  // the connection is gone, and the session goes before a real push has to
+  // find out the slow way.
+  private startKeepalive(session: ClientHttp2Session): void {
+    let waiting = false;
+    const timer = setInterval(() => {
+      if (this.session !== session || session.destroyed) return;
+      if (waiting) {
+        this.drop(session);
+        return;
+      }
+      waiting = true;
+      try {
+        session.ping((error: Error | null) => {
+          waiting = false;
+          if (error !== null) this.drop(session);
+        });
+      } catch {
+        waiting = false;
+        this.drop(session);
+      }
+    }, this.keepaliveMs);
+    // The timer must not be the reason the process stays alive.
+    timer.unref();
+    this.keepalive = timer;
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepalive === null) return;
+    clearInterval(this.keepalive);
+    this.keepalive = null;
   }
 }
 
