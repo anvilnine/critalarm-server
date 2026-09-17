@@ -249,6 +249,18 @@ and the purchase, and it survives all three. Registration creates one silently,
 so there is still no sign-up screen. Adding sign-in later fills in one column
 and migrates nothing. See `docs/api.md` §4.2.
 
+**Deleting an account.** `DELETE /v1/account` and `critalarm account delete` run
+the same erase, `deleteAccount` in `src/v1/accounts.ts`, in one transaction. It
+takes the account, every tombstone whose `merged_into` chain ends at it, and
+everything that cascades from those rows. Two tables do not cascade and are
+handled by hand: `tier_changes` rows go, and `billing_events` rows stay with
+`account_id` cleared, because they are the dedup log a late webhook still has to
+land in. The better-auth `user` row is deleted by hand as well, since
+`account_identities` carries no foreign key to it, and deleting it takes the
+person's sessions and their stored OAuth tokens. Before the transaction the
+server asks Apple and Google to revoke those tokens. That call is best effort
+and never blocks the delete. See `docs/api.md` §3.7.
+
 **Two secrets, two jobs.** A topic token authorizes publishing and goes out to
 whatever monitoring tool fires the alert. A device token authorizes managing
 topics and incidents and never leaves the app. Never mix them.
