@@ -27,7 +27,7 @@
     "better-auth": "^1.7.5",
     "better-sqlite3": "^13.0.3",
     "hono": "^4.12.12",
-    "hono-rate-limiter": "^0.4.2",
+    "hono-rate-limiter": "^0.5.4",
     "tsx": "^4.19.2",
     "yaml": "^2.9.0",
     "zod": "^4"
