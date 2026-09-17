@@ -80,6 +80,13 @@ export function highestEntitledTier(deps: Pick<TierDependencies, "db">, accountI
   return rows.reduce<Tier>((best, row) => (RANK[row.entitled_tier] > RANK[best] ? row.entitled_tier : best), "free");
 }
 
+// Whether `tier` pays for more than `than`. The account merge asks, because a
+// merge only ever raises a tier, and the ranking is not a thing to write down
+// in two places.
+export function isHigherTier(tier: Tier, than: Tier): boolean {
+  return RANK[tier] > RANK[than];
+}
+
 export function applyRevenueCatEvent(deps: TierDependencies, event: RevenueCatEvent): void {
   const body = event.event;
   const receivedAt = deps.clock.now();

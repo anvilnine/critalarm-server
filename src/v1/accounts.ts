@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { IdentityResolver } from "../auth/identity.js";
 import type { TokenRevoker } from "../auth/revoke.js";
 import type { Clock } from "../incident/types.js";
-import { highestEntitledTier } from "../tier/revenuecat.js";
+import { highestEntitledTier, isHigherTier } from "../tier/revenuecat.js";
 import { sweepDeviceIntoTopics, sweepTopicIntoDevices } from "../tier/subscriptions.js";
 import type { Tier } from "../tier/types.js";
 import type { V1Env } from "./auth.js";
@@ -276,11 +276,18 @@ export function mergeAccounts(db: Database.Database, clock: Clock, identities: I
 
     counts.billing_ids = db.prepare("UPDATE account_billing_ids SET account_id = ? WHERE account_id = ?").run(target, source).changes;
     counts.tier_before = (db.prepare("SELECT tier FROM accounts WHERE id = ?").get(target) as { tier: Tier }).tier;
-    // The highest of both accounts' subscriptions, never last write wins. The
-    // change gets a tier_changes row like any other, with a null event_id
-    // because no webhook caused it.
-    counts.tier_after = highestEntitledTier({ db }, target);
+    // The highest of both accounts' subscriptions, never last write wins.
+    //
+    // A merge only ever raises a tier. The recompute reads account_billing_ids
+    // and nothing else, so an account that is paid but holds no row there comes
+    // back as free, and an unrelated merge must not be the thing that takes
+    // somebody's subscription away. tier_after is what the account ends on, so
+    // it stays at tier_before whenever the write is skipped.
+    const recomputed = highestEntitledTier({ db }, target);
+    counts.tier_after = isHigherTier(recomputed, counts.tier_before) ? recomputed : counts.tier_before;
     if (counts.tier_after !== counts.tier_before) {
+      // A tier_changes row like any other, with a null event_id because no
+      // webhook caused it.
       db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(counts.tier_after, target);
       db.prepare("INSERT INTO tier_changes (id, account_id, from_tier, to_tier, reason, event_id, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(`tch_${randomUUID()}`, target, counts.tier_before, counts.tier_after, `merge from ${source}`, null, clock.now());

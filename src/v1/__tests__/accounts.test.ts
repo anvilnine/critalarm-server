@@ -403,6 +403,24 @@ describe("POST /v1/account/merge", () => {
     expect(db.prepare("SELECT tier FROM accounts WHERE id = 'a'").get()).toEqual({ tier: "hosted" });
   });
 
+  it("never lowers the tier of the account it merges into", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // Account b is on a paid tier and holds no account_billing_ids row, which
+    // is the only table the recompute reads. Account a pays for nothing. A
+    // merge must not be the thing that takes b's subscription away.
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'b'").run();
+
+    expect((await merge(app)).status).toBe(200);
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'b'").get()).toEqual({ tier: "hosted" });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM tier_changes")).toBe(0);
+    // And the audit row says what the account ended on, not what the recompute
+    // came back with.
+    const detail = JSON.parse((db.prepare("SELECT detail FROM account_merges").get() as { detail: string }).detail) as { tier_before: string; tier_after: string };
+    expect({ before: detail.tier_before, after: detail.tier_after }).toEqual({ before: "hosted", after: "hosted" });
+  });
+
   it("writes an audit row holding the counts that actually moved", async () => {
     const { app, db } = setup();
     await signInto(app, db);
