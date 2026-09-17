@@ -33,4 +33,8 @@ firebase-adminsdk*.json
 .DS_Store
 
 # agent worktree state. Never commit this to a public repo.
+# Both spellings: agents have used .claude/worktrees/ and .worktrees/. An
+# untracked worktree folder also makes scripts/release.sh refuse to run,
+# because it checks git status --porcelain for a clean tree.
 .claude/worktrees/
+.worktrees/
