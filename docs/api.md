@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.12.0
+**Version:** 1.13.0
 **Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.13.0** adds account deletion (§3.7). `DELETE /v1/account` erases this device's account and everything under it: devices, push tokens, topics, their tokens, messages, incidents, the sign-in identity and its sessions. An account with no identity is deleted on `dv_` alone; one with an identity needs the identity too. An `open` incident blocks it. The operator has the same erase on the command line, `critalarm account delete` (§4.4). Apple and Google both require in-app deletion once an app has sign-in.
 
 **1.12.0** adds sign-in (§3.7). An account already exists before anyone signs in, so signing in attaches a human identity to an account rather than creating one. Three routes: `POST /v1/account/link`, `POST /v1/account/merge` and `POST /v1/account/switch`. Identities are Sign in with Apple and Google; there is no email or password on any tier. Sign-out needs no route, because `DELETE /relay/v1/devices/{device_id}` plus a fresh registration is exactly what it is. `app_user_id` on the RevenueCat webhook stops being the `account_id` and becomes a lookup, so one account can hold more than one subscription and a webhook arriving after a merge still lands on the surviving account (§4.3). Sign-in replaces the support path for a lost token (§4.2).
 
@@ -409,6 +411,26 @@ The device joins the identity's account and its old account is tombstoned, carry
 
 **This is the branch that can silently stop paging somebody.** Publishing authenticates on the topic token alone and never looks at the account, so an abandoned account's `tk_` tokens keep accepting publishes, keep opening incidents, and have no device left to ring. A `200` and nobody woken. So either the old account's tokens are revoked as part of the switch, or publishing to a topic whose account is tombstoned or deviceless answers `410 {"error":"account is gone"}`. One of the two is required. The prompt must also say the old tokens will stop working, because that is the part a person cannot guess.
 
+```
+DELETE /v1/account                                      // erase this device's account
+  Authorization: Bearer dv_...
+  { "identity_token":"..." }                            // required only when the account has an identity
+→ 204
+→ 401                                                   // bad dv_, or the account has an identity and
+                                                        // identity_token is missing, invalid, or someone else's
+→ 409 { "error":"live incident", "incident_id":"inc_..." }   // an alarm is ringing. Acknowledge it, then retry
+```
+
+An account with no identity is deleted on `dv_` alone. Every device on it holds the same authority, the way every device can already delete a topic. An account with an identity needs that identity as well, because a handset left in a drawer must not be able to wipe a signed-in account.
+
+Only an `open` incident blocks. An `acked` one does not: nothing is ringing, and a person must never be stuck unable to leave.
+
+The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, and the sign-in identity with its sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
+
+After `204` every credential of the account is dead: `dv_`, `aj_` and every `tk_`. The app treats it like signing out and registers again with a new `device_id`. The other devices on the account get `401` on their next call and do the same.
+
+Deleting the account does not cancel a store subscription. The app must say so before it calls this route.
+
 **Signing out needs no route.** It is `DELETE /relay/v1/devices/{device_id}` (§4.2) followed by a fresh registration with a new `device_id`. That leaves the old account intact and reachable by signing in again, and it gives the handset a working credential on a new anonymous account.
 
 Doing it any other way bricks the handset. Clearing `dv_` while keeping `device_id` is a permanent `401`: the app only registers when it has no token, and registering a known `device_id` needs the token it no longer has. Keeping the token is not a sign-out at all, because every `/v1/` route authenticates on it.
@@ -687,6 +709,15 @@ critalarm stats zero-key <sha256hex>   # or the hash this endpoint prints
 Its counter rows stay in the database and it keeps its own entry under
 `?by=key` with `"zeroed": true`, so an operator can still see what it did.
 Zeroing does not revoke the key. `POST /relay/v1/push` keeps working for it.
+
+**Deleting an account.** The same erase as `DELETE /v1/account` (§3.7), for a deletion request that arrives by email:
+
+```
+critalarm account delete acc_...              # by account id
+critalarm account delete --email <address>    # by the sign-in email
+```
+
+It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing.
 
 ---
 

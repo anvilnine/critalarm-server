@@ -3,6 +3,17 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.13.0 - 2026-09-17
+
+### Added
+
+- Account deletion (§3.7). `DELETE /v1/account` erases the device's account and
+  everything under it. `dv_` alone deletes an account with no identity; an
+  account with an identity needs `identity_token` too. An `open` incident
+  answers 409. Answers `501` in `selfhosted` mode like the rest of §3.7.
+- `critalarm account delete <acc_id>` and `--email <address>` (§4.4), the same
+  erase for a request that arrives by email.
+
 ## 1.12.0 - 2026-09-17
 
 ### Added
