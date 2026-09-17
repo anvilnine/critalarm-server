@@ -23,7 +23,7 @@ function authWithApple(): AuthConfig {
   return {
     secret: "s".repeat(32),
     apple: { clientId: "app.critalarm.signin", credential: { kind: "key", signingKey: { teamId: "ABCDE12345", keyId: "FGHIJ67890", privateKey: signingKey() } } },
-    google: { clientId: "google-client", clientSecret: "google-secret" },
+    google: { clientId: ["google-client"], clientSecret: "google-secret" },
   };
 }
 
