@@ -1,10 +1,12 @@
-import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../../index.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import type { Config } from "../../config.js";
 import type { IdentityResolver } from "../../auth/identity.js";
+import { providerTokenRevoker, type TokenRevoker } from "../../auth/revoke.js";
+import { deleteAccount, findAccount } from "../accounts.js";
 
 // api.md §3.7. Everything below stays on our side of the OAuth boundary: an
 // identity_token is resolved through better-auth's own `session` table, which is
@@ -19,7 +21,7 @@ afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 // future.
 const NOW = 1_760_000_000;
 
-function setup(options: { mode?: Config["mode"]; identities?: IdentityResolver; authHandler?: (request: Request) => Promise<Response> } = {}) {
+function setup(options: { mode?: Config["mode"]; identities?: IdentityResolver; revoke?: TokenRevoker; revenueCat?: Config["revenueCat"]; authHandler?: (request: Request) => Promise<Response> } = {}) {
   const db = openDatabase(":memory:");
   databases.push(db);
   migrate(db);
@@ -29,12 +31,13 @@ function setup(options: { mode?: Config["mode"]; identities?: IdentityResolver; 
       .run(id, account, createHash("sha256").update(token).digest("hex"));
   }
   const app = createApp({
-    config: { ...(options.mode === undefined ? {} : { mode: options.mode }), baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false },
+    config: { ...(options.mode === undefined ? {} : { mode: options.mode }), ...(options.revenueCat === undefined ? {} : { revenueCat: options.revenueCat }), baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false },
     db,
     clock: { now: () => NOW },
     ids: { message: () => `m_${Math.random()}`, incident: () => `inc_${Math.random()}`, timer: () => `tm_${Math.random()}` },
     dispatch: async () => {},
     ...(options.identities === undefined ? {} : { identities: options.identities }),
+    ...(options.revoke === undefined ? {} : { revoke: options.revoke }),
     ...(options.authHandler === undefined ? {} : { authHandler: options.authHandler }),
   });
   return { app, db };
@@ -303,6 +306,267 @@ describe("POST /v1/account/merge", () => {
   });
 });
 
+// api.md §3.7, the erase.
+function del(app: ReturnType<typeof createApp>, device: string, body?: Record<string, unknown>) {
+  if (body === undefined) return app.request("/v1/account", { method: "DELETE", headers: { Authorization: `Bearer ${device}` } });
+  return app.request("/v1/account", { method: "DELETE", headers: json(device), body: JSON.stringify(body) });
+}
+
+function rows(db: ReturnType<typeof openDatabase>, sql: string, ...params: unknown[]): number {
+  return (db.prepare(sql).get(...params) as { count: number }).count;
+}
+
+// The rows a delete has to reach that no route creates: push tokens, relay
+// usage, and the billing trail.
+function seedExtras(db: ReturnType<typeof openDatabase>, accountId: string, deviceId: string) {
+  db.prepare("INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at) VALUES (?, 'apns', '', NULL, 'push-token', 1)").run(deviceId);
+  db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES (?, 0, 3)").run(accountId);
+  db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at) VALUES (?, ?, 1)").run(`rc_${accountId}`, accountId);
+  db.prepare("INSERT INTO billing_events (event_id, app_user_id, account_id, type, event_at, applied, received_at) VALUES ('evt_1', ?, ?, 'INITIAL_PURCHASE', 1, 1, 1)").run(`rc_${accountId}`, accountId);
+  db.prepare("INSERT INTO tier_changes (id, account_id, from_tier, to_tier, reason, event_id, changed_at) VALUES ('tc_1', ?, 'free', 'relay', 'purchase', 'evt_1', 1)").run(accountId);
+  db.prepare("INSERT INTO account_merges (id, from_account, into_account, merged_at, detail) VALUES ('mg_1', 'gone', ?, 1, '{}')").run(accountId);
+}
+
+async function ackEverything(app: ReturnType<typeof createApp>, device: string) {
+  const list = await (await app.request("/v1/incidents", { headers: json(device) })).json() as { id: string }[];
+  for (const incident of list) expect((await app.request(`/v1/incidents/${incident.id}/ack`, { method: "POST", headers: json(device) })).status).toBe(200);
+}
+
+describe("DELETE /v1/account", () => {
+  it("erases an account with no identity on the device token alone", async () => {
+    const { app, db } = setup();
+    const topic = await makeTopic(app, "dv_a", "prod", true);
+    expect((await publish(app, "prod", topic.token)).status).toBe(200);
+    await ackEverything(app, "dv_a");
+    seedExtras(db, "a", "da");
+
+    // An acked incident does not block: nothing is ringing.
+    expect((await del(app, "dv_a")).status).toBe(204);
+
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(0);
+    // Account b and its handset are the only rows left in the database, so
+    // whole-table counts say whether anything of account a survived.
+    for (const table of ["topics", "topic_tokens", "incidents", "timers", "messages", "subscriptions", "device_tokens", "relay_p4_usage", "account_billing_ids", "tier_changes", "account_merges"]) {
+      expect([table, rows(db, `SELECT COUNT(*) AS count FROM ${table}`)]).toEqual([table, 0]);
+    }
+    // The other account is untouched.
+    expect(rows(db, "SELECT COUNT(*) AS count FROM devices WHERE account_id = 'a'")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM devices WHERE account_id = 'b'")).toBe(1);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'b'")).toBe(1);
+    // billing_events is the only place the account is allowed to survive, and
+    // only as a cleared reference.
+    expect(db.prepare("SELECT account_id FROM billing_events WHERE event_id = 'evt_1'").get()).toEqual({ account_id: null });
+  });
+
+  it("refuses without the identity token once the account has one", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+
+    const noBody = await del(app, "dv_a");
+    expect(noBody.status).toBe(401);
+    expect(await noBody.json()).toEqual({ error: "unauthorized" });
+    expect((await del(app, "dv_a", {})).status).toBe(401);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(1);
+  });
+
+  it("refuses somebody else's identity token", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    seedIdentity(db, "usr_2", "sess_2");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+    // usr_2 holds account b, and a valid token for it is still not authority
+    // over account a.
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_2" })).status).toBe(200);
+
+    expect((await del(app, "dv_a", { identity_token: "sess_2" })).status).toBe(401);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(1);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "user"')).toBe(2);
+  });
+
+  it("takes the better-auth user, its sessions and its provider tokens with the account", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    db.prepare('INSERT INTO "account" (id, "accountId", "providerId", "userId", "refreshToken", "createdAt", "updatedAt") VALUES (?, ?, \'apple\', ?, ?, 0, 0)').run("oa_1", "apple-subject", "usr_1", "rt_apple");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+
+    expect((await del(app, "dv_a", { identity_token: "sess_1" })).status).toBe(204);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "user" WHERE id = ?', "usr_1")).toBe(0);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "session" WHERE "userId" = ?', "usr_1")).toBe(0);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "account" WHERE "userId" = ?', "usr_1")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM account_identities")).toBe(0);
+  });
+
+  it("refuses while an incident is open and names it", async () => {
+    const { app, db } = setup();
+    const topic = await makeTopic(app, "dv_a", "prod", true);
+    expect((await publish(app, "prod", topic.token)).status).toBe(200);
+    const incident = (db.prepare("SELECT id FROM incidents").get() as { id: string }).id;
+
+    const response = await del(app, "dv_a");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "live incident", incident_id: incident });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(1);
+
+    // Acknowledge it and the same call goes through.
+    await ackEverything(app, "dv_a");
+    expect((await del(app, "dv_a")).status).toBe(204);
+  });
+
+  it("takes the tombstones that point at the account", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+    // A switch leaves account a as a tombstone still owning its topic.
+    await makeTopic(app, "dv_a", "prod");
+    expect((await post(app, "/v1/account/switch", "dv_a", { identity_token: "sess_1", into_account: "b" })).status).toBe(200);
+    expect(tombstoneOf(db, "a")).toBe("b");
+
+    expect((await del(app, "dv_a", { identity_token: "sess_1" })).status).toBe(204);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topics")).toBe(0);
+  });
+
+  it("kills every credential the account had", async () => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET join_token_hash = ? WHERE id = 'a'").run(createHash("sha256").update("aj_a").digest("hex"));
+    const topic = await makeTopic(app, "dv_a", "prod");
+
+    expect((await del(app, "dv_a")).status).toBe(204);
+
+    // The device token.
+    expect((await app.request("/v1/topics", { headers: json("dv_a") })).status).toBe(401);
+    // The topic token.
+    expect((await publish(app, "prod", topic.token, 3)).status).toBe(401);
+    // The account join token: a second handset cannot attach to what is gone.
+    const join = await app.request("/relay/v1/devices", {
+      method: "POST",
+      headers: { Authorization: "Bearer aj_a", "content-type": "application/json" },
+      body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "p", app_version: "1.0.0" }),
+    });
+    expect(join.status).toBe(401);
+  });
+
+  it("stores a later RevenueCat webhook as unapplied and creates nothing", async () => {
+    const { app, db } = setup({ revenueCat: { sharedSecret: "rc-secret", entitlements: { crit_relay: "relay" } } });
+    expect((await del(app, "dv_a")).status).toBe(204);
+
+    const body = { api_version: "1.0", event: { id: "evt_late", app_user_id: "a", type: "INITIAL_PURCHASE", entitlement_ids: ["crit_relay"], event_timestamp_ms: 2_000_000, expiration_at_ms: 9_000_000 } };
+    const response = await app.request("/webhooks/revenuecat", { method: "POST", headers: { Authorization: "Bearer rc-secret", "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT account_id, applied FROM billing_events WHERE event_id = 'evt_late'").get()).toEqual({ account_id: null, applied: 0 });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM account_billing_ids")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM tier_changes")).toBe(0);
+  });
+
+  it("asks Apple to revoke before it erases, and carries on when Apple says no", async () => {
+    const key = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const calls: { url: string; body: string }[] = [];
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    migrate(db);
+    db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('a', 'free', 1)").run();
+    db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('da', 'a', ?, 'ios', 'x', 1)").run(createHash("sha256").update("dv_a").digest("hex"));
+    seedIdentity(db, "usr_1", "sess_1");
+    db.prepare('INSERT INTO "account" (id, "accountId", "providerId", "userId", "refreshToken", "createdAt", "updatedAt") VALUES (?, ?, \'apple\', ?, ?, 0, 0)').run("oa_1", "apple-subject", "usr_1", "rt_secret_apple");
+    db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES ('usr_1', 'a', 1)").run();
+
+    const clock = { now: () => NOW };
+    const auth = { secret: "s".repeat(32), apple: { clientId: "app.critalarm.signin", credential: { kind: "key" as const, signingKey: { teamId: "ABCDE12345", keyId: "FGHIJ67890", privateKey: key } } } };
+    const revoke = providerTokenRevoker(db, auth, clock, async (request) => {
+      calls.push({ url: request.url, body: await request.text() });
+      return new Response("nope", { status: 500 });
+    });
+    const app = createApp({
+      config: { baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false },
+      db,
+      clock,
+      ids: { message: () => "m_1", incident: () => "inc_1", timer: () => "tm_1" },
+      dispatch: async () => {},
+      revoke,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    expect((await del(app, "dv_a", { identity_token: "sess_1" })).status).toBe(204);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://appleid.apple.com/auth/revoke");
+    const sent = new URLSearchParams(calls[0]!.body);
+    expect(sent.get("client_id")).toBe("app.critalarm.signin");
+    expect(sent.get("token")).toBe("rt_secret_apple");
+    expect(sent.get("token_type_hint")).toBe("refresh_token");
+    // The client secret is the S22 minter's: an ES256 JWT for this client id.
+    const secret = sent.get("client_secret") ?? "";
+    expect(JSON.parse(Buffer.from(secret.split(".")[1]!, "base64url").toString())).toMatchObject({ iss: "ABCDE12345", sub: "app.critalarm.signin", aud: "https://appleid.apple.com" });
+
+    // Apple refusing does not keep a person in an account they asked to leave.
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(0);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "user"')).toBe(0);
+    // And the token is nowhere in what was logged.
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain("provider_revoke_rejected");
+    expect(logged).not.toContain("rt_secret_apple");
+    expect(logged).not.toContain(secret);
+    warn.mockRestore();
+  });
+
+  it("answers 400 for a body that is not the shape the contract names", async () => {
+    const { app } = setup();
+    expect((await del(app, "dv_a", { identity_token: "" })).status).toBe(400);
+    const broken = await app.request("/v1/account", { method: "DELETE", headers: json("dv_a"), body: "{" });
+    expect(broken.status).toBe(400);
+  });
+
+  it("reads the device credential only from the header", async () => {
+    const { app, db } = setup();
+    expect((await app.request("/v1/account", { method: "DELETE" })).status).toBe(401);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(1);
+  });
+});
+
+// api.md §4.4. The operator command runs the same erase for a request that
+// arrives by email. cli.ts is argv plumbing over these two functions.
+describe("critalarm account delete", () => {
+  it("finds the account by id and by sign-in email, and counts what it removed", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+    const topic = await makeTopic(app, "dv_a", "prod", true);
+    expect((await publish(app, "prod", topic.token)).status).toBe(200);
+    seedExtras(db, "a", "da");
+
+    expect(findAccount(db, { email: "usr_1@example.com" })).toBe("a");
+    expect(findAccount(db, { id: "a" })).toBe("a");
+
+    // An open incident does not stop the operator: the person asked in writing.
+    const counts = deleteAccount(db, findAccount(db, { email: "usr_1@example.com" })!);
+    expect(counts).toEqual({ accounts: 1, devices: 1, topics: 1, incidents: 1, messages: 1, identities: 1, billingEventsCleared: 1 });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(0);
+    expect(rows(db, 'SELECT COUNT(*) AS count FROM "user"')).toBe(0);
+  });
+
+  it("counts the tombstones it takes with the account", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+    await makeTopic(app, "dv_a", "prod");
+    expect((await post(app, "/v1/account/switch", "dv_a", { identity_token: "sess_1", into_account: "b" })).status).toBe(200);
+
+    // A support request quoting the old id lands on the account that survived.
+    expect(findAccount(db, { id: "a" })).toBe("b");
+    expect(deleteAccount(db, "a").accounts).toBe(2);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts")).toBe(0);
+  });
+
+  it("finds nothing for an unknown id or address", async () => {
+    const { db } = setup();
+    expect(findAccount(db, { id: "acc_nope" })).toBeUndefined();
+    expect(findAccount(db, { email: "nobody@example.com" })).toBeUndefined();
+    expect(rows(db, "SELECT COUNT(*) AS count FROM accounts")).toBe(2);
+  });
+});
+
 // api.md §3.7. One operator, one ad_ token, no accounts to sign in to. 501 and
 // not 404, so a client can tell "this server does not do sign-in" apart from
 // "you typed the path wrong".
@@ -315,6 +579,13 @@ describe("selfhosted mode", () => {
       expect(await response.json()).toEqual({ error: "not supported in selfhosted mode" });
     });
   }
+
+  it("refuses DELETE /v1/account", async () => {
+    const { app } = setup({ mode: "selfhosted" });
+    const response = await app.request("/v1/account", { method: "DELETE" });
+    expect(response.status).toBe(501);
+    expect(await response.json()).toEqual({ error: "not supported in selfhosted mode" });
+  });
 
   it("does not carry the better-auth routes", async () => {
     const authHandler = async () => new Response("ok", { status: 200 });

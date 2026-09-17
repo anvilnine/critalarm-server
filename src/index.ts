@@ -12,6 +12,7 @@ import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
 import type { AuthHandler } from "./auth/better-auth.js";
 import type { IdentityResolver } from "./auth/identity.js";
+import type { TokenRevoker } from "./auth/revoke.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -27,7 +28,7 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; authHandler?: AuthHandler; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; }
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
