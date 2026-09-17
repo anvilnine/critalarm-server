@@ -180,6 +180,32 @@ function fcmConfig(env: NodeJS.ProcessEnv, file: FileConfig): FcmConfig | undefi
   return values as FcmConfig;
 }
 
+// Which RevenueCat entitlement identifier pays for which tier (the map the
+// webhook in tier/revenuecat.ts looks events up in). Production has no config
+// file, because the image copies none, so the map has to fit in an environment
+// variable: comma separated `key=tier` pairs, for example
+// `hosted=hosted,relay=relay`.
+//
+// A pair that does not parse stops startup instead of being dropped. A dropped
+// pair means the webhook answers 200 and upgrades nobody, which is the one
+// billing failure nothing reports. An empty segment is the exception: a
+// trailing or doubled comma carries no meaning, and somebody types this value
+// into a box by hand, so it is skipped rather than kept from booting.
+function entitlementsValue(value: string | undefined): Record<string, "free" | "relay" | "hosted"> | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const entitlements: Record<string, "free" | "relay" | "hosted"> = {};
+  for (const pair of value.split(",")) {
+    if (pair.trim() === "") continue;
+    const separator = pair.indexOf("=");
+    const key = pair.slice(0, separator).trim();
+    const tier = pair.slice(separator + 1).trim();
+    if (separator === -1 || key === "") throw configError("RevenueCat entitlements");
+    if (tier !== "free" && tier !== "relay" && tier !== "hosted") throw configError("RevenueCat entitlements");
+    entitlements[key] = tier;
+  }
+  return entitlements;
+}
+
 function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
@@ -267,6 +293,10 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const apns = apnsConfig(env, file);
   const fcm = fcmConfig(env, file);
   const revenueCatSecret = stringValue(env, "REVENUECAT_SHARED_SECRET", file.revenuecat?.["shared-secret"]);
+  // REVENUECAT_ENTITLEMENTS wins over the file, the same way every other
+  // value here does. Empty or unset falls back to the file, and no file
+  // leaves the map empty.
+  const revenueCatEntitlements = entitlementsValue(env.REVENUECAT_ENTITLEMENTS) ?? file.revenuecat?.entitlements ?? {};
   const allowNoopPush = env.NODE_ENV !== "production" && env.ALLOW_NOOP_PUSH === "true";
   if (apns === undefined && fcm === undefined && !allowNoopPush) {
     if (env.NODE_ENV !== "production") throw configError("push provider");
@@ -286,6 +316,10 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   // "" of a request that carried no Authorization header.
   if (revenueCatSecret === "") throw configError("RevenueCat shared secret");
   if (env.NODE_ENV === "production" && mode !== "selfhosted" && revenueCatSecret === undefined) throw configError("RevenueCat shared secret");
+  // A hosted production deployment with a shared secret and no map takes the
+  // webhook, stores the event, and upgrades nobody, forever. Nothing about it
+  // looks broken from the outside, so it fails startup instead.
+  if (env.NODE_ENV === "production" && mode !== "selfhosted" && Object.keys(revenueCatEntitlements).length === 0) throw configError("RevenueCat entitlements");
   const authSettings = authConfig(env, readFile);
   return {
     mode,
@@ -304,7 +338,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     ...(env.RELAY_REGISTRATION_SECRET === undefined || env.RELAY_REGISTRATION_SECRET === "" ? {} : { relayRegistrationSecret: env.RELAY_REGISTRATION_SECRET }),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
-    ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: file.revenuecat?.entitlements ?? {} } }),
+    ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: revenueCatEntitlements } }),
     ...(authSettings === undefined ? {} : { auth: authSettings }),
   };
 }
