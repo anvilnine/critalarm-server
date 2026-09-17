@@ -210,4 +210,68 @@ describe("RevenueCat webhook", () => {
     ]);
     expect(db.prepare("SELECT account_id FROM account_billing_ids WHERE app_user_id = 'rc_old'").get()).toEqual({ account_id: "acc_2" });
   });
+
+  // RevenueCat's own "Send Test Event" button, verbatim: it names no
+  // entitlement and sends null rather than leaving the two fields out.
+  it("accepts a real event that names no entitlement and changes no tier", async () => {
+    const { app, db } = setup();
+
+    const response = await webhook(app, {
+      api_version: "1.0",
+      event: {
+        aliases: ["f6427ee0-0d0e-4103-b7e5-3e4b42458298", "f5606e1f-e6ab-4e42-8db5-c8e2fe235d50"],
+        app_id: "appcffd367d05",
+        app_user_id: "f6427ee0-0d0e-4103-b7e5-3e4b42458298",
+        commission_percentage: null,
+        country_code: "US",
+        currency: null,
+        entitlement_id: null,
+        entitlement_ids: null,
+        environment: "SANDBOX",
+        event_timestamp_ms: 1789655729293,
+        expiration_at_ms: 1789662929293,
+        id: "2ACF69D2-3CF2-43BE-9A5E-D71B934B28F7",
+        is_family_share: null,
+        metadata: null,
+        offer_code: null,
+        original_app_user_id: "f6427ee0-0d0e-4103-b7e5-3e4b42458298",
+        original_transaction_id: null,
+        period_type: "NORMAL",
+        presented_offering_id: null,
+        price: null,
+        price_in_purchased_currency: null,
+        product_id: "test_product",
+        purchased_at_ms: 1789655729293,
+        renewal_number: null,
+        store: "APP_STORE",
+        subscriber_attributes: {
+          $displayName: { updated_at_ms: 1789655729293, value: "Mister Mistoffelees" },
+          $email: { updated_at_ms: 1789655729293, value: "tuxedo@revenuecat.com" },
+          $phoneNumber: { updated_at_ms: 1789655729293, value: "+19795551234" },
+          my_custom_attribute_1: { updated_at_ms: 1789655729293, value: "catnip" },
+        },
+        takehome_percentage: null,
+        tax_percentage: null,
+        transaction_id: null,
+        type: "TEST",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT id, tier FROM accounts").all()).toEqual([{ id: "acc_1", tier: "free" }]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM tier_changes").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM account_billing_ids").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT app_user_id, applied FROM billing_events").all()).toEqual([
+      { app_user_id: "f6427ee0-0d0e-4103-b7e5-3e4b42458298", applied: 0 },
+    ]);
+  });
+
+  it("still maps a tier from entitlement_ids when entitlement_id is null", async () => {
+    const { app, db } = setup();
+
+    const response = await webhook(app, event({ entitlement_id: null, entitlement_ids: ["crit_hosted"] }));
+
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+  });
 });
