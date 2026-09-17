@@ -41,3 +41,27 @@ describe("the relay registration secret", () => {
     expect(loadConfig(env({ RELAY_REGISTRATION_SECRET: "registration-secret" })).relayRegistrationSecret).toBe("registration-secret");
   });
 });
+
+describe("Google client IDs", () => {
+  it.each([
+    ["one client ID without a comma", "a", ["a"]],
+    ["three client IDs with the primary first", "a,b,c", ["a", "b", "c"]],
+    ["whitespace around client IDs", " a , b ", ["a", "b"]],
+    ["an empty entry between client IDs", "a,,b", ["a", "b"]],
+  ])("parses %s", (_name, value, expected) => {
+    const config = loadConfig(env({
+      AUTH_SECRET: "a".repeat(32),
+      AUTH_GOOGLE_CLIENT_ID: value,
+      AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
+    }));
+    expect(config.auth?.google?.clientId).toEqual(expected);
+  });
+
+  it("refuses an empty audience list when a client secret is present", () => {
+    expect(() => loadConfig(env({
+      AUTH_SECRET: "a".repeat(32),
+      AUTH_GOOGLE_CLIENT_ID: ",",
+      AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
+    }))).toThrow("invalid configuration: AUTH_GOOGLE sign-in credentials");
+  });
+});

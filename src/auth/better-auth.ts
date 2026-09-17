@@ -29,13 +29,14 @@ const systemClock: Clock = { now: () => Math.floor(Date.now() / 1000) };
 // reads `clientSecret` off it every time it talks to Apple, so a getter is what
 // makes a minted secret re-mintable. A plain string would freeze whatever was
 // minted at boot, and Apple refuses it once it expires.
-export function appleProvider(apple: AppleAuthConfig, clock: Clock): { clientId: string; clientSecret: string; appBundleIdentifier?: string } {
+export function appleProvider(apple: AppleAuthConfig, clock: Clock): { clientId: string; clientSecret: string; audience: string[]; appBundleIdentifier?: string } {
   const credential = apple.credential;
   const secret = credential.kind === "secret"
     ? () => credential.clientSecret
     : appleClientSecretMinter(apple.clientId, credential.signingKey, clock);
   return {
     clientId: apple.clientId,
+    audience: [...new Set([apple.clientId, ...(apple.appBundleIdentifier === undefined ? [] : [apple.appBundleIdentifier])])],
     get clientSecret() { return secret(); },
     ...(apple.appBundleIdentifier === undefined ? {} : { appBundleIdentifier: apple.appBundleIdentifier }),
   };
