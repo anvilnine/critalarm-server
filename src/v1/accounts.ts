@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
@@ -5,7 +6,9 @@ import { z } from "zod";
 import type { IdentityResolver } from "../auth/identity.js";
 import type { TokenRevoker } from "../auth/revoke.js";
 import type { Clock } from "../incident/types.js";
-import { sweepDeviceIntoTopics } from "../tier/subscriptions.js";
+import { highestEntitledTier } from "../tier/revenuecat.js";
+import { sweepDeviceIntoTopics, sweepTopicIntoDevices } from "../tier/subscriptions.js";
+import type { Tier } from "../tier/types.js";
 import type { V1Env } from "./auth.js";
 
 // api.md §3.7. Signing in does not create an account. Registration already made
@@ -15,6 +18,7 @@ import type { V1Env } from "./auth.js";
 
 export const linkSchema = z.object({ identity_token: z.string().min(1) });
 export const switchSchema = z.object({ identity_token: z.string().min(1), into_account: z.string().min(1) });
+export const mergeSchema = z.object({ identity_token: z.string().min(1), into_account: z.string().min(1) });
 // The delete body is optional: an account with no identity is erased on the
 // dv_ alone, and that call has nothing to put in a body.
 export const deleteSchema = z.object({ identity_token: z.string().min(1).optional() });
@@ -29,6 +33,13 @@ export type SwitchOutcome =
   | { status: 200; body: { account_id: string } }
   | { status: 401; body: { error: "unauthorized" } }
   | { status: 409; body: { error: "account has another identity" } };
+
+export type MergeOutcome =
+  | { status: 200; body: { account_id: string; merged_from: string } }
+  | { status: 401; body: { error: "unauthorized" } }
+  | { status: 409; body: { error: "already merged" } }
+  | { status: 409; body: { error: "same account" } }
+  | { status: 409; body: { error: "live incident"; incident_id: string } };
 
 export type DeleteOutcome =
   | { status: 204 }
@@ -156,6 +167,145 @@ export function switchAccount(db: Database.Database, identities: IdentityResolve
     tombstone(db, source, target);
   })();
   return { status: 200, body: { account_id: target } };
+}
+
+// A merge blocks on `acked` as well as `open`, which the erase further down
+// does not. The erase must never trap somebody in an account they asked to
+// leave; a merge is optional, so it can wait. And it has to wait:
+// incidents_one_active_per_topic (src/store/migrations.ts) is unique on
+// topic_id where the state is open or acked, so two topics that each carry an
+// active incident cannot be folded into one row at all. Refusing before the
+// transaction opens is what keeps that from ever being attempted.
+function activeIncident(db: Database.Database, family: string[]): string | undefined {
+  const marks = family.map(() => "?").join(", ");
+  const row = db
+    .prepare(`SELECT id FROM incidents WHERE state IN ('open', 'acked') AND topic_id IN (SELECT id FROM topics WHERE account_id IN (${marks})) LIMIT 1`)
+    .get(...family) as { id: string } | undefined;
+  return row?.id;
+}
+
+function mergedInto(db: Database.Database, accountId: string): string | null {
+  const row = db.prepare("SELECT merged_into FROM accounts WHERE id = ?").get(accountId) as { merged_into: string | null } | undefined;
+  return row === undefined ? null : row.merged_into;
+}
+
+export interface MergeCounts {
+  devices: number;
+  topics_repointed: number;
+  topics_folded: number;
+  tokens_repointed: number;
+  incidents: number;
+  messages: number;
+  billing_ids: number;
+  tier_before: Tier;
+  tier_after: Tier;
+}
+
+// api.md §3.7, the fold. Everything the source owns arrives on the target and
+// the source becomes a tombstone. Topics are merged row by row and never
+// renamed: authenticateTopic matches on the topic name (src/ingress/auth.ts) so
+// a rename answers 401 to every live tk_, and topic_hash is derived from the
+// name (src/v1/topics.ts) so a rename also changes the hash every device is
+// subscribed to. Both failures are silent: the webhook keeps publishing and
+// nobody is paged.
+export function mergeAccounts(db: Database.Database, clock: Clock, identities: IdentityResolver, sourceAccount: string, identityToken: string, intoAccount: string): MergeOutcome {
+  const identity = identities.resolve(identityToken);
+  if (identity === null) return { status: 401, body: { error: "unauthorized" } };
+  // Both ends, the same pair switchAccount checks: the token resolves to an
+  // identity, and that identity owns the account named in the body.
+  const target = identityAccount(db, identity.userId);
+  if (target === undefined || target !== liveAccount(db, intoAccount)) return { status: 401, body: { error: "unauthorized" } };
+  const source = liveAccount(db, sourceAccount);
+  // The contract does not spell this one out. A source account carrying a
+  // different identity would hand one person's topics and history to another,
+  // and this credential does not carry that authority, so it is the same 401
+  // switchAccount already answers for "this identity does not own that account".
+  const claimedBy = accountIdentity(db, source);
+  if (claimedBy !== undefined && claimedBy !== identity.userId) return { status: 401, body: { error: "unauthorized" } };
+
+  // Read merged_into off the rows themselves, before liveAccount resolves it
+  // forward. Either side already being a tombstone is "already merged", and
+  // resolving first would quietly turn that into a merge of the survivors.
+  if (mergedInto(db, sourceAccount) !== null || mergedInto(db, intoAccount) !== null) {
+    return { status: 409, body: { error: "already merged" } };
+  }
+  if (source === target) return { status: 409, body: { error: "same account" } };
+  const ringing = activeIncident(db, [...accountFamily(db, source), ...accountFamily(db, target)]);
+  if (ringing !== undefined) return { status: 409, body: { error: "live incident", incident_id: ringing } };
+
+  // No device cap check. insertDeviceForAccount is the only place caps.devices
+  // is enforced and a repoint never reaches it. That is deliberate: a merge is
+  // not somebody asking for another handset, and refusing it here would leave a
+  // person with two accounts and no way to join them.
+  db.transaction(() => {
+    // Every tombstone that pointed at the source now points at the target, so
+    // no chain ever grows past one hop.
+    db.prepare("UPDATE accounts SET merged_into = ? WHERE merged_into = ?").run(target, source);
+
+    // Topics before devices. moveDevices re-sweeps each handset against the
+    // target's topics, and running it first would sweep against a set the
+    // source's topics had not joined yet.
+    const counts: MergeCounts = { devices: 0, topics_repointed: 0, topics_folded: 0, tokens_repointed: 0, incidents: 0, messages: 0, billing_ids: 0, tier_before: "free", tier_after: "free" };
+    const topics = db.prepare("SELECT id, name, topic_hash FROM topics WHERE account_id = ?").all(source) as { id: string; name: string; topic_hash: string }[];
+    for (const topic of topics) {
+      // Hash or name, because topics carries both UNIQUE (account_id, name) and
+      // UNIQUE (account_id, topic_hash). Two topics called prod made under
+      // different base_url values have different hashes and the same name, so
+      // matching on the hash alone would repoint one into the other's account
+      // and trip the name index.
+      const survivor = db.prepare("SELECT id FROM topics WHERE account_id = ? AND (topic_hash = ? OR name = ?)").get(target, topic.topic_hash, topic.name) as { id: string } | undefined;
+      if (survivor === undefined) {
+        db.prepare("UPDATE topics SET account_id = ? WHERE id = ?").run(target, topic.id);
+        // The target's own handsets hold no subscription for a topic that has
+        // only just arrived, and without this they would not ring for it.
+        sweepTopicIntoDevices(db, target, topic.topic_hash);
+        counts.topics_repointed += 1;
+        continue;
+      }
+      // topic_tokens.hash is globally unique and carries no account, so a
+      // repointed token keeps publishing with no re-issue.
+      counts.tokens_repointed += db.prepare("UPDATE topic_tokens SET topic_id = ? WHERE topic_id = ?").run(survivor.id, topic.id).changes;
+      counts.incidents += db.prepare("UPDATE incidents SET topic_id = ? WHERE topic_id = ?").run(survivor.id, topic.id).changes;
+      counts.messages += db.prepare("UPDATE messages SET topic_id = ? WHERE topic_id = ?").run(survivor.id, topic.id).changes;
+      db.prepare("DELETE FROM topics WHERE id = ?").run(topic.id);
+      counts.topics_folded += 1;
+    }
+
+    counts.devices = (db.prepare("SELECT COUNT(*) AS count FROM devices WHERE account_id = ?").get(source) as { count: number }).count;
+    moveDevices(db, source, target);
+
+    counts.billing_ids = db.prepare("UPDATE account_billing_ids SET account_id = ? WHERE account_id = ?").run(target, source).changes;
+    counts.tier_before = (db.prepare("SELECT tier FROM accounts WHERE id = ?").get(target) as { tier: Tier }).tier;
+    // The highest of both accounts' subscriptions, never last write wins. The
+    // change gets a tier_changes row like any other, with a null event_id
+    // because no webhook caused it.
+    counts.tier_after = highestEntitledTier({ db }, target);
+    if (counts.tier_after !== counts.tier_before) {
+      db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(counts.tier_after, target);
+      db.prepare("INSERT INTO tier_changes (id, account_id, from_tier, to_tier, reason, event_id, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(`tch_${randomUUID()}`, target, counts.tier_before, counts.tier_after, `merge from ${source}`, null, clock.now());
+    }
+
+    // relay_p4_usage is keyed on (account_id, day_start), so a plain repoint
+    // aborts as soon as both accounts have sent a priority 4 today. The counts
+    // add up instead, and then the source's rows go.
+    db.prepare(
+      `INSERT INTO relay_p4_usage (account_id, day_start, count)
+         SELECT ?, day_start, count FROM relay_p4_usage WHERE account_id = ?
+         ON CONFLICT(account_id, day_start) DO UPDATE SET count = count + excluded.count`,
+    ).run(target, source);
+    db.prepare("DELETE FROM relay_p4_usage WHERE account_id = ?").run(source);
+
+    // Never deleted. Four tables cascade off accounts(id), and a dv_ or an
+    // app_user_id still naming the old id has to resolve forward.
+    tombstone(db, source, target);
+
+    // This moved rows across five tables and cannot be undone. The audit row is
+    // the only thing that answers a support question about it later.
+    db.prepare("INSERT INTO account_merges (id, from_account, into_account, merged_at, detail) VALUES (?, ?, ?, ?, ?)")
+      .run(`mrg_${randomUUID()}`, source, target, clock.now(), JSON.stringify(counts));
+  })();
+  return { status: 200, body: { account_id: target, merged_from: source } };
 }
 
 // api.md §3.7, the erase. Every account id that goes with `accountId`: the
@@ -291,11 +441,8 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     return;
   }
 
-  // S18. Mounted so the 409 {"error":"choose"} that link returns points at a
-  // path that exists and says what it is, instead of a 404.
-  r.post("/v1/account/merge", (c) => c.json({ error: "not implemented" }, 501));
-
   r.use("/v1/account/link", auth);
+  r.use("/v1/account/merge", auth);
   r.use("/v1/account/switch", auth);
   r.use("/v1/account", auth);
 
@@ -305,6 +452,15 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     const parsed = linkSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
     const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token);
+    return c.json(result.body, result.status);
+  });
+
+  r.post("/v1/account/merge", async (c) => {
+    let body: unknown;
+    try { body = await c.req.json(); } catch { return c.json({ error: "invalid request" }, 400); }
+    const parsed = mergeSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid request" }, 400);
+    const result = mergeAccounts(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.into_account);
     return c.json(result.body, result.status);
   });
 
