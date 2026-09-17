@@ -70,9 +70,21 @@ function resolveAccount(deps: TierDependencies, appUserId: string): string | nul
 // The highest tier any of this account's billing ids pays for. Never
 // last-write-wins: after a merge of two paying accounts, one lapsing must not
 // take the other's subscription down with it.
-function highestEntitledTier(deps: TierDependencies, accountId: string): Tier {
+//
+// The account merge (src/v1/accounts.ts) recomputes the tier the same way once
+// it has moved the billing ids, so this takes the database alone rather than
+// the whole TierDependencies: the merge route has no ids generator and no
+// RevenueCat config, and neither is read here.
+export function highestEntitledTier(deps: Pick<TierDependencies, "db">, accountId: string): Tier {
   const rows = deps.db.prepare("SELECT entitled_tier FROM account_billing_ids WHERE account_id = ?").all(accountId) as { entitled_tier: Tier }[];
   return rows.reduce<Tier>((best, row) => (RANK[row.entitled_tier] > RANK[best] ? row.entitled_tier : best), "free");
+}
+
+// Whether `tier` pays for more than `than`. The account merge asks, because a
+// merge only ever raises a tier, and the ranking is not a thing to write down
+// in two places.
+export function isHigherTier(tier: Tier, than: Tier): boolean {
+  return RANK[tier] > RANK[than];
 }
 
 export function applyRevenueCatEvent(deps: TierDependencies, event: RevenueCatEvent): void {
