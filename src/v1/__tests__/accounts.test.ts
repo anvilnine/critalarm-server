@@ -6,7 +6,7 @@ import { migrate } from "../../store/migrations.js";
 import type { Config } from "../../config.js";
 import type { IdentityResolver } from "../../auth/identity.js";
 import { providerTokenRevoker, type TokenRevoker } from "../../auth/revoke.js";
-import { deleteAccount, findAccount } from "../accounts.js";
+import { deleteAccount, findAccount, mergeAccounts } from "../accounts.js";
 
 // api.md §3.7. Everything below stays on our side of the OAuth boundary: an
 // identity_token is resolved through better-auth's own `session` table, which is
@@ -41,6 +41,20 @@ function setup(options: { mode?: Config["mode"]; identities?: IdentityResolver; 
     ...(options.authHandler === undefined ? {} : { authHandler: options.authHandler }),
   });
   return { app, db };
+}
+
+// A second app over the same database, standing in for a topic that was made
+// while the server ran on a different base_url. topic_hash is
+// sha256(`${base_url}/${name}`), so the same name made here carries a hash the
+// first app would never produce.
+function appWithBaseUrl(db: ReturnType<typeof openDatabase>, baseUrl: string) {
+  return createApp({
+    config: { baseUrl, relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false },
+    db,
+    clock: { now: () => NOW },
+    ids: { message: () => `m_${Math.random()}`, incident: () => `inc_${Math.random()}`, timer: () => `tm_${Math.random()}` },
+    dispatch: async () => {},
+  });
 }
 
 // A better-auth session row and the user behind it. This is exactly what the
@@ -294,15 +308,291 @@ describe("POST /v1/account/switch", () => {
   });
 });
 
-// S18. The path exists so the 409 {"error":"choose"} that link returns points
-// somewhere, and it says what it is instead of answering 404.
+// api.md §3.7, the fold. Everything the source account owns lands on the
+// target, both sides keep ringing, and every tk_ that worked before still
+// works. A merge is refused rather than forced while anything is ringing.
 describe("POST /v1/account/merge", () => {
-  it("answers 501 not implemented", async () => {
-    const { app, db } = setup();
+  // Signs usr_1 into account b from the second handset, which is what makes b
+  // an account the identity owns and so a legal target for dv_a's merge.
+  async function signInto(app: ReturnType<typeof createApp>, db: ReturnType<typeof openDatabase>) {
     seedIdentity(db, "usr_1", "sess_1");
-    const response = await post(app, "/v1/account/merge", "dv_a", { identity_token: "sess_1", into_account: "b" });
-    expect(response.status).toBe(501);
-    expect(await response.json()).toEqual({ error: "not implemented" });
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+  }
+
+  function merge(app: ReturnType<typeof createApp>, device = "dv_a", into = "b") {
+    return post(app, "/v1/account/merge", device, { identity_token: "sess_1", into_account: into });
+  }
+
+  // device_id and topic name for every subscription row, so a test can say
+  // "every handset is on every topic" in one assertion.
+  function subscriptions(db: ReturnType<typeof openDatabase>) {
+    return db.prepare("SELECT s.device_id AS device, t.name AS topic FROM subscriptions s JOIN topics t ON t.topic_hash = s.topic_hash ORDER BY s.device_id, t.name").all();
+  }
+
+  async function ackAndClose(app: ReturnType<typeof createApp>, device: string) {
+    await ackEverything(app, device);
+    const list = await (await app.request("/v1/incidents", { headers: json(device) })).json() as { id: string }[];
+    for (const incident of list) expect((await app.request(`/v1/incidents/${incident.id}/close`, { method: "POST", headers: json(device) })).status).toBe(200);
+  }
+
+  it("leaves every handset subscribed to every topic, not only the colliding one", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    await makeTopic(app, "dv_a", "alpha");
+    await makeTopic(app, "dv_b", "beta");
+
+    const response = await merge(app);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ account_id: "b", merged_from: "a" });
+
+    expect(accountOf(db, "da")).toBe("b");
+    expect(tombstoneOf(db, "a")).toBe("b");
+    // The handset that moved and the handset that was already there both hold a
+    // row for both topics. Without the sweep on the repointed topic, db would
+    // never ring for alpha.
+    expect(subscriptions(db)).toEqual([
+      { device: "da", topic: "alpha" },
+      { device: "da", topic: "beta" },
+      { device: "db", topic: "alpha" },
+      { device: "db", topic: "beta" },
+    ]);
+  });
+
+  it("keeps a tk_ from the folded topic publishing, onto the row that survived", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // Same name and, on one base_url, the same hash: these two rows become one.
+    const fromSource = await makeTopic(app, "dv_a", "prod");
+    const fromTarget = await makeTopic(app, "dv_b", "prod");
+
+    expect((await merge(app)).status).toBe(200);
+
+    const survivors = db.prepare("SELECT id, account_id FROM topics WHERE name = 'prod'").all() as { id: string; account_id: string }[];
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]!.account_id).toBe("b");
+
+    // The webhook that only ever held the source account's token still works,
+    // and its message lands on the surviving row.
+    expect((await publish(app, "prod", fromSource.token)).status).toBe(200);
+    expect((await publish(app, "prod", fromTarget.token)).status).toBe(200);
+    const landed = db.prepare("SELECT DISTINCT topic_id FROM messages").all() as { topic_id: string }[];
+    expect(landed).toEqual([{ topic_id: survivors[0]!.id }]);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topic_tokens WHERE topic_id = ?", survivors[0]!.id)).toBe(2);
+  });
+
+  it("takes the higher tier, and a webhook that arrives later lands on the survivor", async () => {
+    const { app, db } = setup({ revenueCat: { sharedSecret: "rc-secret", entitlements: { crit_hosted: "hosted" } } });
+    await signInto(app, db);
+    // Account a pays for hosted. Account b pays for nothing.
+    db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('rc_a', 'a', 1, 1, 'hosted')").run();
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'a'").run();
+
+    expect((await merge(app)).status).toBe(200);
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'b'").get()).toEqual({ tier: "hosted" });
+    expect(db.prepare("SELECT account_id FROM account_billing_ids WHERE app_user_id = 'rc_a'").get()).toEqual({ account_id: "b" });
+    expect(db.prepare("SELECT from_tier, to_tier, reason, event_id FROM tier_changes").get()).toEqual({ from_tier: "free", to_tier: "hosted", reason: "merge from a", event_id: null });
+
+    // RevenueCat still knows the subscription by rc_a. The event has to reach
+    // the account that holds the handsets now, not the tombstone.
+    const body = { api_version: "1.0", event: { id: "evt_after", app_user_id: "rc_a", type: "EXPIRATION", entitlement_ids: ["crit_hosted"], event_timestamp_ms: 2_000_000 } };
+    const webhook = await app.request("/webhooks/revenuecat", { method: "POST", headers: { Authorization: "Bearer rc-secret", "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(webhook.status).toBe(200);
+    expect(db.prepare("SELECT account_id, applied FROM billing_events WHERE event_id = 'evt_after'").get()).toEqual({ account_id: "b", applied: 1 });
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'b'").get()).toEqual({ tier: "free" });
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'a'").get()).toEqual({ tier: "hosted" });
+  });
+
+  it("never lowers the tier of the account it merges into", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // Account b is on a paid tier and holds no account_billing_ids row, which
+    // is the only table the recompute reads. Account a pays for nothing. A
+    // merge must not be the thing that takes b's subscription away.
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'b'").run();
+
+    expect((await merge(app)).status).toBe(200);
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'b'").get()).toEqual({ tier: "hosted" });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM tier_changes")).toBe(0);
+    // And the audit row says what the account ended on, not what the recompute
+    // came back with.
+    const detail = JSON.parse((db.prepare("SELECT detail FROM account_merges").get() as { detail: string }).detail) as { tier_before: string; tier_after: string };
+    expect({ before: detail.tier_before, after: detail.tier_after }).toEqual({ before: "hosted", after: "hosted" });
+  });
+
+  it("writes an audit row holding the counts that actually moved", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // prod exists on both sides and folds. alpha exists on the source only and
+    // is repointed whole.
+    const prod = await makeTopic(app, "dv_a", "prod", true);
+    await makeTopic(app, "dv_a", "alpha");
+    await makeTopic(app, "dv_b", "prod");
+    expect((await publish(app, "prod", prod.token)).status).toBe(200);
+    await ackAndClose(app, "dv_a");
+    db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at) VALUES ('rc_a', 'a', 1)").run();
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('a', 0, 3)").run();
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('b', 0, 5)").run();
+
+    expect((await merge(app)).status).toBe(200);
+
+    const audit = db.prepare("SELECT id, from_account, into_account, merged_at, detail FROM account_merges").get() as { id: string; from_account: string; into_account: string; merged_at: number; detail: string };
+    expect(audit.id).toMatch(/^mrg_/);
+    expect({ from: audit.from_account, into: audit.into_account, at: audit.merged_at }).toEqual({ from: "a", into: "b", at: NOW });
+    expect(JSON.parse(audit.detail)).toEqual({
+      devices: 1, topics_repointed: 1, topics_folded: 1, tokens_repointed: 1,
+      incidents: 1, messages: 1, billing_ids: 1, tier_before: "free", tier_after: "free",
+    });
+
+    // And the counts are the rows, not a hopeful tally.
+    const survivor = (db.prepare("SELECT id FROM topics WHERE account_id = 'b' AND name = 'prod'").get() as { id: string }).id;
+    expect(rows(db, "SELECT COUNT(*) AS count FROM devices WHERE account_id = 'b'")).toBe(2);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topics WHERE account_id = 'b'")).toBe(2);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topics WHERE account_id = 'a'")).toBe(0);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topic_tokens WHERE topic_id = ?", survivor)).toBe(2);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM incidents WHERE topic_id = ?", survivor)).toBe(1);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM messages WHERE topic_id = ?", survivor)).toBe(1);
+    // The day both accounts already had is one row holding both counts.
+    expect(db.prepare("SELECT account_id, day_start, count FROM relay_p4_usage").all()).toEqual([{ account_id: "b", day_start: 0, count: 8 }]);
+  });
+
+  it("refuses the same pair twice, first as the same account and then as already merged", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    await makeTopic(app, "dv_a", "alpha");
+    expect((await merge(app)).status).toBe(200);
+
+    // The handset moved with the first merge, so the second call arrives with
+    // the source and the target already being one account.
+    const again = await merge(app);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: "same account" });
+
+    // Naming the tombstone instead is the other refusal.
+    const tombstoned = await merge(app, "dv_a", "a");
+    expect(tombstoned.status).toBe(409);
+    expect(await tombstoned.json()).toEqual({ error: "already merged" });
+    expect(rows(db, "SELECT COUNT(*) AS count FROM account_merges")).toBe(1);
+  });
+
+  it("refuses while an incident is open on either side, and moves nothing", async () => {
+    for (const ringing of ["dv_a", "dv_b"]) {
+      const { app, db } = setup();
+      await signInto(app, db);
+      const topic = await makeTopic(app, ringing, "ringing", true);
+      expect((await publish(app, "ringing", topic.token)).status).toBe(200);
+      const incident = (db.prepare("SELECT id FROM incidents").get() as { id: string }).id;
+
+      const response = await merge(app);
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "live incident", incident_id: incident });
+      expect(accountOf(db, "da")).toBe("a");
+      expect(tombstoneOf(db, "a")).toBeNull();
+      expect(rows(db, "SELECT COUNT(*) AS count FROM account_merges")).toBe(0);
+    }
+  });
+
+  it("refuses while an incident is only acked, because the fold could not be written", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // Both sides hold a topic called prod, and both carry an active incident.
+    // incidents_one_active_per_topic is unique on topic_id for open and acked,
+    // so folding these two rows is not a thing SQLite would accept.
+    const fromSource = await makeTopic(app, "dv_a", "prod", true);
+    const fromTarget = await makeTopic(app, "dv_b", "prod", true);
+    expect((await publish(app, "prod", fromSource.token)).status).toBe(200);
+    expect((await publish(app, "prod", fromTarget.token)).status).toBe(200);
+    await ackEverything(app, "dv_a");
+    await ackEverything(app, "dv_b");
+    expect(rows(db, "SELECT COUNT(*) AS count FROM incidents WHERE state = 'acked'")).toBe(2);
+
+    const response = await merge(app);
+    expect(response.status).toBe(409);
+    expect((await response.json() as { error: string }).error).toBe("live incident");
+    expect(accountOf(db, "da")).toBe("a");
+    expect(tombstoneOf(db, "a")).toBeNull();
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topics WHERE account_id = 'a'")).toBe(1);
+  });
+
+  it("folds two topics that share a name and not a hash, and keeps both sets of tokens", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    // topic_hash is sha256(`${base_url}/${name}`), so the same name made while
+    // the server ran on a different base_url carries a different hash. The two
+    // rows collide on UNIQUE (account_id, name) and on nothing else.
+    const elsewhere = appWithBaseUrl(db, "https://other.example.com");
+    const fromSource = await makeTopic(app, "dv_a", "prod");
+    const fromTarget = await makeTopic(elsewhere, "dv_b", "prod");
+    const hashes = db.prepare("SELECT DISTINCT topic_hash FROM topics WHERE name = 'prod'").all();
+    expect(hashes).toHaveLength(2);
+
+    expect((await merge(app)).status).toBe(200);
+
+    const survivors = db.prepare("SELECT id, account_id, base_url FROM topics WHERE name = 'prod'").all() as { id: string; account_id: string; base_url: string }[];
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]!.account_id).toBe("b");
+    expect(survivors[0]!.base_url).toBe("https://other.example.com");
+    expect((await publish(app, "prod", fromSource.token)).status).toBe(200);
+    expect((await publish(app, "prod", fromTarget.token)).status).toBe(200);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM topic_tokens WHERE topic_id = ?", survivors[0]!.id)).toBe(2);
+    // Both handsets ring for the row that survived, and the dead hash is gone.
+    expect(subscriptions(db)).toEqual([{ device: "da", topic: "prod" }, { device: "db", topic: "prod" }]);
+  });
+
+  it("writes nothing at all when a statement inside the transaction fails", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    await makeTopic(app, "dv_a", "alpha");
+    await makeTopic(app, "dv_b", "beta");
+
+    // Nothing a client can send makes this transaction fail once the three
+    // refusals have run. The topic fold matches on hash or name, so a repoint
+    // cannot trip either unique index on topics; the subscription sweeps are
+    // INSERT OR IGNORE; the relay usage rows add up rather than collide; and an
+    // active incident, the one thing that could break the fold, is refused
+    // before the transaction opens. So the failure is put there on purpose, as
+    // a real SQLite abort on the last write of the transaction.
+    db.exec("CREATE TRIGGER merge_stops_here BEFORE INSERT ON account_merges BEGIN SELECT RAISE(ABORT, 'no'); END");
+    const identities: IdentityResolver = { resolve: (token) => (token === "sess_1" ? { userId: "usr_1" } : null) };
+    expect(() => mergeAccounts(db, { now: () => NOW }, identities, "a", "sess_1", "b")).toThrow();
+
+    expect(accountOf(db, "da")).toBe("a");
+    expect(tombstoneOf(db, "a")).toBeNull();
+    expect((db.prepare("SELECT account_id FROM topics WHERE name = 'alpha'").get() as { account_id: string }).account_id).toBe("a");
+    expect(subscriptions(db)).toEqual([{ device: "da", topic: "alpha" }, { device: "db", topic: "beta" }]);
+    expect(rows(db, "SELECT COUNT(*) AS count FROM account_merges")).toBe(0);
+  });
+
+  it("answers 401 when the identity does not own the account named in the body", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    seedIdentity(db, "usr_2", "sess_2");
+    expect((await post(app, "/v1/account/merge", "dv_a", { identity_token: "sess_2", into_account: "b" })).status).toBe(401);
+    expect((await post(app, "/v1/account/merge", "dv_a", { identity_token: "sess_nope", into_account: "b" })).status).toBe(401);
+    expect((await merge(app, "dv_a", "acc_elsewhere")).status).toBe(401);
+    expect(tombstoneOf(db, "a")).toBeNull();
+  });
+
+  it("answers 401 when the source account belongs to somebody else", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    seedIdentity(db, "usr_2", "sess_2");
+    // usr_2 owns account a from the shared handset. usr_1 must not be able to
+    // pull it, and everything on it, into their own account.
+    db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES ('usr_2', 'a', 1)").run();
+    const response = await merge(app);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(tombstoneOf(db, "a")).toBeNull();
+  });
+
+  it("needs the device credential in the header, and a body of the shape the contract names", async () => {
+    const { app, db } = setup();
+    await signInto(app, db);
+    expect((await app.request("/v1/account/merge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ identity_token: "sess_1", into_account: "b" }) })).status).toBe(401);
+    expect((await post(app, "/v1/account/merge", "dv_a", { identity_token: "sess_1" })).status).toBe(400);
+    expect((await post(app, "/v1/account/merge", "dv_a", { into_account: "b" })).status).toBe(400);
   });
 });
 
