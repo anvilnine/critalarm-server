@@ -10,8 +10,8 @@ const eventSchema = z.object({
     event_timestamp_ms: z.number().optional(),
     app_user_id: z.string().min(1),
     type: z.string().min(1),
-    entitlement_id: z.string().min(1).optional(),
-    entitlement_ids: z.array(z.string().min(1)).optional(),
+    entitlement_id: z.string().min(1).nullable().optional(),
+    entitlement_ids: z.array(z.string().min(1)).nullable().optional(),
     expiration_at_ms: z.number().nullable().optional(),
   }).passthrough(),
 }).passthrough();
@@ -35,7 +35,7 @@ function entitledTier(deps: TierDependencies, event: RevenueCatEvent["event"]): 
   const configured = deps.revenueCat?.entitlements ?? {};
   const entitlements = [event.entitlement_id, ...event.entitlement_ids ?? []];
   for (const entitlement of entitlements) {
-    if (entitlement !== undefined && configured[entitlement] !== undefined) return configured[entitlement];
+    if (entitlement !== undefined && entitlement !== null && configured[entitlement] !== undefined) return configured[entitlement];
   }
   return null;
 }
