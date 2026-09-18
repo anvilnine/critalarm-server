@@ -74,7 +74,9 @@ describe("loadConfig", () => {
     expect((error as Error).message).toMatch(/APNs/);
     expect((error as Error).message).not.toContain("secret-private-key");
     expect(loadConfig({ NODE_ENV: "production" }, () => "base-url: https://alerts.example.com").mode).toBe("selfhosted");
-    expect(() => loadConfig({ NODE_ENV: "production" }, () => [
+    // Hosted production also needs the entitlement map, and it comes from the
+    // environment: there is no config file in the image.
+    expect(() => loadConfig({ NODE_ENV: "production", REVENUECAT_ENTITLEMENTS: "hosted=hosted,relay=relay" }, () => [
       "base-url: https://alerts.example.com",
       "apns:",
       "  team-id: team",

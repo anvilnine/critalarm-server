@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { loadConfig } from "../../config.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { createTierRouter } from "../router.js";
@@ -273,5 +274,34 @@ describe("RevenueCat webhook", () => {
 
     expect(response.status).toBe(200);
     expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+  });
+});
+
+// The map the dashboard identifiers land in comes from an environment variable
+// in production, because the image carries no critalarm.yml. This runs the whole
+// path: REVENUECAT_ENTITLEMENTS, loadConfig, webhook, account row.
+describe("a config loaded from REVENUECAT_ENTITLEMENTS", () => {
+  it("upgrades an account on a purchase of the dashboard's hosted entitlement", async () => {
+    const db = openDatabase(":memory:");
+    migrate(db);
+    db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1', 'free', 1)").run();
+    const config = loadConfig({
+      BASE_URL: "https://alerts.example.com",
+      DATA_DIR: "/tmp",
+      ALLOW_NOOP_PUSH: "true",
+      REVENUECAT_SHARED_SECRET: "revenuecat-secret",
+      REVENUECAT_ENTITLEMENTS: "hosted=hosted,relay=relay",
+    });
+    const ids = { account: () => "acc_unused", deviceToken: () => "dv_unused", accountJoinToken: () => "aj_unused" };
+    const app = createTierRouter({ db, clock: { now: () => 1_000 }, ids, ...(config.revenueCat === undefined ? {} : { revenueCat: config.revenueCat }) });
+
+    const response = await webhook(app, event({ entitlement_id: null, entitlement_ids: ["hosted"], expiration_at_ms: 2_000_000 }));
+
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+    expect(db.prepare("SELECT app_user_id, entitled_tier, applied FROM account_billing_ids JOIN billing_events USING (app_user_id)").all()).toEqual([
+      { app_user_id: "acc_1", entitled_tier: "hosted", applied: 1 },
+    ]);
+    db.close();
   });
 });
