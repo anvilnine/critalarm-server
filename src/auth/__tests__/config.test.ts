@@ -1,8 +1,10 @@
+import { generateKeyPairSync } from "node:crypto";
+import { jwtVerify } from "jose";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../../config.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
-import { authIsConfigured, createAuthHandler } from "../better-auth.js";
+import { appleProvider, authIsConfigured, createAuthHandler } from "../better-auth.js";
 import { sessionIdentityResolver } from "../identity.js";
 
 function env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -52,7 +54,7 @@ describe("sign-in credentials", () => {
     expect(config.auth).toEqual({
       secret: "a".repeat(32),
       apple: { clientId: "app.critalarm.signin", credential: { kind: "secret", clientSecret: "apple-jwt" }, appBundleIdentifier: "app.critalarm" },
-      google: { clientId: "google-id", clientSecret: "google-secret" },
+      google: { clientId: ["google-id"], clientSecret: "google-secret" },
     });
     expect(authIsConfigured(config.auth)).toBe(true);
   });
@@ -106,5 +108,49 @@ describe("the identity resolver", () => {
     expect(unreadable.resolver.resolve("sess_missing")).toBeNull();
     expect(unreadable.resolver.resolve("")).toBeNull();
     unreadable.db.close();
+  });
+});
+
+describe("Apple audiences", () => {
+  it.each([
+    ["with a bundle ID", "app.critalarm", ["app.critalarm.web", "app.critalarm"]],
+    ["without a bundle ID", undefined, ["app.critalarm.web"]],
+    ["with the same Services ID and bundle ID", "app.critalarm.web", ["app.critalarm.web"]],
+  ])("accepts the configured audiences %s", (_name, bundle, expected) => {
+    const provider = appleProvider({
+      clientId: "app.critalarm.web",
+      credential: { kind: "secret", clientSecret: "apple-jwt" },
+      ...(bundle === undefined ? {} : { appBundleIdentifier: bundle }),
+    }, { now: () => 1_760_000_000 });
+    expect(provider.audience).toEqual(expected);
+    expect(provider.appBundleIdentifier).toBe(bundle);
+    expect(provider.clientSecret).toBe("apple-jwt");
+  });
+
+  it("still mints a signed client secret with both audiences configured", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const now = 1_760_000_000;
+    const config = loadConfig(env({
+      AUTH_SECRET: "a".repeat(32),
+      AUTH_APPLE_CLIENT_ID: "app.critalarm.web",
+      AUTH_APPLE_APP_BUNDLE_IDENTIFIER: "app.critalarm",
+      AUTH_APPLE_TEAM_ID: "test-team",
+      AUTH_APPLE_KEY_ID: "test-key",
+      AUTH_APPLE_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    }));
+    const apple = config.auth?.apple;
+    if (apple === undefined) throw new Error("Apple sign-in was not configured");
+    const provider = appleProvider(apple, { now: () => now });
+    const { payload, protectedHeader } = await jwtVerify(provider.clientSecret, publicKey, {
+      algorithms: ["ES256"],
+      issuer: "test-team",
+      audience: "https://appleid.apple.com",
+      subject: "app.critalarm.web",
+      currentDate: new Date(now * 1000),
+    });
+    expect(protectedHeader.kid).toBe("test-key");
+    expect(payload.iat).toBe(now);
+    expect(payload.exp).toBeGreaterThan(now);
+    expect(provider.audience).toEqual(["app.critalarm.web", "app.critalarm"]);
   });
 });

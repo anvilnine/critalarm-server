@@ -293,13 +293,13 @@ describe("an explicit AUTH_APPLE_CLIENT_SECRET", () => {
 describe("Google sign-in and a server with no Apple variables", () => {
   it("is unaffected by the Apple changes", () => {
     const config = loadConfig(env({ AUTH_GOOGLE_CLIENT_ID: "google-id", AUTH_GOOGLE_CLIENT_SECRET: "google-secret" }));
-    expect(config.auth).toEqual({ secret: "a".repeat(32), google: { clientId: "google-id", clientSecret: "google-secret" } });
+    expect(config.auth).toEqual({ secret: "a".repeat(32), google: { clientId: ["google-id"], clientSecret: "google-secret" } });
     expect(config.auth?.apple).toBeUndefined();
   });
 
   it("works alongside a minted Apple secret", () => {
     const config = loadConfig(signingEnv({ AUTH_GOOGLE_CLIENT_ID: "google-id", AUTH_GOOGLE_CLIENT_SECRET: "google-secret" }));
-    expect(config.auth?.google).toEqual({ clientId: "google-id", clientSecret: "google-secret" });
+    expect(config.auth?.google).toEqual({ clientId: ["google-id"], clientSecret: "google-secret" });
     expect(config.auth?.apple?.credential.kind).toBe("key");
   });
 

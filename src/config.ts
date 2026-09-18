@@ -45,7 +45,7 @@ export interface AppleAuthConfig {
 export interface AuthConfig {
   secret: string;
   apple?: AppleAuthConfig;
-  google?: { clientId: string; clientSecret: string };
+  google?: { clientId: string[]; clientSecret: string };
 }
 
 export interface Config {
@@ -265,12 +265,13 @@ function appleAuthConfig(env: NodeJS.ProcessEnv, readFile: ((path: string) => st
 // say, because better-auth cannot sign a session without it.
 function authConfig(env: NodeJS.ProcessEnv, readFile: ((path: string) => string) | undefined): AuthConfig | undefined {
   const apple = appleAuthConfig(env, readFile);
-  const googleClientId = setValue(env.AUTH_GOOGLE_CLIENT_ID);
+  // The first entry must be the web client ID because the OAuth code exchange uses it.
+  const googleClientId = (env.AUTH_GOOGLE_CLIENT_ID ?? "").split(",").map((value) => value.trim()).filter((value) => value !== "");
   const googleClientSecret = setValue(env.AUTH_GOOGLE_CLIENT_SECRET);
-  let google: { clientId: string; clientSecret: string } | undefined;
-  if (googleClientId !== undefined && googleClientSecret !== undefined) {
+  let google: AuthConfig["google"];
+  if (googleClientId.length > 0 && googleClientSecret !== undefined) {
     google = { clientId: googleClientId, clientSecret: googleClientSecret };
-  } else if (googleClientId !== undefined || googleClientSecret !== undefined) {
+  } else if (googleClientId.length > 0 || googleClientSecret !== undefined) {
     throw configError("AUTH_GOOGLE sign-in credentials");
   }
   if (apple === undefined && google === undefined) return undefined;
