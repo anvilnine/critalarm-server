@@ -438,7 +438,9 @@ Every call mints a new token and retires the one before it, so the reply is the 
 
 An account created before 1.11.0 carries no join token at all, and this is the only way it gets one. There is no backfill, on purpose: a token minted into a database that nothing can deliver to a handset is worse than an empty column. The same route is the way back after a lost phone, and the way to cut off a token somebody read over a shoulder.
 
-Rate limited like the other write routes. Any device on the account may call it, the same way any device may delete a topic.
+Any device on the account may call it, the same way any device may delete a topic.
+
+Not rate limited, because nothing else in §3.7 is. `link`, `merge`, `switch` and the account delete all run bare; the limiter is wired into the publish path only. Minting in a loop costs one row update and hands out a token that immediately retires the one before it, so the damage is bounded. Putting a limiter on the §3.7 write routes is worth doing as one job covering all of them, not as a rule this route alone carries.
 
 ```
 DELETE /v1/account                                      // erase this device's account
