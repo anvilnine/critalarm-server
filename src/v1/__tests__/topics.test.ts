@@ -309,4 +309,13 @@ describe("contract 1.15.0 token names", () => {
     const renamed = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, { name: "y".repeat(60) });
     expect(await renamed.json()).toEqual({ token_id, name: "y".repeat(40), created_at: 1000 });
   });
+
+  it("drops the space when the cut lands on one", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod", undefined, `${"x".repeat(39)} y`);
+    const { token_id, token_name } = await made.json() as { token_id: string; token_name: string };
+    expect(token_name).toBe("x".repeat(39));
+    const renamed = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, { name: `${"y".repeat(39)} z` });
+    expect(await renamed.json()).toEqual({ token_id, name: "y".repeat(39), created_at: 1000 });
+  });
 });

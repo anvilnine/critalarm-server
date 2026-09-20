@@ -46,7 +46,7 @@ function indexesOn(db: ReturnType<typeof openDatabase>, table: string) {
 describe("migration 15", () => {
   // Version 16, the topic token names, landed after this one, so the list is
   // one longer than it was.
-  it("is the fifteenth", () => {
+  it("the list is sixteen long", () => {
     expect(migrationCount).toBe(16);
     const db = openDatabase(":memory:");
     databases.push(db);
