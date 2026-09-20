@@ -16,7 +16,7 @@ describe("topic mutations", () => {
     expect(await patched.json()).toMatchObject({ critical: true, repeat_interval_s: 45, max_ring_s: 1800 });
     const token = await app.request("/v1/topics/prod/tokens", { method: "POST", headers });
     const tokenBody = await token.json() as { token: string; token_id: string };
-    expect(tokenBody).toEqual({ token: expect.stringMatching(/^tk_/), token_id: expect.stringMatching(/^tok_/) });
+    expect(tokenBody).toEqual({ token: expect.stringMatching(/^tk_/), token_id: expect.stringMatching(/^tok_/), name: "Token 2" });
     expect((await app.request(`/v1/topics/prod/tokens/${tokenBody.token_id}`, { method: "DELETE", headers })).status).toBe(204);
     const final = await app.request("/v1/topics/prod/tokens/tk_not_the_only_token", { method: "DELETE", headers });
     expect(final.status).toBe(404);
@@ -38,8 +38,8 @@ const headers = { Authorization: "Bearer dv_a", "content-type": "application/jso
 function request(app: ReturnType<typeof createApp>, method: string, path: string, body?: Record<string, unknown>, auth = headers) {
   return app.request(path, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 }
-function create(app: ReturnType<typeof createApp>, name: string, critical?: boolean) {
-  return request(app, "POST", "/v1/topics", { name, ...(critical === undefined ? {} : { critical }) });
+function create(app: ReturnType<typeof createApp>, name: string, critical?: boolean, tokenName?: string) {
+  return request(app, "POST", "/v1/topics", { name, ...(critical === undefined ? {} : { critical }), ...(tokenName === undefined ? {} : { token_name: tokenName }) });
 }
 async function fillCap(app: ReturnType<typeof createApp>) {
   for (const name of ["one", "two"]) {
@@ -63,10 +63,10 @@ describe("contract 1.10.0 topic tokens", () => {
 
     const listed = await request(app, "GET", "/v1/topics/prod/tokens");
     expect(listed.status).toBe(200);
-    const rows = await listed.json() as { token_id: string; created_at: number }[];
+    const rows = await listed.json() as { token_id: string; name: string; created_at: number }[];
     expect(rows).toEqual([
-      { token_id: original.token_id, created_at: 1000 },
-      { token_id: second.token_id, created_at: 1000 },
+      { token_id: original.token_id, name: "Token 1", created_at: 1000 },
+      { token_id: second.token_id, name: "Token 2", created_at: 1000 },
     ]);
     expect(JSON.stringify(rows)).not.toContain(original.token);
     expect(JSON.stringify(rows)).not.toContain(second.token);
@@ -81,8 +81,8 @@ describe("contract 1.10.0 topic tokens", () => {
     db.prepare("UPDATE topic_tokens SET created_at=? WHERE id=?").run(900, second.token_id);
 
     expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
-      { token_id: second.token_id, created_at: 900 },
-      { token_id: original.token_id, created_at: 1000 },
+      { token_id: second.token_id, name: "Token 2", created_at: 900 },
+      { token_id: original.token_id, name: "Token 1", created_at: 1000 },
     ]);
   });
 
@@ -95,7 +95,7 @@ describe("contract 1.10.0 topic tokens", () => {
 
     expect((await request(app, "DELETE", `/v1/topics/prod/tokens/${token_id}`)).status).toBe(204);
     expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
-      { token_id: second.token_id, created_at: 1000 },
+      { token_id: second.token_id, name: "Token 2", created_at: 1000 },
     ]);
   });
 
@@ -216,5 +216,97 @@ describe("contract 1.5.0 topics", () => {
     const patched = await request(app, "PATCH", "/v1/topics/normal", { critical: true }, auth);
     expect(patched.status).toBe(200);
     expect(await patched.json()).toMatchObject({ critical: true });
+  });
+});
+
+describe("contract 1.15.0 token names", () => {
+  it("stores the token_name a topic is created with", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod", undefined, "CI server");
+    expect(made.status).toBe(201);
+    expect(await made.json()).toMatchObject({ name: "prod", token_name: "CI server" });
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id: expect.stringMatching(/^tok_/), name: "CI server", created_at: 1000 },
+    ]);
+  });
+
+  it("names a first token Token 1 when token_name is left off", async () => {
+    const { app } = setup();
+    expect(await (await create(app, "prod")).json()).toMatchObject({ token_name: "Token 1" });
+  });
+
+  it("treats a whitespace-only token_name as missing", async () => {
+    const { app } = setup();
+    expect(await (await create(app, "prod", undefined, "   ")).json()).toMatchObject({ token_name: "Token 1" });
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id: expect.stringMatching(/^tok_/), name: "Token 1", created_at: 1000 },
+    ]);
+  });
+
+  it("names an unnamed extra token after the topic's current count", async () => {
+    const { app } = setup();
+    await create(app, "prod");
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens");
+    expect(extra.status).toBe(201);
+    expect(await extra.json()).toEqual({ token: expect.stringMatching(/^tk_/), token_id: expect.stringMatching(/^tok_/), name: "Token 2" });
+  });
+
+  it("takes a name on an extra token", async () => {
+    const { app } = setup();
+    await create(app, "prod");
+    const extra = await request(app, "POST", "/v1/topics/prod/tokens", { name: "Grafana" });
+    expect(await extra.json()).toMatchObject({ name: "Grafana" });
+  });
+
+  it("renames a token and returns the updated row", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const { token_id } = await made.json() as { token_id: string };
+    const renamed = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, { name: "Grafana prod" });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ token_id, name: "Grafana prod", created_at: 1000 });
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id, name: "Grafana prod", created_at: 1000 },
+    ]);
+  });
+
+  it("answers 404 renaming a token id the topic does not hold", async () => {
+    const { app } = setup();
+    await create(app, "prod");
+    const missing = await request(app, "PATCH", "/v1/topics/prod/tokens/tok_never_made", { name: "whatever" });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "not found" });
+  });
+
+  it("answers 404 renaming a token on a topic another account owns", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const { token_id } = await made.json() as { token_id: string };
+    const other = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, { name: "mine now" }, { ...headers, Authorization: "Bearer dv_b" });
+    expect(other.status).toBe(404);
+    expect(await other.json()).toEqual({ error: "not found" });
+    expect(await (await request(app, "GET", "/v1/topics/prod/tokens")).json()).toEqual([
+      { token_id, name: "Token 1", created_at: 1000 },
+    ]);
+  });
+
+  it("answers 400 renaming to a missing or blank name", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod");
+    const { token_id } = await made.json() as { token_id: string };
+    for (const body of [{}, { name: "   " }, { name: 7 }]) {
+      const response = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, body);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid request" });
+    }
+  });
+
+  it("cuts a 60 character name to 40 on create and on rename", async () => {
+    const { app } = setup();
+    const made = await create(app, "prod", undefined, "x".repeat(60));
+    const { token_id, token_name } = await made.json() as { token_id: string; token_name: string };
+    expect(token_name).toBe("x".repeat(40));
+    const renamed = await request(app, "PATCH", `/v1/topics/prod/tokens/${token_id}`, { name: "y".repeat(60) });
+    expect(await renamed.json()).toEqual({ token_id, name: "y".repeat(40), created_at: 1000 });
   });
 });
