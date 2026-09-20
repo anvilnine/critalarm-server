@@ -28,7 +28,7 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; }
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));

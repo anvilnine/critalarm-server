@@ -14,6 +14,7 @@ import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
 import { RelayClient } from "./relay/client.js";
 import { createAuthHandler } from "./auth/better-auth.js";
+import { reconcileAccount, startReconcileSweep, type ReconcileDependencies } from "./tier/reconcile.js";
 
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
@@ -44,7 +45,18 @@ const dispatch = async (events: readonly DeliveryEvent[]) => {
 // that is the normal state today: the provider apps do not exist yet, so the
 // server starts and serves everything else with no sign-in surface mounted.
 const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db, clock);
-const app = createApp({ config, db, clock, ids, dispatch, ...(authHandler === undefined ? {} : { authHandler }) });
+// Guard 4: read entitlements back from RevenueCat instead of trusting the
+// webhook. With no REVENUECAT_SECRET_API_KEY this schedules nothing and says
+// nothing, which is the state every self-hosted server stays in.
+const reconcile: ReconcileDependencies = { db, clock, fetch, ...(config.revenueCatApi === undefined ? {} : { revenueCatApi: config.revenueCatApi }) };
+const stopReconcile = startReconcileSweep(reconcile);
+// After a merge the surviving account holds billing ids it did not hold a
+// moment ago. Reading those back is a network call, so it runs after the
+// response rather than inside the merge transaction.
+const reconcileAfterMerge = (accountId: string) => {
+  void reconcileAccount(reconcile, accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
+};
+const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }) });
 
 await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);
@@ -63,6 +75,6 @@ const handler: typeof app.fetch = logRequests
     }
   : app.fetch;
 serve({ fetch: handler, port: config.port });
-const shutdown = () => { stop(); apnsSender?.close(); db.close(); process.exit(0); };
+const shutdown = () => { stop(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
