@@ -432,7 +432,16 @@ export async function deleteAccountRequest(db: Database.Database, identities: Id
   return { status: 204 };
 }
 
-type AccountDeps = { db: Database.Database; clock: Clock; identities: IdentityResolver; revoke: TokenRevoker; mode: "selfhosted" | "relay" | "hosted" };
+type AccountDeps = {
+  db: Database.Database;
+  clock: Clock;
+  identities: IdentityResolver;
+  revoke: TokenRevoker;
+  mode: "selfhosted" | "relay" | "hosted";
+  // Guard 4 (tier/reconcile.ts). Absent when no RevenueCat secret API key is
+  // configured, and a merge then behaves exactly as it did before.
+  reconcileAccount?: (accountId: string) => void;
+};
 
 export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env>, deps: AccountDeps): void {
   // api.md §3.7: a self-hosted server has one operator, one ad_ token and no
@@ -468,6 +477,10 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     const parsed = mergeSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
     const result = mergeAccounts(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.into_account);
+    // The surviving account now holds billing ids it did not hold a moment
+    // ago, and a lost webhook for any of them is exactly what the sweep is
+    // for. It reads over the network, so it runs after the answer goes out.
+    if (result.status === 200) deps.reconcileAccount?.(result.body.account_id);
     return c.json(result.body, result.status);
   });
 

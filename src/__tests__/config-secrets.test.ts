@@ -31,6 +31,29 @@ describe("the RevenueCat shared secret", () => {
   });
 });
 
+describe("the RevenueCat secret API key", () => {
+  it("is absent from the config when unset, so the reconcile sweep never starts", () => {
+    expect(loadConfig(env()).revenueCatApi).toBeUndefined();
+  });
+
+  it("is refused when it is an empty string", () => {
+    expect(() => loadConfig(env({ REVENUECAT_SECRET_API_KEY: "" }))).toThrow("invalid configuration: RevenueCat secret API key");
+  });
+
+  it("is refused without a project id, because the sweep would read nothing", () => {
+    expect(() => loadConfig(env({ REVENUECAT_SECRET_API_KEY: "sk-fake" }))).toThrow("invalid configuration: RevenueCat project id");
+  });
+
+  it("is refused without an entitlement map, because the sweep would correct nobody", () => {
+    expect(() => loadConfig(env({ REVENUECAT_SECRET_API_KEY: "sk-fake", REVENUECAT_PROJECT_ID: "proj_fake" }))).toThrow("invalid configuration: RevenueCat entitlements");
+  });
+
+  it("carries the project and the entitlement map when all three are set", () => {
+    const config = loadConfig(env({ REVENUECAT_SECRET_API_KEY: "sk-fake", REVENUECAT_PROJECT_ID: "proj_fake", REVENUECAT_ENTITLEMENTS: "crit_hosted=hosted" }));
+    expect(config.revenueCatApi).toEqual({ secretApiKey: "sk-fake", projectId: "proj_fake", entitlements: { crit_hosted: "hosted" } });
+  });
+});
+
 describe("the relay registration secret", () => {
   it("is absent when unset or empty, so POST /relay/v1/servers is not mounted", () => {
     expect(loadConfig(env()).relayRegistrationSecret).toBeUndefined();
