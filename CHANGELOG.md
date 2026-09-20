@@ -33,10 +33,19 @@ binary's. The binary's version is in `package.json`.
   shared-handset case only, which is `intent: "sign_in"` against an account that
   is already claimed.
 
-### Not changed
+### Not changed, with one exception
 
-- A client that never sends `intent` behaves exactly as it did in 1.12.0.
-  `sign_in` is the default and `link` has to be asked for.
+- A client that never sends `intent` behaves as it did in 1.12.0 everywhere
+  except one case: signing in again with the identity that already points at
+  this device's own account used to answer `claimed` and now answers
+  `already_linked`. Both mean signed in and nothing moved. A client that reads
+  an unknown outcome as success is unaffected; one that switches on the string
+  needs the case.
+- `linked` is `link` only. `already_linked` is reachable under either intent,
+  because a retry after a dropped reply has to be safe on both.
+- `link` against an account that holds no identity yet answers `claimed`. No
+  screen reaches it, and a client that sends it anyway gets the sensible answer
+  rather than an error.
 - Nothing reads a join token back. The server keeps a hash, not the token, so
   the mint reply is the only place the value appears.
 
