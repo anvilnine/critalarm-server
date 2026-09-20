@@ -2,7 +2,7 @@ import { connect, constants, type ClientHttp2Session } from "node:http2";
 import type { DeliveryEvent } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
 import { signJwt } from "./jwt.js";
-import type { LiveActivityPush, LiveActivitySender, PrivateKey, PushDevice, PushResult, PushSender } from "./types.js";
+import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PrivateKey, PushDevice, PushResult, PushSender } from "./types.js";
 
 export interface ApnsTransportResponse {
   status: number;
@@ -24,23 +24,29 @@ export interface ApnsSenderOptions {
   keyId: string;
   privateKey: PrivateKey;
   bundleId: string;
-  environment: "sandbox" | "production";
-  transport?: ApnsTransport;
+  // Where to start when the device's own host is not known yet.
+  environment: ApnsEnvironment;
+  // The seam the tests replace. One transport per Apple host, so a fake can
+  // answer differently for sandbox and production.
+  transport?: (authority: string) => ApnsTransport;
 }
 
 type CachedToken = { value: string; issuedAt: number };
 
 export class ApnsSender implements PushSender, LiveActivitySender {
   private cachedToken: CachedToken | null = null;
-  private readonly transport: ApnsTransport;
+  // One HTTP/2 session per Apple host. The configured host is dialled up front,
+  // the other one only if a token turns out to live there.
+  private readonly transports = new Map<ApnsEnvironment, ApnsTransport>();
 
   constructor(private readonly options: ApnsSenderOptions) {
-    this.transport = options.transport ?? new Http2ApnsTransport(apnsEndpoint(options.environment));
+    this.transportFor(options.environment);
   }
 
   async send(device: PushDevice, event: DeliveryEvent): Promise<PushResult> {
     const now = this.options.clock.now();
     return this.push(
+      device.apnsEnvironment ?? this.options.environment,
       `/3/device/${encodeURIComponent(device.pushToken)}`,
       {
         authorization: `bearer ${this.authorization(now)}`,
@@ -58,6 +64,7 @@ export class ApnsSender implements PushSender, LiveActivitySender {
   async sendLiveActivity(push: LiveActivityPush): Promise<PushResult> {
     const now = this.options.clock.now();
     return this.push(
+      push.apnsEnvironment ?? this.options.environment,
       `/3/device/${encodeURIComponent(push.token)}`,
       {
         authorization: `bearer ${this.authorization(now)}`,
@@ -70,20 +77,53 @@ export class ApnsSender implements PushSender, LiveActivitySender {
     );
   }
 
-  // Closes the HTTP/2 session so the process can exit. Safe to call when no
+  // Closes every HTTP/2 session so the process can exit. Safe to call when no
   // session was ever opened.
   close(): void {
-    this.transport.close();
+    for (const transport of this.transports.values()) transport.close();
   }
 
-  private async push(path: string, headers: Record<string, string>, body: string): Promise<PushResult> {
-    const response = await this.sendWithRetry(path, headers, body);
+  // Sends to one host, and when that host says the token is not one of its own,
+  // sends to the other host once.
+  //
+  // BadDeviceToken is what Apple answers for a token minted in the other
+  // environment. A Debug build on the founder's phone and the TestFlight build
+  // on the same phone hold tokens in different environments at the same time,
+  // so one host is always wrong for one of them. Without this the push is
+  // refused, nothing rings and nobody sees an error.
+  //
+  // A refusal never delivered anything, so the second attempt cannot double
+  // ring. The result names the host that answered, and the dispatcher writes it
+  // back, so a device pays for the wrong guess once.
+  private async push(environment: ApnsEnvironment, path: string, headers: Record<string, string>, body: string): Promise<PushResult> {
+    const first = await this.attempt(environment, path, headers, body);
+    if (!wrongEnvironment(first)) return pushResult(environment, first);
+    const other: ApnsEnvironment = environment === "sandbox" ? "production" : "sandbox";
+    // attempt() has already logged an apns_rejected for each host it tried, so
+    // a token that exists in neither leaves two lines naming both. That is a
+    // bad token rather than a bad guess, and the two lines say which.
+    const second = await this.attempt(other, path, headers, body);
+    if (second.status >= 200 && second.status < 300) console.warn("apns_environment_switched", { from: environment, to: other, bundle_id: this.options.bundleId });
+    return pushResult(other, second);
+  }
+
+  private async attempt(environment: ApnsEnvironment, path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
+    const response = await this.sendWithRetry(environment, path, headers, body);
     // Apple explains a refusal in the body, e.g. {"reason":"BadDeviceToken"}.
     // Without this line a rejected push is invisible: the dispatcher only
     // stops counting it as delivered. No path and no headers are logged,
     // because the path carries the push token.
-    if (response.status >= 400) console.warn("apns_rejected", { status: response.status, reason: rejectionReason(response.body) });
-    return { status: response.status, stale: response.status === 410 };
+    if (response.status >= 400) console.warn("apns_rejected", { environment, status: response.status, reason: rejectionReason(response.body) });
+    return response;
+  }
+
+  private transportFor(environment: ApnsEnvironment): ApnsTransport {
+    const existing = this.transports.get(environment);
+    if (existing !== undefined) return existing;
+    const authority = apnsEndpoint(environment);
+    const created = this.options.transport === undefined ? new Http2ApnsTransport(authority) : this.options.transport(authority);
+    this.transports.set(environment, created);
+    return created;
   }
 
   // One retry, on a fresh connection, because the transport drops a failed
@@ -93,12 +133,13 @@ export class ApnsSender implements PushSender, LiveActivitySender {
   //
   // Only a transport failure lands here. A push Apple refuses comes back as a
   // status, not a throw, so this never retries a rejection.
-  private async sendWithRetry(path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
+  private async sendWithRetry(environment: ApnsEnvironment, path: string, headers: Record<string, string>, body: string): Promise<ApnsTransportResponse> {
+    const transport = this.transportFor(environment);
     try {
-      return await this.transport.send(path, headers, body);
+      return await transport.send(path, headers, body);
     } catch (error) {
-      console.warn("apns_retry", { reason: error instanceof Error ? error.message : String(error) });
-      return this.transport.send(path, headers, body);
+      console.warn("apns_retry", { environment, reason: error instanceof Error ? error.message : String(error) });
+      return transport.send(path, headers, body);
     }
   }
 
@@ -248,8 +289,19 @@ export class Http2ApnsTransport implements ApnsTransport {
   }
 }
 
-export function apnsEndpoint(environment: "sandbox" | "production"): string {
+export function apnsEndpoint(environment: ApnsEnvironment): string {
   return environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
+}
+
+// The one refusal that means "right token, wrong host". Everything else,
+// including DeviceTokenNotForTopic and a 410 Unregistered, is a real refusal
+// and trying the other host would only waste a request.
+function wrongEnvironment(response: ApnsTransportResponse): boolean {
+  return response.status === 400 && rejectionReason(response.body) === "BadDeviceToken";
+}
+
+function pushResult(environment: ApnsEnvironment, response: ApnsTransportResponse): PushResult {
+  return { status: response.status, stale: response.status === 410, apnsEnvironment: environment };
 }
 
 function transportError(error: unknown): Error {

@@ -320,6 +320,18 @@ const migrations: Migration[] = [
         AND (earlier.created_at, earlier.rowid) <= (topic_tokens.created_at, topic_tokens.rowid)
     );
   `,
+  // Which Apple push host this device's tokens live on. A Debug or Profile
+  // build of the iOS app registers a sandbox token, a Release, TestFlight or
+  // App Store build registers a production one, and each host refuses the
+  // other's with BadDeviceToken. Both kinds of build are on the same phone, so
+  // one server-wide setting cannot reach both.
+  //
+  // NULL means the server has not learned it yet. The sender starts at
+  // APNS_ENVIRONMENT, falls back to the other host when Apple says
+  // BadDeviceToken, and the dispatcher writes back whichever host rang the
+  // phone. Nothing is backfilled: every existing row starts unknown and costs
+  // at most one wasted request.
+  `ALTER TABLE devices ADD COLUMN apns_environment TEXT;`,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the

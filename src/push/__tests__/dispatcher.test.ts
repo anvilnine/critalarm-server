@@ -296,3 +296,107 @@ describe("Live Activity selection", () => {
     ]);
   });
 });
+
+// Both kinds of iOS build are on the founder's phone at once: a Debug build
+// holds a sandbox token and the TestFlight build holds a production one. The
+// sender works out which Apple host answered; these check the dispatcher hands
+// it what it knows and writes back what it learned.
+describe("per-device APNs environment", () => {
+  function environmentOf(db: ReturnType<typeof setup>, deviceId: string) {
+    return (db.prepare("SELECT apns_environment FROM devices WHERE id = ?").get(deviceId) as { apns_environment: string | null }).apns_environment;
+  }
+
+  it("starts every iOS device unknown, so a database from before this change guesses nothing", () => {
+    const db = setup();
+    expect(environmentOf(db, "dev_ios")).toBe(null);
+  });
+
+  it("remembers the host that rang an iOS device whose environment was unknown", async () => {
+    const db = setup();
+    const apns = new RecordingSender({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
+
+    expect(environmentOf(db, "dev_ios")).toBe("sandbox");
+  });
+
+  it("passes the remembered host to the sender, so the second push does not guess again", async () => {
+    const db = setup();
+    db.prepare("UPDATE devices SET apns_environment = 'sandbox' WHERE id = 'dev_ios'").run();
+    const apns = new RecordingSender({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
+
+    expect(apns.deliveries[0]!.device.apnsEnvironment).toBe("sandbox");
+  });
+
+  it("corrects the remembered host when the device moves from a Debug build to a TestFlight build", async () => {
+    const db = setup();
+    db.prepare("UPDATE devices SET apns_environment = 'sandbox' WHERE id = 'dev_ios'").run();
+    const apns = new RecordingSender({ status: 200, stale: false, apnsEnvironment: "production" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
+
+    expect(environmentOf(db, "dev_ios")).toBe("production");
+  });
+
+  // A token both hosts refused is a bad token, not a bad guess. Writing down
+  // whichever host happened to be tried last would send the next push there for
+  // no reason.
+  it("remembers nothing when the token was refused on the host that answered", async () => {
+    const db = setup();
+    const apns = new RecordingSender({ status: 400, stale: false, apnsEnvironment: "sandbox" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
+
+    expect(environmentOf(db, "dev_ios")).toBe(null);
+  });
+
+  it("leaves an Android device alone, because FCM has no environments", async () => {
+    const db = setup();
+    const apns = new RecordingSender({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm }).dispatch([event()]);
+
+    expect(environmentOf(db, "dev_android")).toBe(null);
+  });
+
+  it("tells the Live Activity sender which host the device is on", async () => {
+    const db = liveActivitySetup();
+    db.prepare("UPDATE devices SET apns_environment = 'sandbox' WHERE id = 'dev_ios'").run();
+    const liveActivity = new RecordingLiveActivity();
+    const { dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(liveActivity.pushes[0]!.apnsEnvironment).toBe("sandbox");
+  });
+
+  it("tells the Live Activity sender nothing when the host is still unknown", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const { dispatcher } = dispatcherFor(db, liveActivity);
+
+    await dispatcher.dispatch([event()]);
+
+    expect(liveActivity.pushes[0]!.apnsEnvironment).toBeUndefined();
+  });
+
+  // The alarm push runs before the Live Activity push in the same dispatch, so
+  // what the alarm learned is already on the row the activity reads.
+  it("uses the host the alarm push just learned for the activity that follows it", async () => {
+    const db = liveActivitySetup();
+    const liveActivity = new RecordingLiveActivity();
+    const apns = new RecordingSender({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+
+    await new PushDispatcher(db, { apns, fcm, liveActivity }, { now: () => 2_000 }).dispatch([event()]);
+
+    expect(liveActivity.pushes[0]!.apnsEnvironment).toBe("sandbox");
+  });
+});
