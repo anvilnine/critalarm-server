@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { IdentityResolver } from "../auth/identity.js";
 import type { TokenRevoker } from "../auth/revoke.js";
 import type { Clock } from "../incident/types.js";
+import { credentialHash } from "../tier/auth.js";
 import { highestEntitledTier, isHigherTier } from "../tier/revenuecat.js";
 import { sweepDeviceIntoTopics, sweepTopicIntoDevices } from "../tier/subscriptions.js";
 import type { Tier } from "../tier/types.js";
@@ -432,6 +433,20 @@ export async function deleteAccountRequest(db: Database.Database, identities: Id
   return { status: 204 };
 }
 
+// api.md §3.7. A fresh aj_ for the account this device is already on. The row
+// holds one hash and nothing else, so the write that stores the new hash is the
+// same write that retires the old token. The value is returned to the caller and
+// never stored, so nothing can read it back.
+//
+// The device may sit on a tombstone, so the account is resolved forward first.
+// Writing the hash onto the dead row would mint a token that attaches new
+// handsets to a dead tenant, which is what tombstone() clears the column for.
+export function mintJoinToken(db: Database.Database, sourceAccount: string): string {
+  const token = `aj_${randomUUID()}`;
+  db.prepare("UPDATE accounts SET join_token_hash = ? WHERE id = ?").run(credentialHash(token), liveAccount(db, sourceAccount));
+  return token;
+}
+
 type AccountDeps = { db: Database.Database; clock: Clock; identities: IdentityResolver; revoke: TokenRevoker; mode: "selfhosted" | "relay" | "hosted" };
 
 export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env>, deps: AccountDeps): void {
@@ -444,6 +459,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     refuse("/v1/account/link");
     refuse("/v1/account/merge");
     refuse("/v1/account/switch");
+    refuse("/v1/account/join-token");
     r.delete("/v1/account", (c) => c.json({ error: "not supported in selfhosted mode" }, 501));
     return;
   }
@@ -451,6 +467,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
   r.use("/v1/account/link", auth);
   r.use("/v1/account/merge", auth);
   r.use("/v1/account/switch", auth);
+  r.use("/v1/account/join-token", auth);
   r.use("/v1/account", auth);
 
   r.post("/v1/account/link", async (c) => {
@@ -479,6 +496,11 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     const result = switchAccount(deps.db, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.into_account);
     return c.json(result.body, result.status);
   });
+
+  // No body and nothing to parse. Any device on the account may call it, the
+  // same way any device may delete a topic, so the dv_ the middleware already
+  // checked is the whole authorisation.
+  r.post("/v1/account/join-token", (c) => c.json({ join_token: mintJoinToken(deps.db, c.get("account").accountId) }));
 
   r.delete("/v1/account", async (c) => {
     // No body at all is the normal call for an account nobody has signed in to,
