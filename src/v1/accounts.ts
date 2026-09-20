@@ -16,7 +16,16 @@ import type { V1Env } from "./auth.js";
 // routes attach a human identity to an account that exists, and in one case move
 // a handset from one existing account to another.
 
-export const linkSchema = z.object({ identity_token: z.string().min(1) });
+// `intent` is the app telling the server which screen the person was on
+// (api.md §3.7). Absent means "sign_in", so a client that never sends it
+// behaves exactly as it did in 1.12.0. Any other value fails the parse and
+// answers 400, which is why this is an enum and not a string.
+export const linkSchema = z.object({
+  identity_token: z.string().min(1),
+  intent: z.enum(["sign_in", "link"]).optional(),
+});
+
+export type LinkIntent = "sign_in" | "link";
 export const switchSchema = z.object({ identity_token: z.string().min(1), into_account: z.string().min(1) });
 export const mergeSchema = z.object({ identity_token: z.string().min(1), into_account: z.string().min(1) });
 // The delete body is optional: an account with no identity is erased on the
@@ -24,10 +33,11 @@ export const mergeSchema = z.object({ identity_token: z.string().min(1), into_ac
 export const deleteSchema = z.object({ identity_token: z.string().min(1).optional() });
 
 export type LinkOutcome =
-  | { status: 200; body: { account_id: string; outcome: "claimed" | "attached" } }
+  | { status: 200; body: { account_id: string; outcome: "claimed" | "attached" | "linked" | "already_linked" } }
   | { status: 401; body: { error: "unauthorized" } }
   | { status: 409; body: { error: "choose"; into_account: string; topics: number; incidents: number } }
-  | { status: 409; body: { error: "account has another identity" } };
+  | { status: 409; body: { error: "account has another identity" } }
+  | { status: 409; body: { error: "identity has another account" } };
 
 export type SwitchOutcome =
   | { status: 200; body: { account_id: string } }
@@ -64,9 +74,22 @@ function identityAccount(db: Database.Database, userId: string): string | undefi
   return row === undefined ? undefined : liveAccount(db, row.account_id);
 }
 
-function accountIdentity(db: Database.Database, accountId: string): string | undefined {
-  const row = db.prepare("SELECT user_id FROM account_identities WHERE account_id = ?").get(accountId) as { user_id: string } | undefined;
-  return row?.user_id;
+// Every identity on the account, not one. Contract 1.14.0 drops the UNIQUE on
+// account_identities.account_id (migration 15), so a person who signed in with
+// Google on an Android handset and Apple on an iPhone has two rows here and both
+// point at this account.
+function accountIdentities(db: Database.Database, accountId: string): string[] {
+  const rows = db.prepare("SELECT user_id FROM account_identities WHERE account_id = ?").all(accountId) as { user_id: string }[];
+  return rows.map((row) => row.user_id);
+}
+
+// Does this account belong to somebody who is not the caller? The old single-row
+// read answered `claimedBy !== identity.userId`, and this is the same question
+// asked of a set: an account holding two of the caller's own providers is still
+// the caller's.
+function claimedBySomebodyElse(db: Database.Database, accountId: string, userId: string): boolean {
+  const holders = accountIdentities(db, accountId);
+  return holders.length > 0 && !holders.includes(userId);
 }
 
 // "Empty" is no topics and no incidents. Registration runs long before any
@@ -97,8 +120,17 @@ function moveDevices(db: Database.Database, from: string, into: string): void {
 // The tombstone. join_token_hash goes with it: an aj_ minted for this account
 // would otherwise keep attaching new handsets to a dead tenant, which is the
 // same failure as a live tk_ on a dead tenant, one route along.
+//
+// Identities follow the devices. Since 1.14.0 an account can hold more than one
+// (migration 15), and a `link` that finds the device's account empty tombstones
+// it with those rows still on it. Left behind, `which identities does this
+// account hold` would answer nothing for them, so the person who signed in with
+// the other provider could no longer delete the account. Nothing can collide:
+// user_id is the primary key, and an identity already pointing at `into` would
+// have made the caller take an earlier branch.
 function tombstone(db: Database.Database, accountId: string, into: string): void {
   db.prepare("UPDATE accounts SET merged_into = ?, join_token_hash = NULL WHERE id = ?").run(into, accountId);
+  db.prepare("UPDATE account_identities SET account_id = ? WHERE account_id = ?").run(into, accountId);
 }
 
 // api.md §3.7, the switch branch that can silently stop paging somebody.
@@ -111,37 +143,66 @@ function revokeTopicTokens(db: Database.Database, accountId: string): void {
   db.prepare("DELETE FROM topic_tokens WHERE topic_id IN (SELECT id FROM topics WHERE account_id = ?)").run(accountId);
 }
 
-export function linkIdentity(db: Database.Database, clock: Clock, identities: IdentityResolver, sourceAccount: string, identityToken: string): LinkOutcome {
+// api.md §3.7, the whole outcome matrix. The rows are numbered here the way the
+// contract lists them, and each one has a test of its own.
+//
+// Two requests can carry the same dv_ and the same brand new identity and mean
+// opposite things: a person adding their second provider, or a second person
+// signing in on a borrowed handset. The server cannot tell them apart, so the
+// app says which it meant in `intent`.
+export function linkIdentity(db: Database.Database, clock: Clock, identities: IdentityResolver, sourceAccount: string, identityToken: string, intent: LinkIntent = "sign_in"): LinkOutcome {
   const identity = identities.resolve(identityToken);
   if (identity === null) return { status: 401, body: { error: "unauthorized" } };
   const source = liveAccount(db, sourceAccount);
-  const claimedBy = accountIdentity(db, source);
-  // The shared-handset case. api.md §3.7 requires 409 here and forbids letting
-  // the unique index decide it at 500, so it is checked before anything is
-  // written.
-  if (claimedBy !== undefined && claimedBy !== identity.userId) {
-    return { status: 409, body: { error: "account has another identity" } };
-  }
   const target = identityAccount(db, identity.userId);
 
-  if (target === undefined) {
-    // Sign-up. One row, pointing at the account this device already has.
-    // Nothing moves and no token changes.
-    db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES (?, ?, ?)").run(identity.userId, source, clock.now());
-    return { status: 200, body: { account_id: source, outcome: "claimed" } };
-  }
-  // Already linked to this very account. Same end state as the line above, so
-  // the same answer: calling link twice is not an error.
-  if (target === source) return { status: 200, body: { account_id: source, outcome: "claimed" } };
+  // Row 7. The identity already points at this very account, under either
+  // intent. Checked first, so a retry after a dropped reply lands here and
+  // never on one of the refusals below.
+  if (target === source) return { status: 200, body: { account_id: source, outcome: "already_linked" } };
 
+  if (target === undefined) {
+    // Rows 1 to 3. The identity is new, so nothing of it exists to collide
+    // with and nothing moves whichever way this goes.
+    const holders = accountIdentities(db, source);
+    // Row 2. The shared handset. api.md §3.7 requires 409 here and forbids
+    // letting a constraint decide it at 500, so it is checked before anything
+    // is written.
+    if (holders.length > 0 && intent === "sign_in") {
+      return { status: 409, body: { error: "account has another identity" } };
+    }
+    // Rows 1 and 3. One row, pointing at the account this device already has.
+    // `linked` is the account picking up a second way to sign in; `claimed` is
+    // its first.
+    db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES (?, ?, ?)").run(identity.userId, source, clock.now());
+    const outcome = holders.length > 0 ? "linked" : "claimed";
+    return { status: 200, body: { account_id: source, outcome } };
+  }
+
+  // Rows 4 to 6. The identity already has an account and it is not this one.
+  //
+  // Under `sign_in` the shared handset is refused before emptiness is even
+  // looked at, which is the order 1.12.0 used. Under `link` it is not: row 3
+  // says an identity may join an account that already holds one, and stopping
+  // here would make that depend on which of the two requests arrived first.
+  if (intent === "sign_in" && claimedBySomebodyElse(db, source, identity.userId)) {
+    return { status: 409, body: { error: "account has another identity" } };
+  }
   const content = accountContent(db, source);
   if (content.topics === 0 && content.incidents === 0) {
+    // Row 4. Nothing to decide, under either intent: the device's account
+    // holds nothing, so the handset joins the identity's account.
     db.transaction(() => {
       moveDevices(db, source, target);
       tombstone(db, source, target);
     })();
     return { status: 200, body: { account_id: target, outcome: "attached" } };
   }
+  // Row 6. The person asked to add a provider, and the provider is already
+  // somebody's way in to another account holding topics and history. Which
+  // account wins is not a decision this route gets to make.
+  if (intent === "link") return { status: 409, body: { error: "identity has another account" } };
+  // Row 5. The app asks, per device.
   return { status: 409, body: { error: "choose", into_account: target, topics: content.topics, incidents: content.incidents } };
 }
 
@@ -157,8 +218,7 @@ export function switchAccount(db: Database.Database, identities: IdentityResolve
   // Already there. Nothing to do, and running the move would tombstone the
   // account the device just joined.
   if (source === target) return { status: 200, body: { account_id: target } };
-  const claimedBy = accountIdentity(db, source);
-  if (claimedBy !== undefined && claimedBy !== identity.userId) {
+  if (claimedBySomebodyElse(db, source, identity.userId)) {
     return { status: 409, body: { error: "account has another identity" } };
   }
   db.transaction(() => {
@@ -220,8 +280,7 @@ export function mergeAccounts(db: Database.Database, clock: Clock, identities: I
   // different identity would hand one person's topics and history to another,
   // and this credential does not carry that authority, so it is the same 401
   // switchAccount already answers for "this identity does not own that account".
-  const claimedBy = accountIdentity(db, source);
-  if (claimedBy !== undefined && claimedBy !== identity.userId) return { status: 401, body: { error: "unauthorized" } };
+  if (claimedBySomebodyElse(db, source, identity.userId)) return { status: 401, body: { error: "unauthorized" } };
 
   // Read merged_into off the rows themselves, before liveAccount resolves it
   // forward. Either side already being a tombstone is "already merged", and
@@ -414,20 +473,25 @@ function openIncident(db: Database.Database, family: string[]): string | undefin
 
 export async function deleteAccountRequest(db: Database.Database, identities: IdentityResolver, revoker: TokenRevoker, sourceAccount: string, identityToken: string | undefined): Promise<DeleteOutcome> {
   const account = liveAccount(db, sourceAccount);
-  const claimedBy = accountIdentity(db, account);
+  const family = accountFamily(db, account);
+  const claimedBy = accountIdentities(db, account);
   // An account with no identity goes on the dv_ alone: every device on it holds
   // the same authority, the way every device can already delete a topic. One
-  // with an identity needs that identity as well, so a handset left in a drawer
-  // cannot wipe a signed-in account.
-  if (claimedBy !== undefined) {
+  // with an identity needs one of its identities as well, so a handset left in
+  // a drawer cannot wipe a signed-in account. An account holding two accepts
+  // either: both belong to the same person, and asking for both would strand
+  // anybody who lost access to one (api.md §3.7).
+  if (claimedBy.length > 0) {
     const identity = identityToken === undefined ? null : identities.resolve(identityToken);
-    if (identity === null || identity.userId !== claimedBy) return { status: 401, body: { error: "unauthorized" } };
+    if (identity === null || !claimedBy.includes(identity.userId)) return { status: 401, body: { error: "unauthorized" } };
   }
-  const ringing = openIncident(db, accountFamily(db, account));
+  const ringing = openIncident(db, family);
   if (ringing !== undefined) return { status: 409, body: { error: "live incident", incident_id: ringing } };
-  // Outside the transaction and before it, because it is a network call and the
-  // provider tokens have to still be readable. It never blocks the delete.
-  if (claimedBy !== undefined) await revoker.revoke(claimedBy);
+  // Outside the transaction and before it, because these are network calls and
+  // the provider tokens have to still be readable. Every identity the erase is
+  // about to take, across the tombstones too, because the erase covers those as
+  // well. It never blocks the delete.
+  for (const userId of family.flatMap((id) => accountIdentities(db, id))) await revoker.revoke(userId);
   deleteAccount(db, account);
   return { status: 204 };
 }
@@ -458,7 +522,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     try { body = await c.req.json(); } catch { return c.json({ error: "invalid request" }, 400); }
     const parsed = linkSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
-    const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token);
+    const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.intent ?? "sign_in");
     return c.json(result.body, result.status);
   });
 
