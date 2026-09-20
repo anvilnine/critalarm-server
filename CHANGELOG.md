@@ -3,6 +3,36 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.15.0 - 2026-09-20
+
+### Added
+
+- A `name` on every topic token (§3.1). `POST /v1/topics` takes `token_name`
+  and returns it. `POST /v1/topics/{name}/tokens` takes `name` and returns it.
+  `GET /v1/topics/{name}/tokens` returns `name` on every row.
+- `PATCH /v1/topics/{name}/tokens/{token_id}` (§3.1). Renames one token. The
+  body's `name` is required. An unknown topic or token id answers
+  `404 {"error":"not found"}`.
+
+### Changed
+
+- A name is trimmed, then cut to 40 characters. A longer name is shortened, not
+  refused.
+- A name that is missing or empty after trimming becomes `Token N`, where N is
+  the topic's current token count plus one. Existing tokens are backfilled the
+  same way on migration, per topic, oldest first.
+
+### Notes
+
+- Names are not unique inside a topic. Deleting `Token 2` of three and minting
+  another leaves two rows called `Token 3` until one is renamed. Holding
+  uniqueness needs a per-topic counter that outlives deletes, which costs more
+  state than the confusion is worth.
+- Nothing here is required of a client. Every request that worked before still
+  works and now gets a name it did not ask for.
+- `DELETE /v1/topics/{name}/tokens/{token_id}` is unchanged, including the
+  `409 {"error":"topic must retain a token"}` on the last one.
+
 ## 1.14.0 - 2026-09-20
 
 ### Added

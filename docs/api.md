@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.14.0
-**Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.15.0
+**Status:** draft, 2026-09-20. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.15.0** gives every topic token a name (§3.1). A token was only ever identified by its `token_id`, so a client listing a topic's tokens had nothing to show but `tok_` strings, which say nothing about what the token is for and read close enough to a `tk_` value that people try to publish with one. `POST /v1/topics` takes `token_name`, `POST /v1/topics/{name}/tokens` takes `name`, the listing returns `name`, and `PATCH /v1/topics/{name}/tokens/{token_id}` renames one. All of it is optional on the way in: a request that omits a name gets a server-assigned `Token N`, so every existing client keeps working untouched and every token has a name to show.
 
 **1.14.0** does two things for accounts. `POST /v1/account/join-token` mints a fresh `aj_` for the account a device already belongs to (§3.7). Until now `aj_` was minted once, when the account was created, so every account made before 1.11.0 holds none and an account whose token was lost had no way back to one. Minting on demand also means the value exists only while somebody is looking at the screen that shows it. Second, one account may now hold more than one sign-in identity, so the same person can use Sign in with Apple on an iPhone and Google on an Android phone and land on the same account (§3.7). `POST /v1/account/link` takes an `intent` field: `sign_in` is what every existing client already sends by leaving it out, and behaves exactly as it did; `link` adds an identity to the account this device already has. The app has to say which it meant, because the server cannot tell a person adding their second provider from a second person signing in on a borrowed handset.
 
@@ -228,8 +230,8 @@ GET    /v1/topics
 → 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":... }]
 
 POST   /v1/topics
-  { "name":"prod", "critical":false }       // critical optional, defaults false
-→ 201 { ...topic, "token":"tk_...", "token_id":"tok_..." }   // token returned ONCE, on creation only
+  { "name":"prod", "critical":false, "token_name":"CI server" }   // critical and token_name optional
+→ 201 { ...topic, "token":"tk_...", "token_id":"tok_...", "token_name":"CI server" }   // token returned ONCE, on creation only
 → 409 {"code":40901,"http":409,"error":"topic already exists"}
 → 429 {"error":"cap","cap":"critical_topics"}                // only when critical is true
 
@@ -242,11 +244,17 @@ DELETE /v1/topics/{name}
 → 204
 
 GET    /v1/topics/{name}/tokens
-→ 200 [{ "token_id":"tok_...", "created_at":... }]  // ids only; never a token value
+→ 200 [{ "token_id":"tok_...", "name":"CI server", "created_at":... }]  // ids and names; never a token value
 → 404 {"error":"not found"}
 
 POST   /v1/topics/{name}/tokens
-→ 201 { "token":"tk_...", "token_id":"tok_..." }   // additional token; token returned once
+  { "name":"Grafana" }                             // optional
+→ 201 { "token":"tk_...", "token_id":"tok_...", "name":"Grafana" }   // additional token; token returned once
+
+PATCH  /v1/topics/{name}/tokens/{token_id}
+  { "name":"Grafana prod" }                        // required
+→ 200 { "token_id":"tok_...", "name":"Grafana prod", "created_at":... }
+→ 404 {"error":"not found"}
 
 DELETE /v1/topics/{name}/tokens/{token_id}
 → 204
@@ -257,9 +265,11 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 
 `relay_content` is read-only here; it is server config.
 
+**A token name is optional on the way in and always present on the way out.** `token_name` on topic creation and `name` on `POST .../tokens` may be left off; `name` on the `PATCH` may not. A name is trimmed and then cut to 40 characters, so a longer one is shortened rather than refused. A name that is empty after trimming counts as missing, and a missing name becomes `Token N`, where N is the topic's current token count plus one. Names are not unique inside a topic, so two tokens may carry the same one. That has a visible edge: delete `Token 2` of three and mint another, and the topic holds two rows called `Token 3` until somebody renames one. Making that impossible needs a per-topic counter that survives deletes, which is more state than the problem is worth.
+
 **Every token has a `token_id`, including the one creation hands back.** `DELETE /v1/topics/{name}/tokens/{token_id}` is keyed on it, so a token returned without one could never be revoked, and the creation token is the one that actually ships out to a monitoring tool. A topic always keeps at least one token; deleting the last one answers `409`.
 
-**A token value is returned once and never again.** The server keeps a SHA-256 hash of the token, not the token, so it has nothing to show a second time. `GET /v1/topics/{name}/tokens` lists `token_id` and `created_at` and nothing else. It is how a client that lost the value still finds the id to revoke, ordered oldest first. There is no paging: a topic holds few enough tokens that the whole list fits in one answer.
+**A token value is returned once and never again.** The server keeps a SHA-256 hash of the token, not the token, so it has nothing to show a second time. `GET /v1/topics/{name}/tokens` lists `token_id`, `name` and `created_at`, and never a token value. It is how a client that lost the value still finds the id to revoke, ordered oldest first. There is no paging: a topic holds few enough tokens that the whole list fits in one answer.
 
 **Creating a topic that already exists answers `409`, not `500`.** Names are unique per account. A client that retries after a dropped `201` will hit this, so it must be a clean, JSON answer.
 
