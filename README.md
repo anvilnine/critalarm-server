@@ -11,6 +11,32 @@ keeps ringing your phone on a repeat loop until you acknowledge it.
 
 Status: early implementation. Contract-compatible publish, incidents, timers, and relay forwarding are present.
 
+## Publish to it
+
+Anything that can make an HTTP request works:
+
+```bash
+curl -X POST https://alerts.example.com/prod \
+  -H "Authorization: Bearer tk_xxxxxxxxxxxx" \
+  -H "X-Priority: 5" \
+  -H "X-Title: Database down" \
+  -d "pg_isready failed 3 times in 90 s"
+```
+
+There is also a command line publisher, so a cron job or a CI step does not
+have to get the headers right by hand:
+
+```bash
+npm install -g @anvilnine/critalarm-cli
+
+critalarm send prod "pg_isready failed 3 times in 90 s" -t "Database down" -p 5
+```
+
+It publishes and nothing else. Topics, tokens and incidents need a management
+credential, which lives in the app. Source and docs:
+[anvilnine/critalarm-cli](https://github.com/anvilnine/critalarm-cli),
+[critalarm.app/cli](https://critalarm.app/cli).
+
 ## Configuration
 
 | Option | Environment | Default | Purpose |
