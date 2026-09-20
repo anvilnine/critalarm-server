@@ -21,9 +21,11 @@ function columnsOf(db: ReturnType<typeof openDatabase>, table: string): string[]
 }
 
 describe("migration 14", () => {
-  it("is the fourteenth and last", () => {
-    expect(migrationCount).toBe(14);
-    const db = fresh();
+  it("is the fourteenth", () => {
+    expect(migrationCount).toBeGreaterThanOrEqual(14);
+    const db = openDatabase(":memory:");
+    databases.push(db);
+    migrate(db, 14);
     expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 14 });
   });
 
@@ -35,12 +37,14 @@ describe("migration 14", () => {
     expect(columnsOf(db, "verification")).toEqual(["createdAt", "expiresAt", "id", "identifier", "updatedAt", "value"]);
   });
 
-  it("maps one identity to one account, both ways", () => {
+  // Only one way round now. Migration 15 drops the UNIQUE on account_id so an
+  // account can hold a Google identity and an Apple one, which
+  // migrations-s30.test.ts covers. user_id is still the primary key.
+  it("maps one identity to one account", () => {
     const db = fresh();
     for (const id of ["acc_1", "acc_2"]) db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, 'free', 1)").run(id);
     db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES ('usr_1', 'acc_1', 1)").run();
     expect(() => db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES ('usr_1', 'acc_2', 1)").run()).toThrow();
-    expect(() => db.prepare("INSERT INTO account_identities (user_id, account_id, linked_at) VALUES ('usr_2', 'acc_1', 1)").run()).toThrow();
   });
 
   it("drops the mapping when the account is deleted", () => {
