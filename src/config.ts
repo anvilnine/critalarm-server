@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
 import { parseApplePrivateKey, type AppleSigningKey } from "./auth/apple-client-secret.js";
+import type { RevenueCatApiConfig } from "./tier/reconcile.js";
 
 export interface ApnsConfig {
   teamId: string;
@@ -64,6 +65,9 @@ export interface Config {
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
+  // The read-only secret API key the reconcile sweep uses, with the project it
+  // reads. Unset means the sweep never starts (tier/reconcile.ts).
+  revenueCatApi?: RevenueCatApiConfig;
   auth?: AuthConfig;
 }
 
@@ -321,6 +325,16 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   // webhook, stores the event, and upgrades nobody, forever. Nothing about it
   // looks broken from the outside, so it fails startup instead.
   if (env.NODE_ENV === "production" && mode !== "selfhosted" && Object.keys(revenueCatEntitlements).length === 0) throw configError("RevenueCat entitlements");
+  // The reconcile sweep (tier/reconcile.ts). Unset key means the sweep never
+  // starts, which is the whole configuration a self-hosted server needs. Set
+  // it without the project or without the entitlement map and startup stops:
+  // a sweep that cannot name a project reads nothing, and one with an empty
+  // map corrects nobody, and both look healthy from the outside.
+  const revenueCatApiKey = stringValue(env, "REVENUECAT_SECRET_API_KEY", undefined);
+  const revenueCatProjectId = stringValue(env, "REVENUECAT_PROJECT_ID", undefined);
+  if (revenueCatApiKey === "") throw configError("RevenueCat secret API key");
+  if (revenueCatApiKey !== undefined && (revenueCatProjectId === undefined || revenueCatProjectId === "")) throw configError("RevenueCat project id");
+  if (revenueCatApiKey !== undefined && Object.keys(revenueCatEntitlements).length === 0) throw configError("RevenueCat entitlements");
   const authSettings = authConfig(env, readFile);
   return {
     mode,
@@ -340,6 +354,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: revenueCatEntitlements } }),
+    ...(revenueCatApiKey === undefined || revenueCatProjectId === undefined ? {} : { revenueCatApi: { secretApiKey: revenueCatApiKey, projectId: revenueCatProjectId, entitlements: revenueCatEntitlements } }),
     ...(authSettings === undefined ? {} : { auth: authSettings }),
   };
 }
