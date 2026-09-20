@@ -74,12 +74,12 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     const result = await sender.send(device, event());
 
-    expect(result).toEqual({ status: 200, stale: false });
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
     expect(transport.sent).toHaveLength(1);
     const sent = transport.sent[0]!;
     expect(sent.path).toBe("/3/device/device%2Ftoken%3Fone");
@@ -124,7 +124,7 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     await sender.send(device, event());
@@ -146,7 +146,7 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     await sender.send(device, event());
@@ -170,7 +170,7 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
@@ -211,10 +211,10 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => now },
-      transport,
+      transport: () => transport,
     });
 
-    expect(await sender.send(device, event())).toEqual({ status: 410, stale: true });
+    expect(await sender.send(device, event())).toEqual({ status: 410, stale: true, apnsEnvironment: "production" });
     now = 3_999;
     await sender.send(device, event());
 
@@ -223,9 +223,12 @@ describe("ApnsSender", () => {
     expect(authorizations[1]).toBe(authorizations[0]);
   });
 
+  // DeviceTokenNotForTopic, not BadDeviceToken. BadDeviceToken now means the
+  // token belongs to the other Apple host and sends a second push there, so it
+  // is no longer a plain refusal.
   it("reports a rejection that is not a 410 without marking the device stale, and logs Apple's reason", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const transport = replies(400, JSON.stringify({ reason: "BadDeviceToken" }));
+    const transport = replies(400, JSON.stringify({ reason: "DeviceTokenNotForTopic" }));
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -233,11 +236,11 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
-    expect(await sender.send(device, event())).toEqual({ status: 400, stale: false });
-    expect(warn).toHaveBeenCalledWith("apns_rejected", { status: 400, reason: "BadDeviceToken" });
+    expect(await sender.send(device, event())).toEqual({ status: 400, stale: false, apnsEnvironment: "production" });
+    expect(warn).toHaveBeenCalledWith("apns_rejected", { environment: "production", status: 400, reason: "DeviceTokenNotForTopic" });
     // The push token rides in the path, so nothing logged may contain it.
     expect(JSON.stringify(warn.mock.calls)).not.toContain("device%2Ftoken");
     warn.mockRestore();
@@ -251,7 +254,7 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport: new FakeTransport(async () => {
+      transport: () => new FakeTransport(async () => {
         throw new Error("apns transport failed: connect ECONNREFUSED 17.0.0.1:443");
       }),
     });
@@ -277,12 +280,12 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     const result = await sender.send(device, event());
 
-    expect(result).toEqual({ status: 200, stale: false });
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
     expect(attempts).toBe(2);
     expect(transport.sent).toHaveLength(2);
     expect(transport.sent[0]!.body).toBe(transport.sent[1]!.body);
@@ -301,7 +304,7 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     await expect(sender.send(device, event())).rejects.toThrow("apple is down");
@@ -309,7 +312,7 @@ describe("ApnsSender", () => {
   });
 
   it("does not retry a push Apple refused", async () => {
-    const transport = replies(400, JSON.stringify({ reason: "BadDeviceToken" }));
+    const transport = replies(400, JSON.stringify({ reason: "DeviceTokenNotForTopic" }));
     const sender = new ApnsSender({
       teamId: "team_1",
       keyId: "key_1",
@@ -317,12 +320,12 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     const result = await sender.send(device, event());
 
-    expect(result).toEqual({ status: 400, stale: false });
+    expect(result).toEqual({ status: 400, stale: false, apnsEnvironment: "sandbox" });
     expect(transport.sent).toHaveLength(1);
   });
 
@@ -335,12 +338,228 @@ describe("ApnsSender", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_000 },
-      transport,
+      transport: () => transport,
     });
 
     sender.close();
 
     expect(transport.closed).toBe(1);
+  });
+});
+
+const PRODUCTION_HOST = "https://api.push.apple.com";
+const SANDBOX_HOST = "https://api.sandbox.push.apple.com";
+const badDeviceToken = JSON.stringify({ reason: "BadDeviceToken" });
+
+// One fake per Apple host, keyed the way the sender dials them. Apple really
+// does answer differently on the two hosts for the same token, so a test that
+// shares one fake between them cannot show the difference.
+function hosts(answers: Record<string, { status: number; body?: string }>) {
+  const fakes = new Map<string, FakeTransport>();
+  const transport = (authority: string): FakeTransport => {
+    const answer = answers[authority] ?? { status: 500 };
+    const fake = new FakeTransport(async () => ({
+      status: answer.status,
+      headers: { ":status": String(answer.status) },
+      body: answer.body ?? "",
+    }));
+    fakes.set(authority, fake);
+    return fake;
+  };
+  return { transport, sentTo: (authority: string) => fakes.get(authority)?.sent ?? [] };
+}
+
+function senderOn(environment: "sandbox" | "production", transport: (authority: string) => ApnsTransport) {
+  return new ApnsSender({
+    teamId: "team_1",
+    keyId: "key_1",
+    privateKey,
+    bundleId: "app.critalarm",
+    environment,
+    clock: { now: () => 1_000 },
+    transport,
+  });
+}
+
+describe("ApnsSender across the two Apple hosts", () => {
+  it("sends a sandbox device's token to the sandbox host even though the server is set to production", async () => {
+    const { transport, sentTo } = hosts({ [SANDBOX_HOST]: { status: 200 }, [PRODUCTION_HOST]: { status: 200 } });
+
+    const result = await senderOn("production", transport).send({ ...device, apnsEnvironment: "sandbox" }, event());
+
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    expect(sentTo(PRODUCTION_HOST)).toHaveLength(0);
+  });
+
+  it("falls back to sandbox when production refuses a Debug build's token with BadDeviceToken", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: badDeviceToken },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    const result = await senderOn("production", transport).send(device, event());
+
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    expect(sentTo(PRODUCTION_HOST)).toHaveLength(1);
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("falls back to production when sandbox refuses a TestFlight build's token with BadDeviceToken", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [SANDBOX_HOST]: { status: 400, body: badDeviceToken },
+      [PRODUCTION_HOST]: { status: 200 },
+    });
+
+    const result = await senderOn("sandbox", transport).send(device, event());
+
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "production" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    expect(sentTo(PRODUCTION_HOST)).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("sends the same push body to the second host, so the fallback rings the same alarm", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: badDeviceToken },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    await senderOn("production", transport).send(device, event());
+
+    expect(sentTo(SANDBOX_HOST)[0]!.body).toBe(sentTo(PRODUCTION_HOST)[0]!.body);
+    expect(sentTo(SANDBOX_HOST)[0]!.path).toBe(sentTo(PRODUCTION_HOST)[0]!.path);
+    warn.mockRestore();
+  });
+
+  it("logs the switch when the other host accepts, so a wrong-environment token is never silent", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: badDeviceToken },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    await senderOn("production", transport).send(device, event());
+
+    expect(warn).toHaveBeenCalledWith("apns_rejected", { environment: "production", status: 400, reason: "BadDeviceToken" });
+    expect(warn).toHaveBeenCalledWith("apns_environment_switched", { from: "production", to: "sandbox", bundle_id: "app.critalarm" });
+    // The push token rides in the path, so nothing logged may contain it.
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("device%2Ftoken");
+    warn.mockRestore();
+  });
+
+  it("tries each host once and names both in the log when the token belongs to neither", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: badDeviceToken },
+      [SANDBOX_HOST]: { status: 400, body: badDeviceToken },
+    });
+
+    const result = await senderOn("production", transport).send(device, event());
+
+    expect(result).toEqual({ status: 400, stale: false, apnsEnvironment: "sandbox" });
+    expect(sentTo(PRODUCTION_HOST)).toHaveLength(1);
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    expect(warn).toHaveBeenCalledWith("apns_rejected", { environment: "production", status: 400, reason: "BadDeviceToken" });
+    expect(warn).toHaveBeenCalledWith("apns_rejected", { environment: "sandbox", status: 400, reason: "BadDeviceToken" });
+    expect(warn).not.toHaveBeenCalledWith("apns_environment_switched", expect.anything());
+    warn.mockRestore();
+  });
+
+  it("stays on one host when Apple refuses for a reason other than BadDeviceToken", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: JSON.stringify({ reason: "DeviceTokenNotForTopic" }) },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    const result = await senderOn("production", transport).send(device, event());
+
+    expect(result).toEqual({ status: 400, stale: false, apnsEnvironment: "production" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it("stays on one host when Apple says the token is unregistered, so a stale token is not chased", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 410, body: JSON.stringify({ reason: "Unregistered" }) },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    const result = await senderOn("production", transport).send(device, event());
+
+    expect(result).toEqual({ status: 410, stale: true, apnsEnvironment: "production" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(0);
+    warn.mockRestore();
+  });
+
+  it("sends a Live Activity push to the host its device is known to be on", async () => {
+    const { transport, sentTo } = hosts({ [SANDBOX_HOST]: { status: 200 }, [PRODUCTION_HOST]: { status: 200 } });
+
+    const result = await senderOn("production", transport).sendLiveActivity({
+      token: "la/token",
+      event: "start",
+      incidentId: "inc_1",
+      topic: "prod",
+      server: "https://alerts.example.com",
+      state: "open",
+      title: "Database",
+      openedAt: 900,
+      apnsEnvironment: "sandbox",
+    });
+
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    expect(sentTo(PRODUCTION_HOST)).toHaveLength(0);
+  });
+
+  it("falls back to the other host for a Live Activity token too", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { transport, sentTo } = hosts({
+      [PRODUCTION_HOST]: { status: 400, body: badDeviceToken },
+      [SANDBOX_HOST]: { status: 200 },
+    });
+
+    const result = await senderOn("production", transport).sendLiveActivity({
+      token: "la/token",
+      event: "start",
+      incidentId: "inc_1",
+      topic: "prod",
+      server: "https://alerts.example.com",
+      state: "open",
+      title: "Database",
+      openedAt: 900,
+    });
+
+    expect(result).toEqual({ status: 200, stale: false, apnsEnvironment: "sandbox" });
+    expect(sentTo(SANDBOX_HOST)).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("closes both hosts on shutdown once it has dialled both", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fakes = new Map<string, FakeTransport>();
+    const sender = senderOn("production", (authority) => {
+      const fake = new FakeTransport(async () => ({
+        status: authority === PRODUCTION_HOST ? 400 : 200,
+        headers: {},
+        body: authority === PRODUCTION_HOST ? badDeviceToken : "",
+      }));
+      fakes.set(authority, fake);
+      return fake;
+    });
+    await sender.send(device, event());
+
+    sender.close();
+
+    expect([...fakes.values()].map((fake) => fake.closed)).toEqual([1, 1]);
+    expect(fakes.size).toBe(2);
+    warn.mockRestore();
   });
 });
 
@@ -353,7 +572,7 @@ describe("ApnsSender Live Activity pushes", () => {
       bundleId: "app.critalarm",
       environment: "sandbox",
       clock: { now: () => 1_757_740_800 },
-      transport,
+      transport: () => transport,
     });
   }
 
@@ -426,10 +645,10 @@ describe("ApnsSender Live Activity pushes", () => {
       bundleId: "app.critalarm",
       environment: "production",
       clock: { now: () => 1_757_740_800 },
-      transport: replies(410),
+      transport: () => replies(410),
     });
 
-    expect(await sender.sendLiveActivity({ ...push, event: "update" })).toEqual({ status: 410, stale: true });
+    expect(await sender.sendLiveActivity({ ...push, event: "update" })).toEqual({ status: 410, stale: true, apnsEnvironment: "production" });
     warn.mockRestore();
   });
 });

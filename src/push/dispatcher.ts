@@ -1,16 +1,21 @@
 import type Database from "better-sqlite3";
 import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
-import type { LiveActivityPush, LiveActivitySender, PushDevice, PushSender } from "./types.js";
+import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PushDevice, PushResult, PushSender } from "./types.js";
 
 type DeviceRow = {
   id: string;
   account_id: string;
   platform: "ios" | "android";
   push_token: string;
+  apns_environment: ApnsEnvironment | null;
 };
 
 type IncidentStateRow = { state: "open" | "acked" | "closed" | "expired"; opened_at: number };
+
+// A Live Activity token plus the Apple host its device is known to be on, so
+// the sender does not have to guess for it the way it does for a new device.
+type LiveActivityTarget = { token: string; apns_environment: ApnsEnvironment | null };
 
 export interface PushDispatchers {
   apns: PushSender;
@@ -55,6 +60,7 @@ export class PushDispatcher {
     let delivered = 0;
     for (const device of this.subscribedDevices(event.topicHash, accountId)) {
       const result = await this.senderFor(device).send(device, event);
+      this.rememberApnsEnvironment(device, result);
       if (result.status >= 200 && result.status < 300 && !result.stale) delivered += 1;
       if (device.platform === "ios" && result.stale) {
         this.db
@@ -68,6 +74,17 @@ export class PushDispatcher {
     return delivered;
   }
 
+  // Which Apple host rang the phone, so the next push starts there instead of
+  // paying for the wrong guess again. Only a push Apple accepted is worth
+  // remembering: a token both hosts refused is a bad token, and writing down
+  // the host that happened to be tried last would be a lie.
+  private rememberApnsEnvironment(device: PushDevice, result: PushResult): void {
+    if (device.platform !== "ios" || result.apnsEnvironment === undefined) return;
+    if (result.status < 200 || result.status >= 300) return;
+    if (result.apnsEnvironment === device.apnsEnvironment) return;
+    this.db.prepare("UPDATE devices SET apns_environment = ? WHERE id = ?").run(result.apnsEnvironment, device.id);
+  }
+
   private async updateLiveActivities(event: DeliveryEvent, accountId: string): Promise<void> {
     const action = liveActivityEvent[event.kind];
     const sender = this.senders.liveActivity;
@@ -77,9 +94,9 @@ export class PushDispatcher {
     const incident = this.incidentState(event.incidentId);
     const state = incident?.state ?? fallbackState(event.kind);
     const openedAt = incident?.opened_at ?? this.clock.now();
-    for (const token of this.liveActivityTokens(action, event, accountId)) {
+    for (const target of this.liveActivityTokens(action, event, accountId)) {
       const push: LiveActivityPush = {
-        token,
+        token: target.token,
         event: action,
         incidentId: event.incidentId,
         topic: event.topic,
@@ -87,10 +104,11 @@ export class PushDispatcher {
         state,
         title: event.relayContent === "full" ? event.title : `Critical alert on ${event.topic}`,
         openedAt,
+        ...(target.apns_environment === null ? {} : { apnsEnvironment: target.apns_environment }),
       };
       const result = await sender.sendLiveActivity(push);
       if (result.stale) {
-        this.db.prepare("DELETE FROM device_tokens WHERE token = ? AND kind IN ('la_start', 'la_update')").run(token);
+        this.db.prepare("DELETE FROM device_tokens WHERE token = ? AND kind IN ('la_start', 'la_update')").run(target.token);
       }
     }
   }
@@ -98,23 +116,22 @@ export class PushDispatcher {
   // A start goes to the push-to-start token of every device subscribed to the
   // topic. An update or an end goes to the update token of the activity that is
   // already running for this incident, wherever it is.
-  private liveActivityTokens(action: "start" | "update" | "end", event: DeliveryEvent, accountId: string): string[] {
+  private liveActivityTokens(action: "start" | "update" | "end", event: DeliveryEvent, accountId: string): LiveActivityTarget[] {
     if (action === "start") {
       const deviceIds = this.subscribedDevices(event.topicHash, accountId).map((device) => device.id);
       if (deviceIds.length === 0) return [];
-      const rows = this.db
+      return this.db
         .prepare(
-          `SELECT token FROM device_tokens WHERE kind = 'la_start' AND device_id IN (${deviceIds.map(() => "?").join(", ")})`,
+          `SELECT t.token, d.apns_environment FROM device_tokens t JOIN devices d ON d.id = t.device_id
+           WHERE t.kind = 'la_start' AND t.device_id IN (${deviceIds.map(() => "?").join(", ")})`,
         )
-        .all(...deviceIds) as { token: string }[];
-      return rows.map((row) => row.token);
+        .all(...deviceIds) as LiveActivityTarget[];
     }
-    const rows = this.db
+    return this.db
       .prepare(
-        "SELECT t.token FROM device_tokens t JOIN devices d ON d.id = t.device_id WHERE t.kind = 'la_update' AND t.incident_id = ? AND d.account_id = ?",
+        "SELECT t.token, d.apns_environment FROM device_tokens t JOIN devices d ON d.id = t.device_id WHERE t.kind = 'la_update' AND t.incident_id = ? AND d.account_id = ?",
       )
-      .all(event.incidentId, accountId) as { token: string }[];
-    return rows.map((row) => row.token);
+      .all(event.incidentId, accountId) as LiveActivityTarget[];
   }
 
   private incidentState(incidentId: string): IncidentStateRow | undefined {
@@ -138,7 +155,7 @@ export class PushDispatcher {
   private subscribedDevices(topicHash: string, accountId: string): PushDevice[] {
     const rows = this.db
       .prepare(
-        `SELECT d.id, d.account_id, d.platform,
+        `SELECT d.id, d.account_id, d.platform, d.apns_environment,
            COALESCE(alarm.token, d.push_token) AS push_token
          FROM devices d JOIN subscriptions s ON s.device_id = d.id
          LEFT JOIN device_tokens alarm ON alarm.device_id = d.id AND alarm.activity_id = ''
@@ -151,6 +168,7 @@ export class PushDispatcher {
       accountId: row.account_id,
       platform: row.platform,
       pushToken: row.push_token,
+      ...(row.apns_environment === null ? {} : { apnsEnvironment: row.apns_environment }),
     }));
   }
 
