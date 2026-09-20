@@ -108,13 +108,18 @@ describe("POST /v1/account/link", () => {
     expect(db.prepare("SELECT COUNT(*) AS count FROM subscriptions").get()).toEqual({ count: 1 });
   });
 
+  // The second call answers `already_linked` rather than `claimed` since 1.14.0.
+  // It is the one place a request with no `intent` reads differently from
+  // 1.12.0, and api.md §3.7 asks for it by name: a retry after a dropped reply
+  // has to be able to tell "I just signed you up" from "you were already here".
+  // Nothing is written either way.
   it("is safe to call twice", async () => {
     const { app, db } = setup();
     seedIdentity(db, "usr_1", "sess_1");
     expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
     const again = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" });
     expect(again.status).toBe(200);
-    expect(await again.json()).toEqual({ account_id: "a", outcome: "claimed" });
+    expect(await again.json()).toEqual({ account_id: "a", outcome: "already_linked" });
   });
 
   it("attaches an empty account with no prompt and tombstones it", async () => {
@@ -208,6 +213,233 @@ describe("POST /v1/account/link", () => {
     const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "fake" });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ account_id: "a", outcome: "claimed" });
+  });
+});
+
+// api.md §3.7, contract 1.14.0. One account may hold more than one sign-in
+// identity, so a person can use Google on an Android handset and Apple on an
+// iPhone and reach the same account. `intent` is how the app says which screen
+// the person was on, because the server cannot tell a second provider from a
+// second person on a borrowed handset.
+//
+// One test per row of the contract's matrix, named for the row. "either" rows
+// run all three bodies: no intent at all, "sign_in", and "link".
+const EITHER: (Record<string, unknown>)[] = [{}, { intent: "sign_in" }, { intent: "link" }];
+
+function identitiesOn(db: ReturnType<typeof openDatabase>, accountId: string): string[] {
+  return (db.prepare("SELECT user_id FROM account_identities WHERE account_id = ? ORDER BY user_id").all(accountId) as { user_id: string }[]).map((row) => row.user_id);
+}
+
+describe("POST /v1/account/link: one account, more than one identity", () => {
+  it("row 1: unknown identity, no identity on the device's account, either intent, claimed", async () => {
+    for (const intent of EITHER) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", ...intent });
+      expect([intent, response.status]).toEqual([intent, 200]);
+      expect([intent, await response.json()]).toEqual([intent, { account_id: "a", outcome: "claimed" }]);
+      expect(identitiesOn(db, "a")).toEqual(["usr_1"]);
+    }
+  });
+
+  it("row 2: unknown identity, the account already has one, sign_in, 409 account has another identity", async () => {
+    // Both bodies, because leaving `intent` out has to mean "sign_in".
+    for (const intent of [{}, { intent: "sign_in" }]) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      seedIdentity(db, "usr_2", "sess_2");
+      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", ...intent });
+      expect([intent, response.status]).toEqual([intent, 409]);
+      expect([intent, await response.json()]).toEqual([intent, { error: "account has another identity" }]);
+      // The refusal wrote nothing.
+      expect(identitiesOn(db, "a")).toEqual(["usr_1"]);
+    }
+  });
+
+  it("row 3: unknown identity, the account already has one, link, linked", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    seedIdentity(db, "usr_2", "sess_2");
+    const topic = await makeTopic(app, "dv_a", "prod");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+
+    const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ account_id: "a", outcome: "linked" });
+
+    // Both identities are on the one account and nothing moved.
+    expect(identitiesOn(db, "a")).toEqual(["usr_1", "usr_2"]);
+    expect(accountOf(db, "da")).toBe("a");
+    expect(tombstoneOf(db, "a")).toBeNull();
+    expect((await publish(app, "prod", topic.token)).status).toBe(200);
+  });
+
+  it("row 4: known identity, the device's account is empty, either intent, attached", async () => {
+    for (const intent of EITHER) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      // The identity's own account is b, claimed from the other handset.
+      expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+      await makeTopic(app, "dv_b", "prod");
+
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", ...intent });
+      expect([intent, response.status]).toEqual([intent, 200]);
+      expect([intent, await response.json()]).toEqual([intent, { account_id: "b", outcome: "attached" }]);
+      expect(accountOf(db, "da")).toBe("b");
+      expect(tombstoneOf(db, "a")).toBe("b");
+    }
+  });
+
+  it("row 5: known identity, the device's account is not empty, sign_in, 409 choose", async () => {
+    for (const intent of [{}, { intent: "sign_in" }]) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+      const topic = await makeTopic(app, "dv_a", "prod", true);
+      expect((await publish(app, "prod", topic.token)).status).toBe(200);
+
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", ...intent });
+      expect([intent, response.status]).toEqual([intent, 409]);
+      expect([intent, await response.json()]).toEqual([intent, { error: "choose", into_account: "b", topics: 1, incidents: 1 }]);
+      expect(accountOf(db, "da")).toBe("a");
+      expect(tombstoneOf(db, "a")).toBeNull();
+    }
+  });
+
+  it("row 6: known identity, the device's account is not empty, link, 409 identity has another account", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    // usr_1 already holds account b, with a topic on it so neither side is empty.
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+    await makeTopic(app, "dv_b", "theirs");
+    const topic = await makeTopic(app, "dv_a", "prod", true);
+    expect((await publish(app, "prod", topic.token)).status).toBe(200);
+
+    const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", intent: "link" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "identity has another account" });
+
+    // Which account wins is not this route's call, so nothing moved.
+    expect(accountOf(db, "da")).toBe("a");
+    expect(tombstoneOf(db, "a")).toBeNull();
+    expect(identitiesOn(db, "a")).toEqual([]);
+    expect(identitiesOn(db, "b")).toEqual(["usr_1"]);
+  });
+
+  it("row 7: the identity already points at this same account, either intent, already_linked", async () => {
+    for (const intent of EITHER) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+      const linkedAt = db.prepare("SELECT linked_at FROM account_identities WHERE user_id = 'usr_1'").get();
+
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", ...intent });
+      expect([intent, response.status]).toEqual([intent, 200]);
+      expect([intent, await response.json()]).toEqual([intent, { account_id: "a", outcome: "already_linked" }]);
+      // Safe to send twice: the second call changed nothing.
+      expect(identitiesOn(db, "a")).toEqual(["usr_1"]);
+      expect(db.prepare("SELECT linked_at FROM account_identities WHERE user_id = 'usr_1'").get()).toEqual(linkedAt);
+      expect(accountOf(db, "da")).toBe("a");
+      expect(tombstoneOf(db, "a")).toBeNull();
+    }
+  });
+
+  it("answers 400 for an intent the contract does not name, not 500", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    for (const intent of ["signin", "LINK", "", "merge", 1, null]) {
+      const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1", intent });
+      expect([intent, response.status]).toEqual([intent, 400]);
+    }
+    expect(identitiesOn(db, "a")).toEqual([]);
+  });
+
+  it("resolves both identities to the one account", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_google", "sess_google");
+    seedIdentity(db, "usr_apple", "sess_apple");
+    // The Android handset signs up, the iPhone's provider is added to the same
+    // account from that same handset.
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_google" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_apple", intent: "link" })).status).toBe(200);
+    expect(identitiesOn(db, "a")).toEqual(["usr_apple", "usr_google"]);
+
+    // Now the second handset, holding an empty account of its own, signs in
+    // with Apple. It lands on the account Google claimed.
+    const response = await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_apple" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ account_id: "a", outcome: "attached" });
+    expect(accountOf(db, "db")).toBe("a");
+
+    // And signing in with Google on it now reads as already linked.
+    const google = await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_google" });
+    expect(google.status).toBe(200);
+    expect(await google.json()).toEqual({ account_id: "a", outcome: "already_linked" });
+  });
+
+  it("erases both identities on a DELETE given either one of them", async () => {
+    for (const token of ["sess_1", "sess_2"]) {
+      const { app, db } = setup();
+      seedIdentity(db, "usr_1", "sess_1");
+      seedIdentity(db, "usr_2", "sess_2");
+      db.prepare('INSERT INTO "account" (id, "accountId", "providerId", "userId", "refreshToken", "createdAt", "updatedAt") VALUES (?, ?, \'google\', ?, ?, 0, 0)').run("oa_2", "google-subject", "usr_2", "rt_google");
+      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+
+      // Either identity is enough: both belong to the same person, and asking
+      // for both would strand anybody who lost access to one.
+      expect([token, (await del(app, "dv_a", { identity_token: token })).status]).toEqual([token, 204]);
+
+      expect(rows(db, "SELECT COUNT(*) AS count FROM accounts WHERE id = 'a'")).toBe(0);
+      expect(rows(db, "SELECT COUNT(*) AS count FROM account_identities")).toBe(0);
+      // Both better-auth users go, with their sessions and provider tokens.
+      expect(rows(db, 'SELECT COUNT(*) AS count FROM "user"')).toBe(0);
+      expect(rows(db, 'SELECT COUNT(*) AS count FROM "session"')).toBe(0);
+      expect(rows(db, 'SELECT COUNT(*) AS count FROM "account"')).toBe(0);
+    }
+  });
+
+  it("asks both providers to revoke before it erases", async () => {
+    const revoked: string[] = [];
+    const { app, db } = setup({ revoke: { revoke: async (userId) => { revoked.push(userId); } } });
+    seedIdentity(db, "usr_1", "sess_1");
+    seedIdentity(db, "usr_2", "sess_2");
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+
+    expect((await del(app, "dv_a", { identity_token: "sess_1" })).status).toBe(204);
+    expect([...revoked].sort()).toEqual(["usr_1", "usr_2"]);
+  });
+
+  it("folds a merge into a surviving account that holds two identities", async () => {
+    const { app, db } = setup();
+    seedIdentity(db, "usr_1", "sess_1");
+    seedIdentity(db, "usr_2", "sess_2");
+    // Account b is the survivor and it holds both of the person's providers.
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+    const theirs = await makeTopic(app, "dv_b", "theirs");
+    // The other handset brings a topic, so the sign-in asks rather than
+    // attaches. No incident on either side: a merge refuses while one is open
+    // or acked, which is its own test further down.
+    const mine = await makeTopic(app, "dv_a", "prod", true);
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2" })).status).toBe(409);
+
+    // Either identity can fold it, so run the merge on the second one.
+    const response = await post(app, "/v1/account/merge", "dv_a", { identity_token: "sess_2", into_account: "b" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ account_id: "b", merged_from: "a" });
+
+    expect(accountOf(db, "da")).toBe("b");
+    expect(tombstoneOf(db, "a")).toBe("b");
+    expect(identitiesOn(db, "b")).toEqual(["usr_1", "usr_2"]);
+    // Both sides' topics are on the survivor and both tokens still publish.
+    const topics = await app.request("/v1/topics", { headers: json("dv_a") });
+    expect((await topics.json() as { name: string }[]).map((topic) => topic.name).sort()).toEqual(["prod", "theirs"]);
+    expect((await publish(app, "theirs", theirs.token, 3)).status).toBe(200);
+    expect((await publish(app, "prod", mine.token, 3)).status).toBe(200);
   });
 });
 

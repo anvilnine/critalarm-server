@@ -237,6 +237,10 @@ const migrations: Migration[] = [
   // most one identity. Both constraints exist as a backstop only: every caller
   // checks first and answers 409, because a constraint firing would be a 500 and
   // api.md §3.7 says these two cases must not be decided that way.
+  //
+  // Contract 1.14.0 takes the second of those two away: migration 15 below
+  // rebuilds this table without the UNIQUE on account_id, so one account can
+  // hold a Google identity and an Apple one.
   `
     CREATE TABLE "user" (
       "id" text not null primary key,
@@ -295,6 +299,7 @@ const migrations: Migration[] = [
       linked_at INTEGER NOT NULL
     );
   `,
+  { foreignKeysOff: true, up: rebuildAccountIdentitiesWithoutUniqueAccount },
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
@@ -379,6 +384,62 @@ function rebuildAccountsWithoutRcAppUserId(db: Database.Database): void {
   const violations = db.pragma("foreign_key_check") as unknown[];
   if (violations.length > 0) {
     throw new Error(`accounts rebuild broke foreign keys: ${JSON.stringify(violations)}`);
+  }
+}
+
+// api.md §3.7, contract 1.14.0. Drops the UNIQUE on
+// account_identities.account_id so one account can hold a Google identity and an
+// Apple one. The column is UNIQUE, which carries an implicit index, and SQLite
+// has no way to drop a constraint in place, so the table is rebuilt the way
+// migration 3 rebuilds accounts.
+//
+// This rebuild is the short version of that one, because account_identities is a
+// child and nothing references it:
+//
+//   1. Create the new table with the same three columns and no UNIQUE.
+//   2. Copy every row across.
+//   3. Drop the old table. Enforcement is off (foreignKeysOff above), so there
+//      is no implicit DELETE and no cascade, the same reason migration 3 needs
+//      it. account_identities cascades off accounts, and dropping it with
+//      enforcement on would still be safe here, but the row copy is worth more
+//      than the guess.
+//   4. Rename the new table into place. No other table names
+//      account_identities in a REFERENCES clause, so no clause moves.
+//   5. Add a plain index on account_id. The unique index that used to serve
+//      "which identities does this account hold" went with the constraint, and
+//      that lookup runs on every link, switch, merge and delete.
+//   6. Check it. Every row has to arrive, user_id has to still be the primary
+//      key, and PRAGMA foreign_key_check has to come back empty. Any of the
+//      three failing throws, and the transaction rolls all of it back.
+function rebuildAccountIdentitiesWithoutUniqueAccount(db: Database.Database): void {
+  const before = (db.prepare("SELECT COUNT(*) AS count FROM account_identities").get() as { count: number }).count;
+  db.exec(`
+    CREATE TABLE account_identities_s30_new (
+      user_id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      linked_at INTEGER NOT NULL
+    );
+
+    INSERT INTO account_identities_s30_new (user_id, account_id, linked_at)
+      SELECT user_id, account_id, linked_at FROM account_identities;
+
+    DROP TABLE account_identities;
+    ALTER TABLE account_identities_s30_new RENAME TO account_identities;
+
+    CREATE INDEX account_identities_account_id ON account_identities(account_id);
+  `);
+
+  const after = (db.prepare("SELECT COUNT(*) AS count FROM account_identities").get() as { count: number }).count;
+  if (after !== before) {
+    throw new Error(`account_identities rebuild carried ${after} of ${before} rows`);
+  }
+  const keyed = (db.pragma("table_info(account_identities)") as { name: string; pk: number }[]).filter((column) => column.pk > 0).map((column) => column.name);
+  if (keyed.length !== 1 || keyed[0] !== "user_id") {
+    throw new Error(`account_identities rebuild left the primary key on ${keyed.join(", ")}`);
+  }
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length > 0) {
+    throw new Error(`account_identities rebuild broke foreign keys: ${JSON.stringify(violations)}`);
   }
 }
 
