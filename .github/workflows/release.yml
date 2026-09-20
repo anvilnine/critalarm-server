@@ -27,6 +27,12 @@ jobs:
       contents: read
       packages: write
 
+    # The deploy job pins the image by this digest rather than by tag alone.
+    # A tag can resolve to a layer the host already has. A digest the host has
+    # never seen can only come from the registry.
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +59,7 @@ jobs:
             type=semver,pattern={{major}}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -141,12 +148,21 @@ jobs:
     # How the deploy makes the host run the new code:
     #
     # The Coolify service pins its image through a variable,
-    # `image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`, and the
-    # server entry sets `pull_policy: always`. This job writes the released
-    # version into that variable and then calls Coolify's deploy, which runs
-    # `docker compose up -d --force-recreate`. `pull_policy: always` makes
-    # compose fetch the tag from the registry first, so the container cannot
-    # come back on a stale image that happened to be on the host.
+    # `image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`. This job
+    # writes `<version>@sha256:<digest>` into that variable and then calls
+    # Coolify's deploy, which runs `docker compose up -d --force-recreate`.
+    #
+    # The version on its own is not enough. The server entry does carry
+    # `pull_policy: always`, read off the Coolify compose box on 2026-09-18,
+    # and Coolify's deploy ignores it. It recreates the containers from the
+    # layer already on the host, so the tag string moves and the running code
+    # does not. Releases 0.1.5 and 0.1.6 both came back on old code that way
+    # and a human had to click Advanced > Pull Latest Images & Restart.
+    #
+    # The digest is what forces the fetch. The host has never seen the new
+    # digest, so compose has no local image to reuse and has to pull before it
+    # can start the container. Nothing here depends on Coolify honouring the
+    # pull policy.
     #
     # Do not swap the start call for the restart call with `latest=true`.
     # Coolify's restart stops the containers and fires a host-wide docker
@@ -196,12 +212,19 @@ jobs:
       - name: Point the service at the new image
         run: |
           set -euo pipefail
+          digest='${{ needs.publish.outputs.digest }}'
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "The publish job handed over no image digest, so the deploy would pull nothing new." >&2; exit 1 ;;
+          esac
+          reference="${{ steps.version.outputs.version }}@$digest"
+          echo "Pinning $IMAGE_TAG_VARIABLE to $reference"
           status=$(curl -sS -o /tmp/patch-env.json -w '%{http_code}' \
             -X PATCH \
             -H "Authorization: Bearer $COOLIFY_TOKEN" \
             -H 'Content-Type: application/json' \
             -H 'Accept: application/json' \
-            -d "{\"key\":\"$IMAGE_TAG_VARIABLE\",\"value\":\"${{ steps.version.outputs.version }}\",\"is_literal\":true}" \
+            -d "{\"key\":\"$IMAGE_TAG_VARIABLE\",\"value\":\"$reference\",\"is_literal\":true}" \
             "$COOLIFY_URL/api/v1/services/$COOLIFY_SERVICE_UUID/envs")
           echo "HTTP $status"
           cat /tmp/patch-env.json
@@ -214,8 +237,9 @@ jobs:
       # The deploy call, not the start call. Coolify's `/start` answers
       # `{"message":"Service is already running."}` with a 400 when the service
       # is up, which is every deploy after the first. `/deploy` runs
-      # `docker compose up -d --force-recreate` on a running service, so the
-      # container comes back on the image the variable now points at.
+      # `docker compose up -d --force-recreate` on a running service, and the
+      # digest in the variable is one the host does not have, so compose pulls
+      # it before the container comes back.
       #
       # Still not the restart call with `latest=true`. That one stops the
       # containers and fires a host-wide docker cleanup next to the pull, the

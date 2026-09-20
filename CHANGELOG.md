@@ -3,6 +3,52 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.14.0 - 2026-09-20
+
+### Added
+
+- `POST /v1/account/join-token` (§3.7). Mints a fresh `aj_` for the account the
+  device already belongs to, and retires the one before it. Until now `aj_` was
+  minted once, at account creation, so every account made before 1.11.0 holds
+  none and an account whose token was lost had no way back to one. There is no
+  backfill, on purpose. Any device on the account may call it.
+- A second sign-in identity on one account (§3.7). `POST /v1/account/link`
+  takes `intent`, either `sign_in` or `link`. `link` attaches a new identity to
+  the account the device already has, so one person can sign in with Apple on an
+  iPhone and Google on an Android phone and reach the same account.
+- Two outcomes on `POST /v1/account/link`: `linked`, and `already_linked` for a
+  repeat of the same request.
+- One error on `POST /v1/account/link`: `409 {"error":"identity has another
+  account"}`, which is `link` aimed at an identity that is spoken for.
+
+### Changed
+
+- `account_identities.account_id` is no longer unique. One account may carry
+  several identities. `user_id` stays the primary key, so one identity still
+  points at exactly one account.
+- `DELETE /v1/account` accepts any one of the account's identities, not a
+  particular one, and its erase now covers every identity on the account with
+  their sessions and provider tokens.
+- The `409 {"error":"account has another identity"}` case narrows. It is the
+  shared-handset case only, which is `intent: "sign_in"` against an account that
+  is already claimed.
+
+### Not changed, with one exception
+
+- A client that never sends `intent` behaves as it did in 1.12.0 everywhere
+  except one case: signing in again with the identity that already points at
+  this device's own account used to answer `claimed` and now answers
+  `already_linked`. Both mean signed in and nothing moved. A client that reads
+  an unknown outcome as success is unaffected; one that switches on the string
+  needs the case.
+- `linked` is `link` only. `already_linked` is reachable under either intent,
+  because a retry after a dropped reply has to be safe on both.
+- `link` against an account that holds no identity yet answers `claimed`. No
+  screen reaches it, and a client that sends it anyway gets the sensible answer
+  rather than an error.
+- Nothing reads a join token back. The server keeps a hash, not the token, so
+  the mint reply is the only place the value appears.
+
 ## 1.13.0 - 2026-09-17
 
 ### Added

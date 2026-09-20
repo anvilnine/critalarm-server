@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.13.0
+**Version:** 1.14.0
 **Status:** draft, 2026-09-17. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.14.0** does two things for accounts. `POST /v1/account/join-token` mints a fresh `aj_` for the account a device already belongs to (§3.7). Until now `aj_` was minted once, when the account was created, so every account made before 1.11.0 holds none and an account whose token was lost had no way back to one. Minting on demand also means the value exists only while somebody is looking at the screen that shows it. Second, one account may now hold more than one sign-in identity, so the same person can use Sign in with Apple on an iPhone and Google on an Android phone and land on the same account (§3.7). `POST /v1/account/link` takes an `intent` field: `sign_in` is what every existing client already sends by leaving it out, and behaves exactly as it did; `link` adds an identity to the account this device already has. The app has to say which it meant, because the server cannot tell a person adding their second provider from a second person signing in on a borrowed handset.
 
 **1.13.0** adds account deletion (§3.7). `DELETE /v1/account` erases this device's account and everything under it: devices, push tokens, topics, their tokens, messages, incidents, the sign-in identity and its sessions. An account with no identity is deleted on `dv_` alone; one with an identity needs the identity too. An `open` incident blocks it. The operator has the same erase on the command line, `critalarm account delete` (§4.4). Apple and Google both require in-app deletion once an app has sign-in.
 
@@ -363,9 +365,10 @@ For a load balancer, a container health check, or an uptime probe. It touches no
 **The credential.** Two things are proven at once: who the person is, and which account this handset brings. One `Authorization` header cannot carry two secrets, so the device token stays in the header exactly as on every other `/v1/` route, and the identity travels in the body. The `identity_token` is issued by the server's own auth surface, not by Apple or Google directly.
 
 ```
-POST /v1/account/link                                   // sign up, or sign in
+POST /v1/account/link                                   // sign up, sign in, or add a provider
   Authorization: Bearer dv_...
-  { "identity_token":"..." }
+  { "identity_token":"...", "intent":"sign_in" }        // intent is "sign_in" or "link".
+                                                        // Absent means "sign_in".
 → 200 { "account_id":"acc_...", "outcome":"claimed" }
         // the identity was new. It now points at this device's own account.
         // Nothing moved. This is the common path and it is cheap.
@@ -373,12 +376,29 @@ POST /v1/account/link                                   // sign up, or sign in
         // the identity already had an account, and this device's account was
         // empty, so there was nothing to decide. The device now belongs to the
         // identity's account and the empty one is tombstoned. dv_ does not change.
+→ 200 { "account_id":"acc_...", "outcome":"linked" }
+        // intent "link" only. The identity was new and this device's account
+        // already held one, so the account now holds both. Nothing moved.
+→ 200 { "account_id":"acc_...", "outcome":"already_linked" }
+        // the identity already points at this device's own account. Sending the
+        // same link twice is safe, which is what a retry after a dropped reply is.
 → 409 { "error":"choose",                               // the app must ask, per device
         "into_account":"acc_...",                       // the identity's account
         "topics":3, "incidents":12 }                    // what this device's account would bring
-→ 409 { "error":"account has another identity" }        // this device's account is already claimed
+→ 409 { "error":"account has another identity" }        // intent "sign_in", and this device's
+                                                        // account is already claimed
+→ 409 { "error":"identity has another account" }        // intent "link", and the identity already
+                                                        // points at a different account
 → 401
 ```
+
+**`intent` is the app telling the server which screen the person was on.** Two requests can carry the same device token and the same brand new identity and mean opposite things. On the sign-in screen it means "this is me, put me on my account", and if the device's account already belongs to somebody else that is the shared-handset case and answers `409`. On the account screen, under a button that says add another way to sign in, it means "also let me in with this one", and the identity joins the account the device already has. The server has no way to tell those apart on its own, so it does not try.
+
+A client that never sends `intent` behaves exactly as it did in 1.12.0, with one exception. Signing in again with the identity that already points at this device's own account used to answer `claimed`; it now answers `already_linked`. Both mean the person is signed in and nothing moved, so a client that treats an unknown outcome as success is unaffected, and one that switches on the string needs the new case.
+
+**`linked` is `link` only. `already_linked` is not.** `linked` is the one outcome a client has to ask for. `already_linked` is reachable under either intent, because "this identity is already on this account" is true whichever screen the person came from, and a retry after a dropped reply has to be safe on both.
+
+**`link` against an account that holds no identity yet answers `claimed`, not `linked`.** Nothing is being added to, so it is the ordinary first claim. No screen should reach this, because the button that sends `link` only exists once somebody is signed in, but a client that sends it anyway gets the sensible answer rather than an error.
 
 An empty account means no topics and no incidents. That test matters more than it looks: registration runs long before any sign-in screen and creates an account unconditionally, so "a device with no account" cannot happen, and without the empty case every second-handset sign-in would prompt about an account holding nothing.
 
@@ -412,20 +432,36 @@ The device joins the identity's account and its old account is tombstoned, carry
 **This is the branch that can silently stop paging somebody.** Publishing authenticates on the topic token alone and never looks at the account, so an abandoned account's `tk_` tokens keep accepting publishes, keep opening incidents, and have no device left to ring. A `200` and nobody woken. So either the old account's tokens are revoked as part of the switch, or publishing to a topic whose account is tombstoned or deviceless answers `410 {"error":"account is gone"}`. One of the two is required. The prompt must also say the old tokens will stop working, because that is the part a person cannot guess.
 
 ```
+POST /v1/account/join-token                             // mint a fresh aj_ for this account
+  Authorization: Bearer dv_...
+→ 200 { "join_token":"aj_..." }                          // shown once. Any older aj_ stops working
+→ 401
+```
+
+Every call mints a new token and retires the one before it, so the reply is the only place the value ever appears. Nothing reads the current token back, because the server keeps a hash of it and not the token itself.
+
+An account created before 1.11.0 carries no join token at all, and this is the only way it gets one. There is no backfill, on purpose: a token minted into a database that nothing can deliver to a handset is worse than an empty column. The same route is the way back after a lost phone, and the way to cut off a token somebody read over a shoulder.
+
+Any device on the account may call it, the same way any device may delete a topic.
+
+Not rate limited, because nothing else in §3.7 is. `link`, `merge`, `switch` and the account delete all run bare; the limiter is wired into the publish path only. Minting in a loop costs one row update and hands out a token that immediately retires the one before it, so the damage is bounded. Putting a limiter on the §3.7 write routes is worth doing as one job covering all of them, not as a rule this route alone carries.
+
+```
 DELETE /v1/account                                      // erase this device's account
   Authorization: Bearer dv_...
-  { "identity_token":"..." }                            // required only when the account has an identity
+  { "identity_token":"..." }                            // required once the account has an identity.
+                                                        // Any one of them is enough
 → 204
 → 401                                                   // bad dv_, or the account has an identity and
                                                         // identity_token is missing, invalid, or someone else's
 → 409 { "error":"live incident", "incident_id":"inc_..." }   // an alarm is ringing. Acknowledge it, then retry
 ```
 
-An account with no identity is deleted on `dv_` alone. Every device on it holds the same authority, the way every device can already delete a topic. An account with an identity needs that identity as well, because a handset left in a drawer must not be able to wipe a signed-in account.
+An account with no identity is deleted on `dv_` alone. Every device on it holds the same authority, the way every device can already delete a topic. An account with an identity needs one of its identities as well, because a handset left in a drawer must not be able to wipe a signed-in account. An account holding two identities accepts either one: both belong to the same person, and asking for both would strand anybody who lost access to one.
 
 Only an `open` incident blocks. An `acked` one does not: nothing is ringing, and a person must never be stuck unable to leave.
 
-The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, and the sign-in identity with its sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
+The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
 
 After `204` every credential of the account is dead: `dv_`, `aj_` and every `tk_`. The app treats it like signing out and registers again with a new `device_id`. The other devices on the account get `401` on their next call and do the same.
 
@@ -435,7 +471,9 @@ Deleting the account does not cancel a store subscription. The app must say so b
 
 Doing it any other way bricks the handset. Clearing `dv_` while keeping `device_id` is a permanent `401`: the app only registers when it has no token, and registering a known `device_id` needs the token it no longer has. Keeping the token is not a sign-out at all, because every `/v1/` route authenticates on it.
 
-**Two cases are deliberately undefined and must answer `409`, never `500`.** Signing in to one account on a device whose account is already claimed by a different identity, which is the shared-handset case; and signing up with an identity that already exists elsewhere. Both are decisions about whose data wins, and a unique constraint is not allowed to make them.
+**Two cases are deliberately undefined and must answer `409`, never `500`.** Signing in (`intent: "sign_in"`) on a device whose account is already claimed by a different identity, which is the shared-handset case; and linking (`intent: "link"`) an identity that already points at another account. Both are decisions about whose data wins, and a unique constraint is not allowed to make them.
+
+One constraint does go, on purpose. `account_identities.account_id` stops being unique, because an account holding two identities is the whole point of 1.14.0. `user_id` stays the primary key: one sign-in identity still points at exactly one account, and that is what makes `linked` and `already_linked` tell apart.
 
 ## 4. Relay API
 
@@ -520,7 +558,7 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
 
 **Three secrets, three jobs.** `tk_` (§1.2) is a publish token. It goes to Uptime Kuma, a cron job, a CI pipeline, anywhere outside the user's control, and it can only publish to one topic. `dv_` is the device's own secret. It manages topics, subscriptions and incidents, and it never leaves the app. Never send `dv_` to an alerting source and never publish with it.
 
-`aj_` is the account join token. It is minted when an account is created, returned once alongside `device_token`, and it authorises one thing: attaching a new device to that account. It is account-scoped, so revoking it touches no device and removing a device breaks no future join. It is not `account_id`, which is returned on every registration and is not a secret. It never publishes and it never manages a topic.
+`aj_` is the account join token. It is minted when an account is created, returned once alongside `device_token`, re-minted on demand by `POST /v1/account/join-token` (§3.7), and it authorises one thing: attaching a new device to that account. It is account-scoped, so revoking it touches no device and removing a device breaks no future join. It is not `account_id`, which is returned on every registration and is not a secret. It never publishes and it never manages a topic.
 
 **Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count.
 
