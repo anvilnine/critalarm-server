@@ -7,10 +7,11 @@ import { sweepTopicIntoDevices } from "../tier/subscriptions.js";
 import type { Tier } from "../tier/types.js";
 const namePattern=/^[-_A-Za-z0-9]{1,64}$/;
 // api.md §3.1. A token name is trimmed and then cut to 40 characters, so a long
-// one is shortened rather than refused. A name that is empty after trimming
-// counts as missing, and a missing name becomes Token N, where N is the topic's
-// current token count plus one.
-function chooseTokenName(input:unknown,count:number){const trimmed=typeof input==="string"?input.trim().slice(0,40):"";return trimmed===""?`Token ${count+1}`:trimmed;}
+// one is shortened rather than refused. The cut can land on a space, so we trim
+// once more after it. A name that is empty after trimming counts as missing,
+// and a missing name becomes Token N, where N is the topic's current token
+// count plus one.
+function chooseTokenName(input:unknown,count:number){const trimmed=typeof input==="string"?input.trim().slice(0,40).trim():"";return trimmed===""?`Token ${count+1}`:trimmed;}
 type Row={id:string;name:string;critical:number;repeat_interval_s:number;max_ring_s:number;desk_timer_s:number;relay_content:"none"|"full";created_at:number};
 function view(row:Row){return {name:row.name,critical:row.critical===1,repeat_interval_s:row.repeat_interval_s,max_ring_s:row.max_ring_s,desk_timer_s:row.desk_timer_s,relay_content:row.relay_content,created_at:row.created_at};}
 export function listTopics(db:Database.Database,accountId:string){return (db.prepare("SELECT id,name,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at FROM topics WHERE account_id=? ORDER BY created_at,name").all(accountId) as Row[]).map(view);}
