@@ -91,10 +91,11 @@ them the deploy job stops on its first step and says which one is missing.
 | `PRODUCTION_BASE_URL` | Public base URL of the production server, no trailing slash |
 
 The service's compose file in Coolify has to pin the image through a variable,
-`image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`, with
-`pull_policy: always` on that entry. The variable is what the workflow rewrites,
-and the pull policy is what stops compose from reusing an old image that is
-already on the host.
+`image: ghcr.io/anvilnine/critalarm:${CRITALARM_IMAGE_TAG}`. The workflow
+rewrites that variable to `<version>@sha256:<digest>`. The digest is what stops
+compose from reusing an old image that is already on the host: the host has
+never seen it, so it has to pull. The entry also carries `pull_policy: always`,
+which Coolify's deploy ignores, so nothing here relies on it.
 
 ## Docs
 
