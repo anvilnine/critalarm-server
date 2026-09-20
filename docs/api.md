@@ -394,7 +394,11 @@ POST /v1/account/link                                   // sign up, sign in, or 
 
 **`intent` is the app telling the server which screen the person was on.** Two requests can carry the same device token and the same brand new identity and mean opposite things. On the sign-in screen it means "this is me, put me on my account", and if the device's account already belongs to somebody else that is the shared-handset case and answers `409`. On the account screen, under a button that says add another way to sign in, it means "also let me in with this one", and the identity joins the account the device already has. The server has no way to tell those apart on its own, so it does not try.
 
-A client that never sends `intent` behaves exactly as it did in 1.12.0. `link` is the only new behaviour and a client has to ask for it.
+A client that never sends `intent` behaves exactly as it did in 1.12.0, with one exception. Signing in again with the identity that already points at this device's own account used to answer `claimed`; it now answers `already_linked`. Both mean the person is signed in and nothing moved, so a client that treats an unknown outcome as success is unaffected, and one that switches on the string needs the new case.
+
+**`linked` is `link` only. `already_linked` is not.** `linked` is the one outcome a client has to ask for. `already_linked` is reachable under either intent, because "this identity is already on this account" is true whichever screen the person came from, and a retry after a dropped reply has to be safe on both.
+
+**`link` against an account that holds no identity yet answers `claimed`, not `linked`.** Nothing is being added to, so it is the ordinary first claim. No screen should reach this, because the button that sends `link` only exists once somebody is signed in, but a client that sends it anyway gets the sensible answer rather than an error.
 
 An empty account means no topics and no incidents. That test matters more than it looks: registration runs long before any sign-in screen and creates an account unconditionally, so "a device with no account" cannot happen, and without the empty case every second-handset sign-in would prompt about an account holding nothing.
 
