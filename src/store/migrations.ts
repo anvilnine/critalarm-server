@@ -300,6 +300,26 @@ const migrations: Migration[] = [
     );
   `,
   { foreignKeysOff: true, up: rebuildAccountIdentitiesWithoutUniqueAccount },
+  // api.md §3.1, contract 1.15.0. Every topic token gets a name. The column
+  // stays nullable on purpose: adding a NOT NULL column to a table that already
+  // holds rows needs a default value, and any default here would be wrong for
+  // the rows that are already there. The backfill below names every existing
+  // row, and both write paths always send a name, so it is never null in
+  // practice.
+  //
+  // The backfill counts, per topic, how many of that topic's tokens sort at or
+  // before this one by (created_at, rowid), which is the order listTokens
+  // returns. Counting the row itself makes that count its position starting at
+  // 1, so the oldest token in each topic becomes Token 1 whatever the other
+  // topics hold.
+  `
+    ALTER TABLE topic_tokens ADD COLUMN name TEXT;
+    UPDATE topic_tokens SET name = 'Token ' || (
+      SELECT COUNT(*) FROM topic_tokens AS earlier
+      WHERE earlier.topic_id = topic_tokens.topic_id
+        AND (earlier.created_at, earlier.rowid) <= (topic_tokens.created_at, topic_tokens.rowid)
+    );
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
