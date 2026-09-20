@@ -817,6 +817,117 @@ describe("DELETE /v1/account", () => {
 
 // api.md §4.4. The operator command runs the same erase for a request that
 // arrives by email. cli.ts is argv plumbing over these two functions.
+// api.md §3.7. Mint on demand, because S20 only ever minted an aj_ when the
+// account was created: every account older than that migration holds NULL and
+// matches no join token, so a second handset can never attach to one.
+describe("POST /v1/account/join-token", () => {
+  function mint(app: ReturnType<typeof createApp>, device: string) {
+    return app.request("/v1/account/join-token", { method: "POST", headers: { Authorization: `Bearer ${device}` } });
+  }
+
+  async function mintToken(app: ReturnType<typeof createApp>, device: string) {
+    const response = await mint(app, device);
+    expect(response.status).toBe(200);
+    return (await response.json() as { join_token: string }).join_token;
+  }
+
+  // api.md §4.2, the join. A device_id the server has never seen, presented with
+  // a valid aj_, lands on that account instead of creating a new one.
+  function join(app: ReturnType<typeof createApp>, token: string, deviceId = `dev_${randomUUID()}`) {
+    return app.request("/relay/v1/devices", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId, platform: "ios", push_token: "p", app_version: "1.0.0" }),
+    });
+  }
+
+  it("answers a dv_ with a token that starts aj_", async () => {
+    const { app } = setup();
+    const response = await mint(app, "dv_a");
+    expect(response.status).toBe(200);
+    const body = await response.json() as { join_token: string };
+    expect(body.join_token.startsWith("aj_")).toBe(true);
+    expect(Object.keys(body)).toEqual(["join_token"]);
+  });
+
+  it("attaches a brand new device_id to the same account", async () => {
+    const { app, db } = setup();
+    const token = await mintToken(app, "dv_a");
+
+    const deviceId = `dev_${randomUUID()}`;
+    const response = await join(app, token, deviceId);
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ account_id: "a" });
+    expect(accountOf(db, deviceId)).toBe("a");
+  });
+
+  it("retires the token it replaces", async () => {
+    const { app } = setup();
+    const first = await mintToken(app, "dv_a");
+    const second = await mintToken(app, "dv_a");
+
+    expect(second).not.toBe(first);
+    expect((await join(app, first)).status).toBe(401);
+    expect((await join(app, second)).status).toBe(201);
+  });
+
+  // The pre-migration account. Written as a NULL row on purpose: an account made
+  // today already carries a join token and would pass this test either way.
+  it("gives a working token to an account whose join_token_hash is NULL", async () => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET join_token_hash = NULL WHERE id = 'a'").run();
+    expect(db.prepare("SELECT join_token_hash FROM accounts WHERE id = 'a'").get()).toEqual({ join_token_hash: null });
+
+    const token = await mintToken(app, "dv_a");
+
+    const deviceId = `dev_${randomUUID()}`;
+    expect((await join(app, token, deviceId)).status).toBe(201);
+    expect(accountOf(db, deviceId)).toBe("a");
+  });
+
+  it("answers 401 to anything that is not a dv_", async () => {
+    const { app } = setup();
+    const topic = await makeTopic(app, "dv_a", "prod");
+    const existing = await mintToken(app, "dv_a");
+
+    expect((await app.request("/v1/account/join-token", { method: "POST" })).status).toBe(401);
+    expect((await mint(app, topic.token)).status).toBe(401);
+    expect((await mint(app, existing)).status).toBe(401);
+    expect((await mint(app, "dv_nobody")).status).toBe(401);
+  });
+
+  // caps.devices is enforced where the device row is written, so this route
+  // cannot raise or lower it. free carries 5 and the account starts with one.
+  it("does not lift caps.devices", async () => {
+    const { app } = setup();
+    const token = await mintToken(app, "dv_a");
+    for (let seat = 0; seat < 4; seat += 1) expect((await join(app, token)).status).toBe(201);
+
+    const response = await join(app, token);
+
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ error: "cap", cap: "devices" });
+  });
+
+  it("puts the token in the body and nowhere else", async () => {
+    const { app, db } = setup();
+    const logged: string[] = [];
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => { logged.push(args.map((arg) => String(arg)).join(" ")); }));
+
+    const token = await mintToken(app, "dv_a");
+    for (const spy of spies) spy.mockRestore();
+
+    expect(logged.join("\n")).not.toContain(token);
+    // The row keeps the hash and not the value, so nothing can read the token
+    // back out of the database either.
+    const account = db.prepare("SELECT * FROM accounts WHERE id = 'a'").get() as Record<string, unknown>;
+    expect(JSON.stringify(account)).not.toContain(token);
+    expect(account.join_token_hash).toBe(createHash("sha256").update(token).digest("hex"));
+  });
+});
+
 describe("critalarm account delete", () => {
   it("finds the account by id and by sign-in email, and counts what it removed", async () => {
     const { app, db } = setup();
@@ -861,7 +972,7 @@ describe("critalarm account delete", () => {
 // not 404, so a client can tell "this server does not do sign-in" apart from
 // "you typed the path wrong".
 describe("selfhosted mode", () => {
-  for (const path of ["/v1/account/link", "/v1/account/merge", "/v1/account/switch"]) {
+  for (const path of ["/v1/account/link", "/v1/account/merge", "/v1/account/switch", "/v1/account/join-token"]) {
     it(`refuses ${path}`, async () => {
       const { app } = setup({ mode: "selfhosted" });
       const response = await app.request(path, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
