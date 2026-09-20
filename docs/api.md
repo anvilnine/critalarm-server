@@ -269,7 +269,7 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 
 **Every token has a `token_id`, including the one creation hands back.** `DELETE /v1/topics/{name}/tokens/{token_id}` is keyed on it, so a token returned without one could never be revoked, and the creation token is the one that actually ships out to a monitoring tool. A topic always keeps at least one token; deleting the last one answers `409`.
 
-**A token value is returned once and never again.** The server keeps a SHA-256 hash of the token, not the token, so it has nothing to show a second time. `GET /v1/topics/{name}/tokens` lists `token_id` and `created_at` and nothing else. It is how a client that lost the value still finds the id to revoke, ordered oldest first. There is no paging: a topic holds few enough tokens that the whole list fits in one answer.
+**A token value is returned once and never again.** The server keeps a SHA-256 hash of the token, not the token, so it has nothing to show a second time. `GET /v1/topics/{name}/tokens` lists `token_id`, `name` and `created_at`, and never a token value. It is how a client that lost the value still finds the id to revoke, ordered oldest first. There is no paging: a topic holds few enough tokens that the whole list fits in one answer.
 
 **Creating a topic that already exists answers `409`, not `500`.** Names are unique per account. A client that retries after a dropped `201` will hit this, so it must be a clean, JSON answer.
 
