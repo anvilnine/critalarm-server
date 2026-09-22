@@ -96,6 +96,38 @@ describe("relayed push accounts", () => {
     } finally { db.close(); }
   });
 
+  // api.md §4.1. The relay accepts the three state kinds and hands them on, so
+  // a device behind it hears that the incident was handled somewhere else.
+  it("accepts the state kinds and dispatches them", async () => {
+    const { db, app, events } = setup();
+    try {
+      db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_1',?)").run(remoteHash);
+
+      for (const kind of ["ack", "close", "expire"]) {
+        const response = await app.request("/relay/v1/push", {
+          method: "POST",
+          headers: { Authorization: "Bearer rk_test", "content-type": "application/json" },
+          body: JSON.stringify({ topic_hash: remoteHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind }),
+        });
+        expect(response.status).toBe(202);
+      }
+
+      expect(events.map((event) => event.kind)).toEqual(["ack", "close", "expire"]);
+    } finally { db.close(); }
+  });
+
+  it("refuses a kind the contract does not list", async () => {
+    const { db, app } = setup();
+    try {
+      const response = await app.request("/relay/v1/push", {
+        method: "POST",
+        headers: { Authorization: "Bearer rk_test", "content-type": "application/json" },
+        body: JSON.stringify({ topic_hash: remoteHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "nonsense" }),
+      });
+      expect(response.status).toBe(400);
+    } finally { db.close(); }
+  });
+
   it("sends nothing and logs when no account subscribes to the hash", async () => {
     const { db, app, events } = setup();
     try {

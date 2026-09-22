@@ -347,6 +347,9 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
     ...(event.incidentId === null ? {} : { incident_id: event.incidentId }),
     server: event.server,
     kind: event.kind,
+    // api.md §5.1. The phone re-arms a silenced alarm up to this second and no
+    // later. A push with no incident behind it has no window, so it has none.
+    ...(event.ringUntil === null ? {} : { ring_until: event.ringUntil }),
   };
 }
 

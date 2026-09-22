@@ -14,6 +14,7 @@ function event(): DeliveryEvent {
     messageId: "m_1",
     priority: 5,
     maxRingS: 60,
+    ringUntil: 1_060,
     server: "https://alerts.example.com",
     title: "Database",
     body: "db01 is down",
@@ -204,7 +205,9 @@ describe("Live Activity selection", () => {
     expect(liveActivity.pushes).toEqual([]);
   });
 
-  it("updates the activity without ringing on ack", async () => {
+  // api.md §5.2. The ack reaches Android as a data-only push so a second phone
+  // stops ringing. iOS hears the same thing as a Live Activity update.
+  it("updates the activity and tells Android, without ringing iOS, on ack", async () => {
     const db = liveActivitySetup();
     db.prepare("UPDATE incidents SET state = 'acked', acked_at = 1000 WHERE id = 'inc_1'").run();
     const liveActivity = new RecordingLiveActivity();
@@ -213,7 +216,7 @@ describe("Live Activity selection", () => {
     await dispatcher.dispatch([{ ...event(), kind: "ack" }]);
 
     expect(apns.deliveries).toEqual([]);
-    expect(fcm.deliveries).toEqual([]);
+    expect(fcm.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_android"]);
     expect(liveActivity.pushes).toEqual([
       expect.objectContaining({ token: "update-ios", event: "update", state: "acked", openedAt: 900 }),
     ]);
@@ -232,7 +235,7 @@ describe("Live Activity selection", () => {
     ]);
   });
 
-  it("ends the activity on close and on expire, without ringing", async () => {
+  it("ends the activity on close and on expire, without ringing iOS", async () => {
     const db = liveActivitySetup();
     db.prepare("UPDATE incidents SET state = 'closed', closed_at = 1000 WHERE id = 'inc_1'").run();
     const liveActivity = new RecordingLiveActivity();
@@ -399,4 +402,21 @@ describe("per-device APNs environment", () => {
 
     expect(liveActivity.pushes[0]!.apnsEnvironment).toBe("sandbox");
   });
+});
+
+// api.md §5.2. ack, close and expire are the three state kinds. They go to
+// Android devices only, as data, and they never reach the iOS alarm sender.
+describe("state kinds to Android", () => {
+  for (const kind of ["ack", "close", "expire"] as const) {
+    it(`sends ${kind} to the Android device and to no iOS alarm`, async () => {
+      const db = setup();
+      const apns = new RecordingSender({ status: 200, stale: false });
+      const fcm = new RecordingSender({ status: 200, stale: false });
+
+      await new PushDispatcher(db, { apns, fcm }).dispatch([{ ...event(), kind }]);
+
+      expect(apns.deliveries).toEqual([]);
+      expect(fcm.deliveries.map((delivery) => [delivery.device.id, delivery.event.kind])).toEqual([["dev_android", kind]]);
+    });
+  }
 });

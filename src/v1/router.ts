@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import type { Config } from "../config.js";
 import { DEFAULT_INCIDENT_LIMIT, IncidentConflictError, IncidentService, MAX_INCIDENT_LIMIT } from "../incident/service.js";
 import type { Clock, DeliveryEvent, IdGenerator, IncidentWithMessages } from "../incident/types.js";
+import { historyCutoff } from "../retention/window.js";
 import type { DispatchResult } from "../domain-events.js";
 import { PublishService } from "../ingress/service.js";
 import type { TopicRecord } from "../ingress/types.js";
@@ -30,7 +31,17 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
   r.patch("/v1/topics/:name/tokens/:tokenId",async c=>{let b:unknown;try{b=await c.req.json()}catch{return c.json({error:"invalid request"},400)}const n=typeof b==="object"&&b!==null?(b as {name?:unknown}).name:undefined;if(typeof n!=="string"||n.trim()==="")return c.json({error:"invalid request"},400);const t=renameToken(deps.db,c.get("account").accountId,c.req.param("name"),c.req.param("tokenId"),n);return t===undefined?c.json({error:"not found"},404):c.json(t)});
   r.delete("/v1/topics/:name/tokens/:tokenId",c=>{const result=deleteToken(deps.db,c.get("account").accountId,c.req.param("name"),c.req.param("tokenId"));return result==="deleted"?c.body(null,204):result==="final"?c.json({error:"topic must retain a token"},409):c.json({error:"not found"},404)});
   r.patch("/v1/topics/:name",async c=>{let b:unknown;try{b=await c.req.json()}catch{return c.json({error:"invalid request"},400)}const t=typeof b==="object"&&b!==null?patchTopic(deps.db,deps.config,c.get("account").accountId,c.req.param("name"),b as Record<string,unknown>):undefined;if(t==="cap")return c.json({error:"cap",cap:"critical_topics"},429);return t===undefined?c.json({error:"not found"},404):c.json(view(t))});r.delete("/v1/topics/:name",c=>deleteTopic(deps.db,c.get("account").accountId,c.req.param("name"))?c.body(null,204):c.json({error:"not found"},404));
-  r.get("/v1/incidents",c=>{const limit=c.req.query("limit");const state=c.req.query("state");if(limit!==undefined&&(!/^\d+$/.test(limit)||Number(limit)<1))return c.json({error:"invalid request"},400);if(state!==undefined&&!["open","acked","closed","expired"].includes(state))return c.json({error:"invalid request"},400);return c.json(deps.incidents.list(c.get("account").accountId,{limit:limit===undefined?DEFAULT_INCIDENT_LIMIT:Math.min(Number(limit),MAX_INCIDENT_LIMIT),state:state as "open"|"acked"|"closed"|"expired"|undefined,topic:c.req.query("topic")}).map(incidentView))});
+  r.get("/v1/incidents",c=>{const limit=c.req.query("limit");const state=c.req.query("state");const since=c.req.query("since");if(limit!==undefined&&(!/^\d+$/.test(limit)||Number(limit)<1))return c.json({error:"invalid request"},400);if(state!==undefined&&!["open","acked","closed","expired"].includes(state))return c.json({error:"invalid request"},400);
+    // api.md §3.2. Only a whole number of seconds. No message id, no duration
+    // and no "all": those belong to the poll route, not here.
+    if(since!==undefined&&!/^\d+$/.test(since))return c.json({error:"invalid request"},400);
+    // api.md §4.2. A relay or hosted server never answers with an incident
+    // older than the account's window, whether or not the prune has run. Both
+    // bounds cut on opened_at, so the later of the two is the one that counts.
+    const accountId=c.get("account").accountId;
+    const cutoff=historyCutoff(deps.db,deps.clock,deps.config.mode ?? "hosted",accountId);
+    const bounds=[since===undefined?undefined:Number(since),cutoff].filter((value):value is number=>value!==undefined);
+    return c.json(deps.incidents.list(accountId,{limit:limit===undefined?DEFAULT_INCIDENT_LIMIT:Math.min(Number(limit),MAX_INCIDENT_LIMIT),state:state as "open"|"acked"|"closed"|"expired"|undefined,topic:c.req.query("topic"),...(bounds.length===0?{}:{since:Math.max(...bounds)})}).map(incidentView))});
   r.get("/v1/incidents/:id",c=>{const i=deps.incidents.get(c.get("account").accountId,c.req.param("id"));return i===null?c.json({error:"not found"},404):c.json(incidentView(i))});
   r.post("/v1/incidents/:id/ack",async c=>{try{const {incident:i,events}=deps.incidents.acknowledge(c.get("account").accountId,c.req.param("id"));const timer=deps.db.prepare("SELECT fire_at FROM timers WHERE incident_id=? AND kind='desk'").get(i.id) as {fire_at:number};await deps.dispatch(events);return c.json({...incidentView(deps.incidents.get(c.get("account").accountId,i.id)!),desk_timer_fires_at:timer.fire_at})}catch(e){return e instanceof IncidentConflictError?c.json({error:"incident state conflict"},409):c.json({error:"not found"},404)}});
   r.post("/v1/incidents/:id/close",async c=>{try{const {incident:i,events}=deps.incidents.close(c.get("account").accountId,c.req.param("id"));await deps.dispatch(events);return c.json(incidentView(deps.incidents.get(c.get("account").accountId,i.id)!))}catch(e){return e instanceof IncidentConflictError?c.json({error:"incident state conflict"},409):c.json({error:"not found"},404)}});
