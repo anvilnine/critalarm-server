@@ -270,6 +270,18 @@ topics and incidents and never leaves the app. Never mix them.
 reschedules. On boot the same scan runs once. A crash loses at most 5 seconds
 of ringing, not the incident.
 
+**How long rows live.** `history_days` is retention, not a number to show. On a
+relay or hosted server `pruneHistory` in `src/retention/prune.ts` walks the
+accounts once an hour, one transaction each, and deletes closed and expired
+incidents older than that account's window along with their messages, plus any
+message with no incident. An open or acked incident is never deleted, whatever
+its age. The job has its own `setInterval`, separate from the 5 s timer scan,
+and its first run is 60 s after boot. Between runs `historyCutoff` in
+`src/retention/window.ts` hides the same rows from `GET /v1/incidents` and
+`GET /{topic}/json`, so a read never shows what the next run will delete. A
+self-hosted server has no tier and no window: it prunes nothing, filters
+nothing, and there is no setting that turns this on. See `docs/api.md` §4.2.
+
 ## 8. Push path detail
 
 ```mermaid

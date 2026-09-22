@@ -30,6 +30,16 @@ binary's. The binary's version is in `package.json`.
   with no count limit. A client that still reads the field treats its absence
   as no limit.
 
+### Server 0.2.0
+
+The code side of 1.16.0. The dispatcher sends `ack`, `close` and `expire` to
+Android devices only, as data-only FCM with a 60 s ttl; the relay client
+forwards them and the relay router accepts them. Delivery events carry
+`ringUntil`, and both payload builders write `ring_until`. `GET /v1/incidents`
+takes `since`. New `src/retention/`: `pruneHistory` runs hourly on a relay or
+hosted server, `historyCutoff` hides the same rows from the incidents list and
+the poll route in between, and a self-hosted server does neither.
+
 ## 1.15.0 - 2026-09-20
 
 ### Added
