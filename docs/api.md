@@ -538,8 +538,7 @@ POST /relay/v1/devices                                  // registration. no auth
         "account_join_token":"aj_...",                  // create path only. absent on a join
         "account_id":"acc_...",
         "tier":"free"|"relay"|"hosted",
-        "caps":{ "devices":5, "critical_topics":2, "p4_daily":50,
-                 "history_incidents":20, "history_days":7 } }
+        "caps":{ "devices":5, "critical_topics":2, "p4_daily":50, "history_days":7 } }
 
 PATCH  /relay/v1/devices/{device_id}                     // re-register: new push token, new app version
   Authorization: Bearer dv_...
@@ -811,7 +810,7 @@ payload (relay_content: none):
 }
 ```
 
-**`ring_until` is the last second the phone may ring for this incident on its own.** It is `opened_at + max_ring_s` in epoch seconds, and a `reopen` moves it to the new `opened_at`. It is on `open`, `repeat`, `reopen` and `p5`. A phone that silences an alarm without acknowledging it re-arms locally until this second and no later; after it, only a fresh push from the server may ring. Server time; a client allows a small margin and stops at whichever comes first of `ring_until` and an `expire`.
+**`ring_until` is the last second the phone may ring for this incident on its own.** It is `opened_at + max_ring_s` in epoch seconds, and a `reopen` moves it to the new `opened_at`. It is on `open`, `repeat`, `reopen`, and on a `p5` that joins an open incident; a `p5` on a topic whose switch is off has no incident and carries `null`. A phone that silences an alarm without acknowledging it re-arms locally until this second and no later; after it, only a fresh push from the server may ring. Server time; a client allows a small margin and stops at whichever comes first of `ring_until` and an `expire`.
 
 **iOS alerts are time-sensitive, never critical.** Apple turned the Critical Alerts entitlement down, and APNs rejects a critical payload from an app that does not hold it. So `"interruption-level"` is always `"time-sensitive"`, and the sound is the plain string `"alarm.caf"` rather than a critical sound object. When the sound is attached is unchanged: a priority-5 message on a topic whose `critical` switch is on, opening or joining an incident. The switch still decides that, and still decides whether Android rings through with a full-screen intent. Only the shape of the iOS payload changed.
 
