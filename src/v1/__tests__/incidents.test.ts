@@ -71,3 +71,31 @@ describe("incident list since", () => {
     }
   });
 });
+
+// api.md §3.2 and §4.2. The list hides an incident past the account's window
+// even before the hourly prune deleted it. A self-hosted server has no window.
+describe("incident list history window", () => {
+  const day = 86_400;
+  const now = 100 * day;
+
+  // Self-hosted is covered by the poll tests: /v1/ there wants an ad_ admin
+  // credential, which this dv_ fixture does not hold.
+  function windowSetup(mode: "relay" | "hosted", tier: "free" | "hosted") {
+    const db=openDatabase(":memory:"); migrate(db); db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES ('a',?,1)").run(tier); db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('d','a',?,'ios','x',1)").run(createHash("sha256").update("dv_a").digest("hex"));
+    db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES ('t','a','prod','https://a','h',1,30,60,30,'none',1)").run();
+    for(const [id,ageDays] of [["inc_day6",6],["inc_day8",8],["inc_day89",89]] as const) db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,max_ring_s) VALUES (?,'t','closed',?,?,60)").run(id,now-ageDays*day,now-ageDays*day);
+    const app=createApp({config:{baseUrl:"https://a",relayUrl:"https://r",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false,mode},db,clock:{now:()=>now},ids:{message:()=>"m",incident:()=>"i",timer:()=>"t"},dispatch:async()=>{}});
+    return async (path:string)=>((await (await app.request(path,{headers:{Authorization:"Bearer dv_a"}})).json()) as {id:string}[]).map(value=>value.id);
+  }
+
+  it("hides a day-8 row from a free account before the prune has run", async () => {
+    const ids = windowSetup("hosted", "free");
+    expect(await ids("/v1/incidents")).toEqual(["inc_day6"]);
+    expect(await ids("/v1/incidents?since=0")).toEqual(["inc_day6"]);
+  });
+
+  it("keeps ninety days for a paid account on a relay", async () => {
+    const ids = windowSetup("relay", "hosted");
+    expect(await ids("/v1/incidents")).toEqual(["inc_day6", "inc_day8", "inc_day89"]);
+  });
+});
