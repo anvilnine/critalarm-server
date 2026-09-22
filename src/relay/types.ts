@@ -1,7 +1,8 @@
 import type Database from "better-sqlite3";
 import type { DeliveryEvent } from "../incident/types.js";
 
-export type RelayKind = "open" | "repeat" | "reopen" | "p4";
+// api.md §4.1. The last three are state changes and never ring.
+export type RelayKind = "open" | "repeat" | "reopen" | "p4" | "ack" | "close" | "expire";
 export interface RelayPayload {
   topic_hash: string; incident_id: string | null; message_id: string; priority: 4 | 5; kind: RelayKind;
   title?: string; body?: string;
