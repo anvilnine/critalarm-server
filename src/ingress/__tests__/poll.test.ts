@@ -84,7 +84,7 @@ describe("ntfy poll", () => {
 
   it("preserves the additive incident id on an incident message", async () => {
     const { add, app, db } = setup();
-    db.prepare("INSERT INTO incidents (id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, max_ring_s) VALUES ('inc_1', 'top_1', 'open', 1, NULL, NULL, 1, 60)").run();
+    db.prepare("INSERT INTO incidents (id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, updated_at, max_ring_s) VALUES ('inc_1', 'top_1', 'open', 1, NULL, NULL, 1, 1, 60)").run();
     add("m_incident", 800, "inc_1");
     expect((await ndjson(await app.request("/prod/json?poll=1&since=all", { headers })))[0]?.incident_id).toBe("inc_1");
   });

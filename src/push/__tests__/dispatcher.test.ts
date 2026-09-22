@@ -156,7 +156,7 @@ class RecordingLiveActivity implements LiveActivitySender {
 
 function liveActivitySetup() {
   const db = setup();
-  db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,max_ring_s) VALUES ('inc_1','top_1','open',900,900,60)").run();
+  db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,updated_at,max_ring_s) VALUES ('inc_1','top_1','open',900,900,900,60)").run();
   db.prepare("UPDATE messages SET incident_id = 'inc_1' WHERE id = 'm_1'").run();
   db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_ios','la_start','',NULL,'start-ios',1)").run();
   db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_other','la_start','',NULL,'start-other',1)").run();

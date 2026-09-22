@@ -23,8 +23,8 @@ function setup() {
 }
 
 function addIncident(db: ReturnType<typeof setup>, id: string, account: string, state: string, ageDays: number) {
-  db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,max_ring_s) VALUES (?,?,?,?,?,60)")
-    .run(id, `top_${account}`, state, now - ageDays * day, now - ageDays * day);
+  db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,updated_at,max_ring_s) VALUES (?,?,?,?,?,?,60)")
+    .run(id, `top_${account}`, state, now - ageDays * day, now - ageDays * day, now - ageDays * day);
 }
 
 function addMessage(db: ReturnType<typeof setup>, id: string, account: string, incidentId: string | null, ageDays: number) {

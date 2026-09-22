@@ -96,7 +96,7 @@ describe("store migrations", () => {
       "INSERT INTO topics (id, account_id, name, base_url, topic_hash, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES ('top_1', 'acc_1', 'prod', 'https://alerts.example.com', 'hash', 30, 1800, 600, 'none', 1)",
     ).run();
     db.prepare(
-      "INSERT INTO incidents (id, topic_id, state, opened_at, last_message_at) VALUES ('inc_1', 'top_1', 'open', 1, 1)",
+      "INSERT INTO incidents (id, topic_id, state, opened_at, last_message_at, updated_at) VALUES ('inc_1', 'top_1', 'open', 1, 1, 1)",
     ).run();
 
     const topic = db
