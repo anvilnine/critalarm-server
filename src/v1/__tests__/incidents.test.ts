@@ -49,3 +49,25 @@ describe("incident list limit", () => {
     for(const path of ["/v1/incidents?limit=0","/v1/incidents?limit=-1","/v1/incidents?limit=abc"]){const response=await app.request(path,{headers}); expect(response.status).toBe(400); expect(await response.json()).toEqual({error:"invalid request"});}
   });
 });
+
+// api.md §3.2. since is a unix timestamp in seconds, exclusive, on opened_at.
+// A client that keeps its own copy sends the newest opened_at it holds.
+describe("incident list since", () => {
+  it("returns only incidents opened after the second given, alongside the other filters", async () => {
+    const db=openDatabase(":memory:"); migrate(db); db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES ('a','free',1)").run(); db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('d','a',?,'ios','x',1)").run(createHash("sha256").update("dv_a").digest("hex"));
+    for(const [id,name] of [["prod","prod"],["stage","stage"]]) db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES (?, 'a', ?, 'https://a', ?,1,30,60,30,'none',1)").run(id,name,`h-${id}`);
+    for(const [id,topic,opened] of [["inc_old","prod",100],["inc_edge","prod",200],["inc_new","prod",300],["inc_stage","stage",400]]) db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,max_ring_s) VALUES (?,?,'closed',?,?,60)").run(id,topic,opened,opened);
+    const app=createApp({config:{baseUrl:"https://a",relayUrl:"https://r",relayContent:"none",listen:":8080",port:8080,dataDir:"/data",behindProxy:false},db,clock:{now:()=>500},ids:{message:()=>"m",incident:()=>"i",timer:()=>"t"},dispatch:async()=>{}});const headers={Authorization:"Bearer dv_a"};
+    const ids=async (path:string)=>((await (await app.request(path,{headers})).json()) as {id:string}[]).map(value=>value.id);
+
+    expect(await ids("/v1/incidents?since=200")).toEqual(["inc_stage","inc_new"]);
+    expect(await ids("/v1/incidents?since=199")).toEqual(["inc_stage","inc_new","inc_edge"]);
+    expect(await ids("/v1/incidents?since=200&topic=prod")).toEqual(["inc_new"]);
+    expect(await ids("/v1/incidents?since=0")).toEqual(["inc_stage","inc_new","inc_edge","inc_old"]);
+    for(const path of ["/v1/incidents?since=abc","/v1/incidents?since=-1","/v1/incidents?since=1.5","/v1/incidents?since=all","/v1/incidents?since=10m"]){
+      const response=await app.request(path,{headers});
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({error:"invalid request"});
+    }
+  });
+});
