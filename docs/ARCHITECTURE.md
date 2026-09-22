@@ -56,11 +56,11 @@ so the incident engine calls the push sender directly and `FWD` and `RIN` are
 skipped.
 
 **The dashboard is the Flutter app, built for web.** When an account UI ships it
-is `flutter build web` out of `critalarm-app`, deployed at `app.critalarm.app`,
-calling the same `/v1/` routes with the same device token as the phone. A
-self-hosted server may also serve that build at `/ui`. That is optional and
-self-hosted only: a hosted deployment serves the dashboard from
-`app.critalarm.app`, not from the API host. Next.js is not used. The web build
+is `flutter build web` out of `critalarm-app`, deployed on its own
+`critalarm.app` subdomain (not chosen yet), calling the same `/v1/` routes with
+the same device token as the phone. A self-hosted server may also serve that
+build at `/ui`. That is optional and self-hosted only: a hosted deployment
+serves the dashboard from its own host, not from the API host. Next.js is not used. The web build
 cannot register for push and cannot run the alarm, so the app gates those
 screens on a capability instead of a platform check. No web UI is being built in
 this pass. The decision is recorded here so nothing gets written against a
@@ -76,11 +76,14 @@ flowchart TB
     BIN --> C["Hosted mode<br/>= self-hosted + relay<br/>in one process"]
 ```
 
-Mode is inferred from config, not a flag. Without push credentials, server runs
-self-hosted and forwards supported events to effective `relay-url` (default
-`https://relay.critalarm.app`). Push credentials without explicit `relay-url`
-select relay mode; push credentials plus explicit `relay-url` select hosted mode.
-Relay endpoints and account/device tables exist only in relay and hosted modes.
+Mode is a setting: `MODE` in the environment or `mode:` in the config file, one
+of `selfhosted`, `relay` or `hosted` (`docs/api.md` §3.4, contract 1.11.0). A
+deployment that never sets it gets the old guess: no push credentials means
+self-hosted, credentials without an explicit `relay-url` means relay,
+credentials plus an explicit `relay-url` means hosted. Write it down; the guess
+reads a self-hoster with their own APNs key as a relay. Self-hosted forwards
+supported events to `relay-url` (default `https://relay.critalarm.app`). Relay
+endpoints and account/device tables exist only in relay and hosted modes.
 
 Mode also decides which credential the `/v1/` routes accept: the admin token in
 self-hosted mode, a device token scoped to one account in relay and hosted mode.
@@ -116,7 +119,7 @@ Rules:
 
 | ntfy priority | Topic critical toggle | iOS | Android |
 |---|---|---|---|
-| 5 | on | Time-Sensitive, incident opened | Full-screen alarm, incident opened |
+| 5 | on | AlarmKit alarm on iOS 26 or later, Time-Sensitive on older iPhones, incident opened | Full-screen alarm, incident opened |
 | 5 | off | Time-Sensitive, no incident | High-priority notification, no incident |
 | 4 | off or on | Time-Sensitive | High-priority |
 | 1 to 3 | off or on | Standard, app polls | Standard, app polls |
@@ -124,11 +127,12 @@ Rules:
 Only priority 5 on a critical topic creates an incident and enters the retry
 loop. Everything else is fire and forget, ntfy-style.
 
-Apple denied the Critical Alerts entitlement for `app.critalarm`, so iOS never
-rings through the silent switch or Do Not Disturb. The loudest iOS delivery is a
-Time-Sensitive push. The topic critical switch still decides whether an incident
-opens and whether the repeat loop runs, and it still drives the Android
-full-screen alarm.
+Apple denied the Critical Alerts entitlement for `app.critalarm`. On iOS 26 or
+later a priority 5 page rings as an AlarmKit alarm, through the silent switch
+and Do Not Disturb. On older iPhones the loudest delivery is a Time-Sensitive
+push with sound, which the silent switch mutes. The topic critical switch still
+decides whether an incident opens and whether the repeat loop runs, and it
+still drives the Android full-screen alarm.
 
 ## 6. API
 
@@ -261,14 +265,16 @@ person's sessions and their stored OAuth tokens. Before the transaction the
 server asks Apple and Google to revoke those tokens. That call is best effort
 and never blocks the delete. See `docs/api.md` §3.7.
 
-**Two secrets, two jobs.** A topic token authorizes publishing and goes out to
-whatever monitoring tool fires the alert. A device token authorizes managing
-topics and incidents and never leaves the app. Never mix them.
+**Three secrets, three jobs.** A topic token (`tk_`) authorizes publishing and
+goes out to whatever monitoring tool fires the alert. A device token (`dv_`)
+authorizes managing topics and incidents and never leaves the app. An account
+join token (`aj_`) attaches one more handset to the account and does nothing
+else. Never mix them. See `docs/api.md` §4.2.
 
 **Timers as rows.** `TIMER.kind` is one of `repeat`, `expire`, `desk`. One
-`setInterval` every 5 s selects `fire_at <= now`, handles each, then deletes or
-reschedules. On boot the same scan runs once. A crash loses at most 5 seconds
-of ringing, not the incident.
+`setInterval` every 250 ms selects `fire_at <= now`, handles each, then deletes
+or reschedules (`src/main.ts`). On boot the same scan runs once. A crash loses
+at most a quarter of a second of ringing, not the incident.
 
 ## 8. Push path detail
 
@@ -301,7 +307,9 @@ sequenceDiagram
 If the NSE fetch fails (server down, proxy misconfigured, 30 s budget), the
 fallback body is shown. The sound still plays because it is in the APNs payload,
 not the fetched body. It plays at the phone's notification volume and it obeys
-the silent switch, because Apple denied the Critical Alerts entitlement.
+the silent switch, because Apple denied the Critical Alerts entitlement. On iOS
+26 or later the AlarmKit alarm is scheduled by the app on its own and does not
+depend on this fetch.
 
 `relay-content: full` skips the NSE fetch: title and body are in the push.
 
@@ -337,16 +345,18 @@ operator nothing at all to go on.
 - The topic hash on the relay is `sha256(base_url + "/" + topic)`, ntfy's
   scheme. Knowing the hash lets you receive pokes for a topic, not send them.
   Sending needs the topic token on the user's server.
-- The relay server key is issued anonymously on first forward and rate-limited
-  per key and per IP.
+- The relay server key comes from `POST /relay/v1/servers`. Today that route
+  only mounts when `RELAY_REGISTRATION_SECRET` is set and then demands it, and
+  nothing rate-limits it. The contract still says anonymous; that gap is an
+  open item in `planning/decisions.md`.
 - Device routes need the device token issued at registration. Registration
   itself is the only unauthenticated relay route.
 - A device token reaches only rows owned by its account. Another account's topic
   or incident answers `404`, never `403`, so the token cannot be used to find
   out which topic names exist.
-- Relay caps: one new incident per topic hash per 5 min, plus the per-account
-  caps the relay returns in `caps` at registration. Caps are counted per
-  account, not per device.
+- Relay caps: the per-account caps the relay returns in `caps` at registration.
+  Caps are counted per account, not per device. No cap touches the alarm
+  itself.
 - The relay stores no message content in `none` mode. Metrics are counts and
   timings only.
 
@@ -358,7 +368,7 @@ operator nothing at all to go on.
 | Relay down | Self-hosted pushes stop. | The relay is one container behind Cloudflare. A second instance is the fix, and it is not v1. Document it. |
 | APNs rejects token | Device never rings. | The relay marks the device stale on 410, the app re-registers on next launch, and "Ring me now" surfaces it. |
 | Reverse proxy strips headers | Ingress 401s, or the topic hash does not match. | `GET /v1/info`, the `behind-proxy` setting, and a docs page for Caddy, Traefik and nginx. |
-| iOS cannot ring through silent mode | Apple denied the Critical Alerts entitlement, so iOS priority 5 arrives as a Time-Sensitive push. | Same code path. Android keeps the full-screen alarm. |
+| Older iPhones cannot ring through silent mode | Apple denied the Critical Alerts entitlement. iOS 26 or later rings an AlarmKit alarm through silent mode; iOS 16 to 25 gets a Time-Sensitive push with sound. | Same code path. Android keeps the full-screen alarm. |
 | Phone offline | Push queued by APNs and FCM up to their TTL. | Set `apns-expiration` to `max_ring_duration`. |
 
 The first row is the honest weakness. If the box running Crit Alarm is the box
@@ -368,10 +378,7 @@ the host. Say this in the docs.
 
 ## 12. Repo layouts
 
-This is the target, not an inventory. Most of it does not exist yet: today the
-server has `src/index.ts`, `src/server-node.ts`, `src/rate-limit.ts` and
-`src/middleware/`. `src/main.ts` replaces `server-node.ts` as the entry point
-when S0 lands the config loader.
+This is the layout as of `v0.1.9`. `ls src/` is the check.
 
 ```
 critalarm-server/
@@ -379,17 +386,22 @@ critalarm-server/
     ingress/       ntfy-compatible handlers
     incident/      state machine, timer scan. no push imports.
     relay/         client (forward) + server (accept), both, switched by config
-    push/          apns.ts, fcm.ts
+    push/          apns.ts, fcm.ts, dispatcher.ts
     store/         better-sqlite3, migrations
-    tier/          caps, revenuecat webhook
+    tier/          caps, revenuecat webhook and reconcile
+    auth/          better-auth, sign-in link and switch, account merge
+    admin/         admin token routes
+    stats/         counts for the site
+    v1/            topics, tokens, incidents, account routes
     config.ts
-    main.ts
+    main.ts        entry point
+    cli.ts         the operator command (critalarm account delete)
   docs/api.md      the contract the app tests pin to
   Dockerfile       node:22-alpine, multi-arch
-  docker-compose.example.yml
+  docker-compose.yml
 
 critalarm-app/
-  lib/             Flutter. features/{onboarding,topics,incidents,settings}
+  lib/             Flutter. lib/features/<name>, 13 features (`ls lib/features`)
   ios/CritAlarmNSE/  Swift. fetch + mutate notification.
   android/         full-screen intent channel config
   integration_test/  hits a real server container

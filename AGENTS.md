@@ -47,7 +47,8 @@ Write what you tried and what blocked you in the PR or a `BLOCKED.md` in the tas
 ## This repo
 
 `critalarm-server`. Public, AGPL-3.0. The server and the relay are the same
-binary; which one you get is decided by config, not a flag (ARCHITECTURE §3).
+binary; which one you get is the `MODE` setting, `selfhosted`, `relay` or
+`hosted` (ARCHITECTURE §3, api.md §3.4).
 
 **Stack.** Node 22, TypeScript strict, Hono, SQLite through `better-sqlite3`.
 One long-lived process, because the incident repeat loop is a timer scan over
@@ -62,23 +63,27 @@ database rows. No build step in dev: `tsx` runs the TypeScript directly.
 | Type check | `npm run type-check` |
 | Run it | `npm start`, listens on `PORT` or 8080 |
 
-**Folder layout** (ARCHITECTURE §12). Today only `src/index.ts`,
-`src/server-node.ts`, `src/rate-limit.ts`, `src/middleware/` and
-`src/telemetry.ts` exist. Everything below is where new code goes:
+**Folder layout** (ARCHITECTURE §12). `ls src/` is the check; this is it as of
+`v0.1.9`:
 
 ```
 src/
   ingress/       ntfy-compatible handlers
   incident/      state machine, timer scan. no push imports.
   relay/         client (forward) + server (accept), both, switched by config
-  push/          apns.ts, fcm.ts
+  push/          apns.ts, fcm.ts, dispatcher.ts
   store/         better-sqlite3, migrations
-  tier/          caps, revenuecat webhook
+  tier/          caps, revenuecat webhook and reconcile
+  auth/          better-auth, sign-in link and switch, account merge
+  admin/         admin token routes
+  stats/         counts for the site
+  v1/            topics, tokens, incidents, account routes
   config.ts
-  main.ts
+  main.ts        entry point
+  cli.ts         the operator command (critalarm account delete)
 docs/api.md      the contract
 Dockerfile       node:22-alpine, multi-arch
-docker-compose.example.yml
+docker-compose.yml
 ```
 
 **Where the docs are.**
