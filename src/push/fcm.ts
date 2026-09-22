@@ -1,4 +1,4 @@
-import type { DeliveryEvent } from "../domain-events.js";
+import { isStateKind, type DeliveryEvent } from "../domain-events.js";
 import { signJwt } from "./jwt.js";
 import type { PrivateKey, PushDevice, PushResult, PushSender, SenderDependencies } from "./types.js";
 
@@ -80,20 +80,27 @@ export class FcmSender implements PushSender {
 }
 
 function fcmPayload(device: PushDevice, event: DeliveryEvent): Record<string, unknown> {
+  // api.md §5.2. A state push says the incident was handled somewhere else. It
+  // carries the incident and the kind and nothing more: no priority, no title,
+  // no body, nothing the app could ring on. Its ttl is 60 seconds, because a
+  // stop that arrives after the phone stopped ringing is useless.
+  const state = isStateKind(event.kind);
   return {
     message: {
       token: device.pushToken,
       android: {
         priority: "high",
         collapse_key: event.incidentId ?? event.messageId,
-        ttl: `${event.maxRingS}s`,
+        ttl: state ? "60s" : `${event.maxRingS}s`,
       },
       data: {
         ...(event.incidentId === null ? {} : { incident_id: event.incidentId }),
         server: event.server,
         kind: event.kind,
-        priority: String(event.priority),
-        ...(event.relayContent === "full" ? { title: event.title, body: event.body } : {}),
+        ...(state ? {} : { priority: String(event.priority) }),
+        // Epoch seconds as a string, because every FCM data value is a string.
+        ...(event.ringUntil === null ? {} : { ring_until: String(event.ringUntil) }),
+        ...(!state && event.relayContent === "full" ? { title: event.title, body: event.body } : {}),
       },
     },
   };

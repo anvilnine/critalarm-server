@@ -29,7 +29,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
     if (keyHash === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) === undefined) return c.json({ error: "unauthorized" }, 401);
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
-    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
+    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     // The accounts this push is for. The pushing server's message_id has no row
     // here (api.md §4.1), so the relay establishes the owning accounts itself
     // and names one on every dispatch; the dispatcher never guesses. A hash this
@@ -46,7 +46,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
       }
       if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     }
-    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
+    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
     let delivered = 0;
     for (const account of accounts) {
       const result = await dispatch({ ...event, accountId: account.account_id });

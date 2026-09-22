@@ -29,6 +29,7 @@ const event: DeliveryEvent = {
   messageId: "m_1",
   priority: 5,
   maxRingS: 60,
+  ringUntil: 1_060,
   server: "https://alerts.example.com",
   title: "prod",
   body: "the database is down",

@@ -12,11 +12,12 @@ export class RelayClient {
   }
 
   async forwardOne(event: DeliveryEvent): Promise<Response | undefined> {
-    // p5 rings locally, and the three state changes only drive Live Activities,
-    // which /relay/v1/push does not carry.
-    if (event.kind === "p5" || event.kind === "ack" || event.kind === "close" || event.kind === "expire") return undefined;
+    // p5 rings locally, so the relay never hears it. The three state kinds do go
+    // over the wire: a device behind the relay has to hear that the incident was
+    // handled on another phone (api.md §4.1).
+    if (event.kind === "p5") return undefined;
     const key = await this.key();
-    const payload: RelayPayload = { topic_hash: event.topicHash, incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind };
+    const payload: RelayPayload = { topic_hash: event.topicHash, incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind, ring_until: event.ringUntil };
     if (this.options.relayContent === "full") { payload.title = event.title; payload.body = event.body; }
     const response = await (this.options.fetch ?? fetch)(new Request(`${this.options.relayUrl.replace(/\/$/, "")}/relay/v1/push`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(payload) }));
     if (!response.ok) throw new Error(`relay push failed: ${response.status}`);

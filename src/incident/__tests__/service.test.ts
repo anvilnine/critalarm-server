@@ -150,6 +150,7 @@ describe("IncidentService", () => {
         title: "Database",
         body: "db01 is down",
         critical: true,
+        ringUntil: 1_060,
       },
     ]);
     expect(
@@ -199,6 +200,7 @@ describe("IncidentService", () => {
         title: "Cache",
         body: "cache01 is down",
         critical: false,
+        ringUntil: 1_060,
       },
     ]);
     expect(db.prepare("SELECT kind, fire_at FROM timers").all()).toEqual([
@@ -257,3 +259,51 @@ describe("IncidentService", () => {
     expect(service.list("acc_2", {})).toEqual([]);
   });
 });
+
+// api.md §5.1. ring_until is the last second a phone may ring for this
+// incident on its own. It is opened_at + max_ring_s, and a reopen moves it.
+describe("ring until", () => {
+  it("sets it from the opening second on open and keeps it while the incident lives", () => {
+    const { clock, service } = setup();
+
+    const opened = service.publishCritical(publication());
+    clock.value = 1_005;
+    const joined = service.publishCritical(publication("Cache", "cache01 is down"));
+    clock.value = 1_010;
+    const repeated = service.scanDue();
+
+    expect(opened.events[0]!.ringUntil).toBe(1_060);
+    expect(joined.events[0]!.ringUntil).toBe(1_060);
+    expect(repeated.map((event) => [event.kind, event.ringUntil])).toEqual([["repeat", 1_060]]);
+  });
+
+  it("moves it to the new opening second on a reopen", () => {
+    const { clock, service } = setup();
+    const opened = service.publishCritical(publication());
+    clock.value = 1_010;
+    service.acknowledge("acc_1", opened.incident.id);
+    clock.value = 1_040;
+
+    expect(service.scanDue().map((event) => [event.kind, event.ringUntil])).toEqual([["reopen", 1_100]]);
+  });
+
+  it("carries none on the kinds that never ring", () => {
+    const { clock, service } = setup();
+    const opened = service.publishCritical(publication());
+    clock.value = 1_010;
+    const acked = service.acknowledge("acc_1", opened.incident.id);
+    const closed = service.close("acc_1", opened.incident.id);
+    const expired = expireOf(setup());
+
+    expect([acked.events[0]!.ringUntil, closed.events[0]!.ringUntil, expired]).toEqual([null, null, null]);
+  });
+});
+
+// Lets the incident above run past its ring ceiling so the expire timer fires.
+function expireOf({ clock, service }: { clock: { value: number }; service: IncidentService }): number | null {
+  service.publishCritical(publication());
+  clock.value = 1_060;
+  const events = service.scanDue();
+  expect(events.map((event) => event.kind)).toEqual(["expire"]);
+  return events[0]!.ringUntil;
+}
