@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
+import { isStateKind, type DeliveryEvent, type DispatchResult } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
 import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PushDevice, PushResult, PushSender } from "./types.js";
 
@@ -32,7 +32,6 @@ const liveActivityEvent: Partial<Record<DeliveryEvent["kind"], "start" | "update
   close: "end",
   expire: "end",
 };
-const silentKinds: ReadonlySet<DeliveryEvent["kind"]> = new Set(["ack", "close", "expire"]);
 
 export class PushDispatcher {
   constructor(
@@ -46,19 +45,21 @@ export class PushDispatcher {
     for (const event of events) {
       const accountId = this.owningAccount(event);
       if (accountId === undefined) continue;
-      if (!silentKinds.has(event.kind)) {
-        delivered += await this.ringAlarm(event, accountId);
-      }
+      delivered += await this.sendToDevices(event, accountId);
       await this.updateLiveActivities(event, accountId);
     }
     return { delivered };
   }
 
-  // Returns how many alarm pushes the provider accepted. A refused push is not
-  // counted, so a run of 500s or 410s never shows up as delivery.
-  private async ringAlarm(event: DeliveryEvent, accountId: string): Promise<number> {
+  // Returns how many pushes the provider accepted. A refused push is not
+  // counted, so a run of 500s or 410s never shows up as delivery. A state kind
+  // goes to Android only (api.md §5.2): it stops a phone that is still ringing,
+  // and iOS gets the same news as a Live Activity update instead.
+  private async sendToDevices(event: DeliveryEvent, accountId: string): Promise<number> {
     let delivered = 0;
-    for (const device of this.subscribedDevices(event.topicHash, accountId)) {
+    const devices = this.subscribedDevices(event.topicHash, accountId)
+      .filter((device) => !isStateKind(event.kind) || device.platform === "android");
+    for (const device of devices) {
       const result = await this.senderFor(device).send(device, event);
       this.rememberApnsEnvironment(device, result);
       if (result.status >= 200 && result.status < 300 && !result.stale) delivered += 1;

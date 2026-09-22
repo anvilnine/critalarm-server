@@ -96,6 +96,43 @@ describe("FcmSender", () => {
     });
   });
 
+  // api.md §5.2. A state push carries the incident and the kind and nothing
+  // else. No priority, no title, no body, and a ttl of 60 seconds, because a
+  // stop that arrives after the ringing has ended is useless.
+  it("sends a state kind as data only, with a 60 second ttl and nothing that rings", async () => {
+    const sends: Request[] = [];
+    const sender = new FcmSender({
+      projectId: "crit-alarm-project",
+      clientEmail: "push@crit-alarm-project.iam.gserviceaccount.com",
+      privateKey,
+      tokenUrl: "https://oauth.example.test/token",
+      clock: { now: () => 1_000 },
+      fetch: async (request) => {
+        if (request.url === "https://oauth.example.test/token") return Response.json({ access_token: "access_1", expires_in: 3_600 });
+        sends.push(request);
+        return new Response(null, { status: 200 });
+      },
+    });
+
+    for (const kind of ["ack", "close", "expire"] as const) {
+      await sender.send(device, event({ kind, relayContent: "full" }));
+    }
+
+    for (const [index, kind] of ["ack", "close", "expire"].entries()) {
+      await expect(sends[index].json()).resolves.toEqual({
+        message: {
+          token: "android-token",
+          android: { priority: "high", collapse_key: "inc_1", ttl: "60s" },
+          data: {
+            incident_id: "inc_1",
+            server: "https://alerts.example.com",
+            kind,
+          },
+        },
+      });
+    }
+  });
+
   it("does not send title or body in none mode and caches the access token until shortly before expiry", async () => {
     let now = 1_000;
     let tokenExchanges = 0;

@@ -29,7 +29,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
     if (keyHash === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) === undefined) return c.json({ error: "unauthorized" }, 401);
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
-    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
+    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     // The accounts this push is for. The pushing server's message_id has no row
     // here (api.md §4.1), so the relay establishes the owning accounts itself
     // and names one on every dispatch; the dispatcher never guesses. A hash this
