@@ -16,6 +16,10 @@ export interface DeliveryEvent {
   messageId: string;
   priority: 4 | 5;
   maxRingS: number;
+  // api.md §5.1. The last second a phone may ring for this incident on its
+  // own: opened_at + max_ring_s. A reopen moves it. Null on a push with no
+  // incident behind it and on the three state kinds, which never ring.
+  ringUntil: number | null;
   server: string;
   title: string;
   body: string;

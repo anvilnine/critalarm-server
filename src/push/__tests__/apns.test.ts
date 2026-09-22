@@ -56,6 +56,7 @@ function event(overrides: Partial<DeliveryEvent> = {}): DeliveryEvent {
     title: "Database",
     body: "db01 is down",
     critical: true,
+    ringUntil: 1_060,
     ...overrides,
   };
 }
@@ -108,6 +109,7 @@ describe("ApnsSender", () => {
       },
       incident_id: "inc_1",
       server: "https://alerts.example.com",
+      ring_until: 1_060,
       kind: "open",
     });
   });
@@ -129,7 +131,7 @@ describe("ApnsSender", () => {
 
     await sender.send(device, event());
     await sender.send(device, event({ kind: "p5", critical: false, messageId: "m_quiet" }));
-    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
+    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false, ringUntil: null }));
 
     const wakes = transport.sent.map((sent) => (jsonBody(sent).aps as Record<string, unknown>)["content-available"]);
     expect(wakes).toEqual([1, undefined, undefined]);
@@ -173,7 +175,7 @@ describe("ApnsSender", () => {
       transport: () => transport,
     });
 
-    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
+    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false, ringUntil: null }));
     await sender.send(device, event({ kind: "p5", critical: false }));
 
     expect(transport.sent.map(jsonBody)).toEqual([
@@ -197,6 +199,7 @@ describe("ApnsSender", () => {
         incident_id: "inc_1",
         server: "https://alerts.example.com",
         kind: "p5",
+        ring_until: 1_060,
       },
     ]);
   });

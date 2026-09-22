@@ -67,6 +67,8 @@ export class PublishService {
           messageId: message.id,
           priority: input.priority as 4 | 5,
           maxRingS: topic.maxRingS,
+          // No incident behind this one, so there is no ring window to hold to.
+          ringUntil: null,
           server: topic.baseUrl,
           title,
           body: input.message,

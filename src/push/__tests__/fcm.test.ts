@@ -26,6 +26,7 @@ function event(overrides: Partial<DeliveryEvent> = {}): DeliveryEvent {
     title: "Database",
     body: "db01 is down",
     critical: true,
+    ringUntil: 1_060,
     ...overrides,
   };
 }
@@ -91,6 +92,7 @@ describe("FcmSender", () => {
           server: "https://alerts.example.com",
           kind: "open",
           priority: "5",
+          ring_until: "1060",
         },
       },
     });
@@ -115,7 +117,7 @@ describe("FcmSender", () => {
     });
 
     for (const kind of ["ack", "close", "expire"] as const) {
-      await sender.send(device, event({ kind, relayContent: "full" }));
+      await sender.send(device, event({ kind, relayContent: "full", ringUntil: null }));
     }
 
     for (const [index, kind] of ["ack", "close", "expire"].entries()) {
@@ -155,7 +157,7 @@ describe("FcmSender", () => {
 
     expect(await sender.send(device, event())).toEqual({ status: 400, stale: false });
     now = 4_500;
-    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false }));
+    await sender.send(device, event({ kind: "p4", incidentId: null, messageId: "m_4", priority: 4, critical: false, ringUntil: null }));
 
     expect(tokenExchanges).toBe(1);
     await expect(requests[0].json()).resolves.toEqual({
@@ -167,6 +169,7 @@ describe("FcmSender", () => {
           server: "https://alerts.example.com",
           kind: "open",
           priority: "5",
+          ring_until: "1060",
         },
       },
     });

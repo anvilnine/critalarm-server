@@ -13,6 +13,7 @@ function event(kind: DeliveryEvent["kind"]): DeliveryEvent {
     messageId: "m_1",
     priority: 5,
     maxRingS: 60,
+  ringUntil: 1_060,
     server: "https://alerts.example.com",
     title: "Database",
     body: "db01 is down",

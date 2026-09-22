@@ -98,6 +98,8 @@ function fcmPayload(device: PushDevice, event: DeliveryEvent): Record<string, un
         server: event.server,
         kind: event.kind,
         ...(state ? {} : { priority: String(event.priority) }),
+        // Epoch seconds as a string, because every FCM data value is a string.
+        ...(event.ringUntil === null ? {} : { ring_until: String(event.ringUntil) }),
         ...(!state && event.relayContent === "full" ? { title: event.title, body: event.body } : {}),
       },
     },

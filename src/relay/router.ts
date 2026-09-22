@@ -46,7 +46,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
       }
       if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     }
-    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
+    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
     let delivered = 0;
     for (const account of accounts) {
       const result = await dispatch({ ...event, accountId: account.account_id });
