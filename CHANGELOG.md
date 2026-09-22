@@ -3,6 +3,33 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.16.0 - 2026-09-22
+
+### Added
+
+- `ack`, `close` and `expire` as FCM data-only push kinds (§5.2) and as relay
+  `kind` values (§4.1). Android devices hear the state change and stop ringing.
+  iOS still gets it through the Live Activity update only.
+- `ring_until` on every alarm push (§5.1, §5.2, §4.1). Epoch seconds,
+  `opened_at + max_ring_s`, moved by a reopen. The phone may re-arm a silenced
+  alarm locally until then and no later.
+- `since` on `GET /v1/incidents` (§3.2). Unix timestamp, exclusive, on
+  `opened_at`.
+
+### Changed
+
+- `history_days` is a retention window (§4.2). A `relay` or `hosted` server
+  deletes closed and expired incidents, and messages with no incident, older
+  than the account's window, at least once an hour, and never returns them
+  from `GET /v1/incidents` or `GET /{topic}/json`. Open and acked incidents
+  are never deleted. A self-hosted server is unchanged: no tier, no deletion.
+
+### Removed
+
+- `history_incidents` from the caps object (§4.2). Free history is 7 days,
+  with no count limit. A client that still reads the field treats its absence
+  as no limit.
+
 ## 1.15.0 - 2026-09-20
 
 ### Added
