@@ -47,12 +47,12 @@ describe("migration 15", () => {
   // Version 16, the topic token names, and version 17, the per-device APNs
   // environment, both landed after this one, so the list is two longer than it
   // was.
-  it("the list is seventeen long", () => {
-    expect(migrationCount).toBe(17);
+  it("the list is eighteen long", () => {
+    expect(migrationCount).toBe(18);
     const db = openDatabase(":memory:");
     databases.push(db);
     migrate(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 17 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 18 });
   });
 
   it("carries every row across the rebuild with the same user_id and account_id", () => {
@@ -140,6 +140,6 @@ describe("migration 15", () => {
     migrate(db, 14);
     migrate(db);
     expect(identityRows(db)).toEqual([]);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 17 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 18 });
   });
 });
