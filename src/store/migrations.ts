@@ -336,11 +336,6 @@ const migrations: Migration[] = [
     ALTER TABLE incidents ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
     UPDATE incidents SET updated_at = COALESCE(closed_at, acked_at, last_message_at, opened_at);
     CREATE INDEX incidents_updated_at ON incidents(updated_at);
-    CREATE TRIGGER incidents_updated_at_insert_default AFTER INSERT ON incidents
-      WHEN NEW.updated_at = 0
-      BEGIN
-        UPDATE incidents SET updated_at = COALESCE(NEW.closed_at, NEW.acked_at, NEW.last_message_at, NEW.opened_at) WHERE id = NEW.id;
-      END;
   `,
 ];
 

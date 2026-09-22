@@ -28,11 +28,11 @@ function columnsOf(db: ReturnType<typeof openDatabase>, table: string) {
 }
 
 describe("migration 17", () => {
-  it("is at least the seventeenth migration", () => {
+  it("is at least the eighteenth migration", () => {
     const db = openDatabase(":memory:");
     databases.push(db);
     migrate(db);
-    expect(migrationCount).toBeGreaterThanOrEqual(17);
+    expect(migrationCount).toBeGreaterThanOrEqual(18);
     expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: migrationCount });
   });
 
