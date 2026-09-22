@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.15.0
-**Status:** draft, 2026-09-20. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.16.0
+**Status:** draft, 2026-09-22. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.16.0** is about what happens after the alarm rings and how long the server keeps what it rang about. Four changes. First, the Android push learns the three state kinds `ack`, `close` and `expire` (§4.1, §5.2): until now only the iOS Live Activity heard them, so a second Android phone on the same account rang on until somebody touched it. Second, every alarm push carries `ring_until` (§5.1, §5.2), the epoch second after which the phone must not ring for that incident on its own; the app needs it to re-arm a silenced alarm locally without a network call. Third, `GET /v1/incidents` accepts `since` (§3.2), so a client that keeps its own copy can ask for what is new. Fourth, `history_days` stops being a display hint and becomes retention (§4.2): a hosted or relay server deletes incidents and messages older than the account's window and never returns them, and `history_incidents` goes away. A self-hosted server is not sent a tier and deletes nothing, as before.
 
 **1.15.0** gives every topic token a name (§3.1). A token was only ever identified by its `token_id`, so a client listing a topic's tokens had nothing to show but `tok_` strings, which say nothing about what the token is for and read close enough to a `tk_` value that people try to publish with one. `POST /v1/topics` takes `token_name`, `POST /v1/topics/{name}/tokens` takes `name`, the listing returns `name`, and `PATCH /v1/topics/{name}/tokens/{token_id}` renames one. All of it is optional on the way in: a request that omits a name gets a server-assigned `Token N`, so every existing client keeps working untouched and every token has a name to show.
 
@@ -183,6 +185,8 @@ Returns newline-delimited JSON, one message object per line (shape as §1.6), ol
 
 The app uses this for priority 1 to 3 history and for filling gaps after reconnect.
 
+**On a `relay` or `hosted` server this route never returns a message older than the account's `history_days` (§4.2).** `since=all` means everything inside that window. A `selfhosted` server has no window and returns whatever it still holds.
+
 **Two credentials reach this route.** A `tk_` publish token reaches the one topic it was issued for, which is what an alerting source holds. A management credential (§3, `ad_` in `selfhosted`, `dv_` in `relay` and `hosted`) reaches every topic its owner can already see through `GET /v1/topics`, and reaches nothing else. The app holds a management credential and never holds a `tk_`, because a topic token is shown once on creation and then goes out to a monitoring tool. Without this, the app cannot read its own low-priority history.
 
 Scoping is the same as §3. A management credential that does not own the topic answers `404`, never `403`, so it cannot be used to probe which topic names exist. An unknown or out of scope token answers `401`.
@@ -278,7 +282,7 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 ### 3.2 Incidents
 
 ```
-GET  /v1/incidents[?limit=20][&state=open|acked|closed|expired][&topic=prod]
+GET  /v1/incidents[?limit=20][&since=<unix ts>][&state=open|acked|closed|expired][&topic=prod]
 → 200 [{ "id":"inc_9a8b7c", "topic":"prod", "state":"open",
           "opened_at":..., "acked_at":null, "closed_at":null, "last_message_at":...,
           "messages":[ { ...message object } ] }]
@@ -302,8 +306,17 @@ you get 200. Below 1, or anything that is not a whole number, answers
 
 Newest first, by `opened_at`. There is no paging in v1, so 200 is the most incidents one call can
 return, and a client that wants a longer history cannot reach past it yet. Send `limit` explicitly
-on every call. `caps.history_incidents` is what the tier allows a client to *show*; it is not sent
-to the server and does not change what this endpoint returns.
+on every call.
+
+**`since` is a unix timestamp in seconds, exclusive, on `opened_at`.** Only incidents that opened
+after that second are returned. It combines with `state`, `topic` and `limit`. Anything that is
+not a whole number answers `400 {"error":"invalid request"}`. This is the form a client uses when
+it keeps its own copy: send the newest `opened_at` it holds and merge what comes back. Unlike the
+poll route (§2), no message id, duration or `all` form is accepted here.
+
+**On a `relay` or `hosted` server this route never returns an incident older than the account's
+`history_days` (§4.2).** The server deletes such rows on a schedule and hides them in between. A
+`selfhosted` server has no window.
 
 
 State machine:
@@ -500,7 +513,9 @@ Authorization: Bearer rk_...                 // relay key. issued anonymously on
   "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
   "message_id": "m_7f3k2p9q",
   "priority": 5,
-  "kind": "open" | "repeat" | "reopen" | "p4" | "p5",   // p5: priority 5 on a topic whose switch is off
+  "kind": "open" | "repeat" | "reopen" | "p4" | "p5"    // p5: priority 5 on a topic whose switch is off
+        | "ack" | "close" | "expire",                    // state changes, never ring (§5.2)
+  "ring_until": 1757464200,                  // epoch seconds, opened_at + max_ring_s; null on p4 and the state kinds
   "title": "...",                            // only when relay_content: full
   "body": "..."                              // only when relay_content: full
 }
@@ -598,7 +613,6 @@ The app shows this as "N of M topics used", where N is the count of the account'
 | `devices` | 5 | 5 | 5 |
 | `critical_topics` | 2 | `null` | `null` |
 | `p4_daily` | 50 | 1000 | 1000 |
-| `history_incidents` | 20 | `null` | `null` |
 | `history_days` | 7 | 90 | 90 |
 
 `null` means no limit. A client that does not understand `null` must treat it as no limit, never as zero.
@@ -609,7 +623,7 @@ The app shows this as "N of M topics used", where N is the count of the account'
 
 These are launch guesses, set by gut and adjusted from relay metrics after 30 days. One rule is not a guess and never changes: **no tier caps the alarm.** There is no cap on incidents opened, on repeats, or on how long a critical alarm rings. Plans cap the things a team needs, not the thing one person came for.
 
-**`history_incidents` and `history_days` are display caps, enforced by the app.** The relay returns them; the app trims the list it shows. A self-hosted server keeps whatever it keeps, is never sent a tier, and never deletes anything because of a cap. The relay is the only place a plan exists, and the app mirrors it for the UI.
+**`history_days` is a retention window, not a display hint.** On a `relay` or `hosted` server, incidents and messages older than the account's window are deleted on a schedule (at least once an hour) and are never returned by `GET /v1/incidents` (§3.2) or `GET /{topic}/json` (§2) in the meantime. An incident in state `open` or `acked` is never deleted, whatever its age, and neither are its messages; the window applies to `closed` and `expired` incidents and to messages with no incident. When a plan lapses the window shrinks to the free value and the next run prunes to it. The app shows the same window on the free tier and shows everything it holds on a paid tier: the phone keeps its own copy, so an upgrade reveals rows the server may already have deleted. `history_incidents` was removed in 1.16.0; a client that still reads it must treat its absence as no limit. A self-hosted server keeps whatever it keeps, is never sent a tier, and never deletes anything because of a cap.
 
 **Ring until acked has no cap field.** The app offers the "no limit" option when `tier != "free"` and disables it otherwise. The ring ceiling itself is the server's `max_ring_s` config, which the account holder owns.
 
@@ -792,9 +806,12 @@ payload (relay_content: none):
   },
   "incident_id": "inc_9a8b7c",
   "server": "https://alerts.example.com",
-  "kind": "open"
+  "kind": "open",
+  "ring_until": 1757464200
 }
 ```
+
+**`ring_until` is the last second the phone may ring for this incident on its own.** It is `opened_at + max_ring_s` in epoch seconds, and a `reopen` moves it to the new `opened_at`. It is on `open`, `repeat`, `reopen` and `p5`. A phone that silences an alarm without acknowledging it re-arms locally until this second and no later; after it, only a fresh push from the server may ring. Server time; a client allows a small margin and stops at whichever comes first of `ring_until` and an `expire`.
 
 **iOS alerts are time-sensitive, never critical.** Apple turned the Critical Alerts entitlement down, and APNs rejects a critical payload from an app that does not hold it. So `"interruption-level"` is always `"time-sensitive"`, and the sound is the plain string `"alarm.caf"` rather than a critical sound object. When the sound is attached is unchanged: a priority-5 message on a topic whose `critical` switch is on, opening or joining an incident. The switch still decides that, and still decides whether Android rings through with a full-screen intent. Only the shape of the iOS payload changed.
 
@@ -816,6 +833,7 @@ Category `INCIDENT` registers one action: `ACK` ("I'm up"), which calls `POST /v
       "server": "https://alerts.example.com",
       "kind": "open",
       "priority": "5",
+      "ring_until": "1757464200",           // epoch seconds, as a string like every FCM data value
       "title": "...",                       // only when relay_content: full
       "body": "..."                         // only when relay_content: full
     }
@@ -825,11 +843,14 @@ Category `INCIDENT` registers one action: `ACK` ("I'm up"), which calls `POST /v
 
 Data-only. The app builds the full-screen alarm notification itself.
 
+**State kinds reach Android too.** When an incident is acknowledged, closed or expires, the server sends a data-only push with `kind` set to `ack`, `close` or `expire`, the same `incident_id` and `server`, no `priority`, no `title`, no `body`, `ring_until` absent, `collapse_key` the incident id and a `ttl` of 60 seconds. The app stops any ringing for that incident, cancels any local re-arm, and updates or removes its card. These pushes never ring and never post a new notification. They exist because an incident is handled on whichever device the user picks up, and every other device has to hear that. iOS gets the same information through the Live Activity update (§5.3), never as an alarm push.
+
 ### 5.3 Live Activity (iOS)
 
 Live Activity pushes go to APNs on the Live Activity topic, which is the bundle
 id with `.push-type.liveactivity` on the end. They are a second push, sent next
-to the alarm push in §5.1, never instead of it. Android devices get none of this.
+to the alarm push in §5.1, never instead of it. Android devices get none of this;
+they hear state changes as the data-only kinds in §5.2.
 
 **Start.** Sent when an incident opens, to the device's `la_start` token.
 
