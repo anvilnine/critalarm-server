@@ -18,6 +18,10 @@ binary's. The binary's version is in `package.json`.
   push for that change reached it. The retention window still hides rows by
   `opened_at`.
 
+### Server 0.3.0
+
+The code side of 1.17.0. Incidents carry `updated_at`, bumped on open, every new message, ack, close, expire and reopen. `GET /v1/incidents?since=` compares against it, so a client that holds an incident as open now hears that it was acked or closed on its next list call. The retention window still hides rows by `opened_at`.
+
 ## 1.16.0 - 2026-09-22
 
 ### Added

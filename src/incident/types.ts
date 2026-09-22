@@ -75,6 +75,7 @@ export interface IncidentRecord {
   ackedAt: number | null;
   closedAt: number | null;
   lastMessageAt: number;
+  updatedAt: number;
 }
 
 export interface IncidentWithMessages extends IncidentRecord {
@@ -86,9 +87,8 @@ export interface IncidentFilter {
   state?: IncidentState;
   topic?: string;
   limit?: number;
-  // api.md §3.2. A unix timestamp in seconds, exclusive, on opened_at. The
-  // router also puts the retention window here on a relay or hosted server
-  // (§4.2): both are the same "nothing opened at or before this second" cut,
-  // so the later of the two wins.
+  // api.md §3.2. A unix timestamp in seconds, exclusive, on updated_at.
   since?: number;
+  // api.md §4.2. Oldest opened_at a relay or hosted server still shows.
+  openedAfter?: number;
 }
