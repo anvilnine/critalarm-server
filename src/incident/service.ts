@@ -236,6 +236,10 @@ export class IncidentService {
       clauses.push("t.name = ?");
       parameters.push(filter.topic);
     }
+    if (filter.since !== undefined) {
+      clauses.push("i.opened_at > ?");
+      parameters.push(filter.since);
+    }
     const limit = filter.limit ?? DEFAULT_INCIDENT_LIMIT;
     parameters.push(limit);
     const rows = this.db
