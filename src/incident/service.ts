@@ -178,6 +178,7 @@ export class IncidentService {
             incident.id,
             messageRow,
             existing === undefined ? input.maxRingS : existing.max_ring_s,
+            existing === undefined ? now + input.maxRingS : existing.opened_at + existing.max_ring_s,
             existing?.state !== "acked",
             ...(input.relayContent === "full" ? ["full" as const] : []),
           ),
@@ -301,7 +302,7 @@ export class IncidentService {
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(timer.id);
       this.insertTimer(timer.id, "repeat", now + timer.repeat_interval_s);
       this.insertTimer(timer.id, "expire", now + current.max_ring_s);
-      return this.timerEvent("reopen", timer);
+      return this.timerEvent("reopen", timer, now);
     }
     if (current.state !== "open") {
       this.db.prepare("DELETE FROM timers WHERE id = ?").run(timer.timer_id);
@@ -311,9 +312,16 @@ export class IncidentService {
     return this.timerEvent("repeat", timer);
   }
 
-  // ack, close and expire carry no new message. They exist so the push layer
-  // can update or end a running Live Activity (api.md §5.3). They never ring.
-  private timerEvent(kind: "repeat" | "reopen" | "ack" | "close" | "expire", incident: ScopedIncidentRow): DeliveryEvent {
+  // ack, close and expire carry no new message. They tell the other devices the
+  // incident was handled: Android hears them directly, iOS through the Live
+  // Activity (api.md §5.2, §5.3). They never ring, so they carry no ring_until.
+  // openedAt is the second the ringing window starts from, which a reopen moves
+  // past the value still on the row the caller read.
+  private timerEvent(
+    kind: "repeat" | "reopen" | "ack" | "close" | "expire",
+    incident: ScopedIncidentRow,
+    openedAt: number = incident.opened_at,
+  ): DeliveryEvent {
     const message = this.db
       .prepare(
         "SELECT id, topic_id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE incident_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
@@ -327,6 +335,7 @@ export class IncidentService {
       incident.id,
       message ?? { id: "", title: "", body: "" },
       incident.incident_max_ring_s,
+      kind === "repeat" || kind === "reopen" ? openedAt + incident.incident_max_ring_s : null,
       incident.critical === 1,
       ...(incident.relay_content === "full" ? ["full" as const] : []),
     );
@@ -340,6 +349,7 @@ export class IncidentService {
     incidentId: string,
     message: Pick<MessageRow, "id" | "title" | "body">,
     maxRingS: number,
+    ringUntil: number | null,
     critical: boolean,
     relayContent?: "none" | "full",
   ): DeliveryEvent {
@@ -351,6 +361,7 @@ export class IncidentService {
       messageId: message.id,
       priority: 5,
       maxRingS,
+      ringUntil,
       server,
       title: message.title,
       body: message.body,

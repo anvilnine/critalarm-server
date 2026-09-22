@@ -111,6 +111,7 @@ describe("due incident timers", () => {
         title: "Database",
         body: "db01 is down",
         critical: false,
+        ringUntil: 1_100,
       },
     ]);
     expect(db.prepare("SELECT kind, fire_at FROM timers ORDER BY kind").all()).toEqual([
