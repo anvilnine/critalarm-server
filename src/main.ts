@@ -5,6 +5,7 @@ import { createApp } from "./index.js";
 import { ensureSelfHostedIdentity } from "./admin/credentials.js";
 import { IncidentService } from "./incident/service.js";
 import { startTimerScanner } from "./incident/scanner.js";
+import { startHistoryPrune } from "./retention/prune.js";
 import { openDatabase } from "./store/database.js";
 import { migrate } from "./store/migrations.js";
 import type { DeliveryEvent, IdGenerator } from "./incident/types.js";
@@ -60,6 +61,10 @@ const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reco
 
 await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);
+// api.md §4.2. Retention, on its own slower timer: the window moves by a day,
+// so once an hour is enough. On a self-hosted server this starts nothing, and
+// an unset mode is read as self-hosted so nothing is ever deleted by accident.
+const stopPrune = startHistoryPrune(db, clock, config.mode ?? "selfhosted");
 // One line per request, off unless asked for. Proving what the server did
 // during device testing meant reading the SQLite file, because nothing was
 // logged at all. Method, path, status and duration only: no tokens, no
@@ -75,6 +80,6 @@ const handler: typeof app.fetch = logRequests
     }
   : app.fetch;
 serve({ fetch: handler, port: config.port });
-const shutdown = () => { stop(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
+const shutdown = () => { stop(); stopPrune(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);

@@ -13,7 +13,6 @@ export interface Caps {
   devices: number;
   critical_topics: number | null;
   p4_daily: number;
-  history_incidents: number | null;
   history_days: number;
 }
 

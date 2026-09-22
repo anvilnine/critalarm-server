@@ -6,6 +6,7 @@ import { ownedTopic } from "../v1/topics.js";
 import { authenticateTopic } from "./auth.js";
 import { ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
 import { PublishService } from "./service.js";
+import { historyCutoff } from "../retention/window.js";
 import type { IngressDependencies } from "./types.js";
 
 const validTopic = /^[-_A-Za-z0-9]{1,64}$/;
@@ -100,25 +101,33 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
     const name = c.req.param("topic");
     if (!validTopic.test(name)) return c.json(numericError(40001, 400, "invalid topic name"), 400);
     const account = authenticateManagement(deps.db, c.req.header("authorization"), deps.mode ?? "hosted");
-    const topic = account === null
-      ? authenticateTopic(deps.db, c.req.raw, name)
-      : ownedTopic(deps.db, account.accountId, name);
+    // A tk_ names the topic and, through it, the account that owns it. A
+    // management credential names the account first and the topic second.
+    const tokenTopic = account === null ? authenticateTopic(deps.db, c.req.raw, name) : null;
+    const topic = account === null ? tokenTopic : ownedTopic(deps.db, account.accountId, name);
     if (topic === undefined) return c.json({ error: "not found" }, 404);
     if (topic === null) return c.json(numericError(40101, 401, "unauthorized"), 401);
+    const ownerAccountId = account === null ? tokenTopic!.accountId : account.accountId;
     if (c.req.query("poll") !== "1") return c.json({ error: "streaming not supported" }, 501);
 
     const since = pollSince(c.req.query("since"), deps.clock.now());
+    // api.md §2 and §4.2. On a relay or hosted server the account's retention
+    // window bounds every form of since, including all. A self-hosted server
+    // adds nothing here and answers with whatever it still holds.
+    const cutoff = historyCutoff(deps.db, deps.clock, deps.mode ?? "hosted", ownerAccountId);
+    const window = cutoff === undefined ? "" : " AND created_at > ?";
+    const windowParameters = cutoff === undefined ? [] : [cutoff];
     let rows: PollMessageRow[];
     if (since === "all") {
-      rows = deps.db.prepare("SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? ORDER BY created_at ASC, rowid ASC").all(topic.id) as PollMessageRow[];
+      rows = deps.db.prepare(`SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ?${window} ORDER BY created_at ASC, rowid ASC`).all(topic.id, ...windowParameters) as PollMessageRow[];
     } else if ("messageId" in since) {
       const boundary = deps.db.prepare("SELECT created_at, rowid AS sequence FROM messages WHERE topic_id = ? AND id = ?").get(topic.id, since.messageId) as { created_at: number; sequence: number } | undefined;
       rows = boundary === undefined
         ? []
-        : deps.db.prepare("SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND (created_at > ? OR (created_at = ? AND rowid > ?)) ORDER BY created_at ASC, rowid ASC").all(topic.id, boundary.created_at, boundary.created_at, boundary.sequence) as PollMessageRow[];
+        : deps.db.prepare(`SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND (created_at > ? OR (created_at = ? AND rowid > ?))${window} ORDER BY created_at ASC, rowid ASC`).all(topic.id, boundary.created_at, boundary.created_at, boundary.sequence, ...windowParameters) as PollMessageRow[];
     } else {
       const operator = since.inclusive ? ">=" : ">";
-      rows = deps.db.prepare(`SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND created_at ${operator} ? ORDER BY created_at ASC, rowid ASC`).all(topic.id, since.timestamp) as PollMessageRow[];
+      rows = deps.db.prepare(`SELECT rowid AS sequence, id, incident_id, title, body, priority, tags, click, markdown, created_at FROM messages WHERE topic_id = ? AND created_at ${operator} ?${window} ORDER BY created_at ASC, rowid ASC`).all(topic.id, since.timestamp, ...windowParameters) as PollMessageRow[];
     }
     const body = rows.map((message) => JSON.stringify({
       id: message.id,
