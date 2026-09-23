@@ -3,6 +3,25 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.17.0 - 2026-09-23
+
+### Added
+
+- `updated_at` on every incident object (§3.2). Set on open, moved forward on
+  every new message, ack, close, expire and reopen.
+
+### Changed
+
+- `since` on `GET /v1/incidents` compares against `updated_at`, not
+  `opened_at` (§3.2). A client that holds an incident as open now hears that
+  it was acked, closed or expired on its next list call, whether or not the
+  push for that change reached it. The retention window still hides rows by
+  `opened_at`.
+
+### Server 0.3.0
+
+The code side of 1.17.0. Incidents carry `updated_at`, bumped on open, every new message, ack, close, expire and reopen. `GET /v1/incidents?since=` compares against it, so a client that holds an incident as open now hears that it was acked or closed on its next list call. The retention window still hides rows by `opened_at`.
+
 ## 1.16.0 - 2026-09-22
 
 ### Added

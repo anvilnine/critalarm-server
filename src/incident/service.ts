@@ -23,6 +23,7 @@ type IncidentRow = {
   acked_at: number | null;
   closed_at: number | null;
   last_message_at: number;
+  updated_at: number;
   max_ring_s: number;
 };
 
@@ -74,6 +75,7 @@ function incidentRecord(row: IncidentRow): IncidentRecord {
     ackedAt: row.acked_at,
     closedAt: row.closed_at,
     lastMessageAt: row.last_message_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -108,10 +110,10 @@ export class IncidentService {
       const now = this.clock.now();
       const existing = this.db
         .prepare(
-          "SELECT id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, max_ring_s FROM incidents WHERE topic_id = ? AND state IN ('open', 'acked')",
+          "SELECT id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, updated_at, max_ring_s FROM incidents WHERE topic_id = ? AND state IN ('open', 'acked')",
         )
         .get(input.topicId) as IncidentRow | undefined;
-      const incident = existing ?? {
+       const incident = existing ?? {
         id: this.ids.incident(),
         topic_id: input.topicId,
         state: "open" as const,
@@ -119,22 +121,24 @@ export class IncidentService {
         acked_at: null,
         closed_at: null,
         last_message_at: now,
+        updated_at: now,
         max_ring_s: input.maxRingS,
       };
 
       if (existing === undefined) {
         this.db
           .prepare(
-            "INSERT INTO incidents (id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, max_ring_s) VALUES (?, ?, 'open', ?, NULL, NULL, ?, ?)",
+            "INSERT INTO incidents (id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, updated_at, max_ring_s) VALUES (?, ?, 'open', ?, NULL, NULL, ?, ?, ?)",
           )
-          .run(incident.id, input.topicId, now, now, input.maxRingS);
+          .run(incident.id, input.topicId, now, now, now, input.maxRingS);
         this.insertTimer(incident.id, "repeat", now + input.repeatIntervalS);
         this.insertTimer(incident.id, "expire", now + input.maxRingS);
       } else {
         this.db
-          .prepare("UPDATE incidents SET last_message_at = ? WHERE id = ?")
-          .run(now, incident.id);
+          .prepare("UPDATE incidents SET last_message_at = ?, updated_at = ? WHERE id = ?")
+          .run(now, now, incident.id);
         incident.last_message_at = now;
+        incident.updated_at = now;
       }
 
       const messageRow: MessageRow = {
@@ -194,7 +198,7 @@ export class IncidentService {
         throw new IncidentConflictError();
       }
       const now = this.clock.now();
-      this.db.prepare("UPDATE incidents SET state = 'acked', acked_at = ? WHERE id = ?").run(now, incidentId);
+      this.db.prepare("UPDATE incidents SET state = 'acked', acked_at = ?, updated_at = ? WHERE id = ?").run(now, now, incidentId);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(incidentId);
       this.insertTimer(incidentId, "desk", now + incident.desk_timer_s);
       return {
@@ -211,7 +215,7 @@ export class IncidentService {
         throw new IncidentConflictError();
       }
       const now = this.clock.now();
-      this.db.prepare("UPDATE incidents SET state = 'closed', closed_at = ? WHERE id = ?").run(now, incidentId);
+      this.db.prepare("UPDATE incidents SET state = 'closed', closed_at = ?, updated_at = ? WHERE id = ?").run(now, now, incidentId);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(incidentId);
       return {
         incident: { ...incidentRecord(incident), state: "closed" as const, closedAt: now },
@@ -237,14 +241,18 @@ export class IncidentService {
       parameters.push(filter.topic);
     }
     if (filter.since !== undefined) {
-      clauses.push("i.opened_at > ?");
+      clauses.push("i.updated_at > ?");
       parameters.push(filter.since);
+    }
+    if (filter.openedAfter !== undefined) {
+      clauses.push("i.opened_at > ?");
+      parameters.push(filter.openedAfter);
     }
     const limit = filter.limit ?? DEFAULT_INCIDENT_LIMIT;
     parameters.push(limit);
     const rows = this.db
       .prepare(
-        `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
+        `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at, i.updated_at,
           t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content,
           i.max_ring_s AS incident_max_ring_s
          FROM incidents i JOIN topics t ON t.id = i.topic_id
@@ -258,7 +266,7 @@ export class IncidentService {
   scanDue(): DeliveryEvent[] {
     const due = this.db
       .prepare(
-        `SELECT tm.id AS timer_id, tm.kind, tm.fire_at, i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
+        `SELECT tm.id AS timer_id, tm.kind, tm.fire_at, i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at, i.updated_at,
           i.max_ring_s AS incident_max_ring_s,
           t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content
          FROM timers tm JOIN incidents i ON i.id = tm.incident_id JOIN topics t ON t.id = i.topic_id
@@ -280,7 +288,7 @@ export class IncidentService {
   private processTimer(timer: ScopedIncidentRow & { timer_id: string; kind: "repeat" | "expire" | "desk" }): DeliveryEvent | null {
     const current = this.db
       .prepare(
-        "SELECT id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, max_ring_s FROM incidents WHERE id = ?",
+        "SELECT id, topic_id, state, opened_at, acked_at, closed_at, last_message_at, updated_at, max_ring_s FROM incidents WHERE id = ?",
       )
       .get(timer.id) as IncidentRow | undefined;
     if (current === undefined) {
@@ -292,7 +300,7 @@ export class IncidentService {
         this.db.prepare("DELETE FROM timers WHERE id = ?").run(timer.timer_id);
         return null;
       }
-      this.db.prepare("UPDATE incidents SET state = 'expired', closed_at = ? WHERE id = ?").run(now, timer.id);
+      this.db.prepare("UPDATE incidents SET state = 'expired', closed_at = ?, updated_at = ? WHERE id = ?").run(now, now, timer.id);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(timer.id);
       console.log(JSON.stringify({ event: "incident_expired", incident_id: timer.id }));
       return this.timerEvent("expire", timer);
@@ -302,7 +310,7 @@ export class IncidentService {
         this.db.prepare("DELETE FROM timers WHERE id = ?").run(timer.timer_id);
         return null;
       }
-      this.db.prepare("UPDATE incidents SET state = 'open', opened_at = ?, acked_at = NULL WHERE id = ?").run(now, timer.id);
+      this.db.prepare("UPDATE incidents SET state = 'open', opened_at = ?, acked_at = NULL, updated_at = ? WHERE id = ?").run(now, now, timer.id);
       this.db.prepare("DELETE FROM timers WHERE incident_id = ?").run(timer.id);
       this.insertTimer(timer.id, "repeat", now + timer.repeat_interval_s);
       this.insertTimer(timer.id, "expire", now + current.max_ring_s);
@@ -389,11 +397,11 @@ export class IncidentService {
   private scopedIncidentOrNull(accountId: string, incidentId: string): ScopedIncidentRow | null {
     const row = this.db
       .prepare(
-        `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at,
+        `SELECT i.id, i.topic_id, i.state, i.opened_at, i.acked_at, i.closed_at, i.last_message_at, i.updated_at,
           i.max_ring_s AS incident_max_ring_s,
           t.name AS topic, t.topic_hash, t.base_url, t.critical, t.repeat_interval_s, t.max_ring_s, t.desk_timer_s, t.relay_content
          FROM incidents i JOIN topics t ON t.id = i.topic_id
-         WHERE i.id = ? AND t.account_id = ?`,
+        WHERE i.id = ? AND t.account_id = ?`,
       )
       .get(incidentId, accountId) as ScopedIncidentRow | undefined;
     return row ?? null;

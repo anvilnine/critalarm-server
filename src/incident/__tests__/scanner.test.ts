@@ -48,7 +48,7 @@ describe("due incident timers", () => {
     clock.value = 1_040;
 
     expect(service.scanDue()).toEqual([expect.objectContaining({ kind: "reopen", incidentId: "inc_1", messageId: "m_1" })]);
-    expect(db.prepare("SELECT state, opened_at, acked_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "open", opened_at: 1_040, acked_at: null });
+    expect(db.prepare("SELECT state, opened_at, acked_at, updated_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "open", opened_at: 1_040, acked_at: null, updated_at: 1_040 });
   });
 
   it("restarts max-ring deadline from reopen time", () => {
@@ -127,7 +127,7 @@ describe("due incident timers", () => {
     clock.value = 1_060;
 
     expect(service.scanDue()).toEqual([expect.objectContaining({ kind: "expire", incidentId: "inc_1" })]);
-    expect(db.prepare("SELECT state, closed_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "expired", closed_at: 1_060 });
+    expect(db.prepare("SELECT state, closed_at, updated_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ state: "expired", closed_at: 1_060, updated_at: 1_060 });
     expect(db.prepare("SELECT * FROM timers").all()).toEqual([]);
   });
 
