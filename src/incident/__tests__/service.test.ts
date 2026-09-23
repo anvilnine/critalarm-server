@@ -96,7 +96,7 @@ describe("store migrations", () => {
       "INSERT INTO topics (id, account_id, name, base_url, topic_hash, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES ('top_1', 'acc_1', 'prod', 'https://alerts.example.com', 'hash', 30, 1800, 600, 'none', 1)",
     ).run();
     db.prepare(
-      "INSERT INTO incidents (id, topic_id, state, opened_at, last_message_at) VALUES ('inc_1', 'top_1', 'open', 1, 1)",
+      "INSERT INTO incidents (id, topic_id, state, opened_at, last_message_at, updated_at) VALUES ('inc_1', 'top_1', 'open', 1, 1, 1)",
     ).run();
 
     const topic = db
@@ -170,6 +170,7 @@ describe("IncidentService", () => {
 
     expect(result.incident).toMatchObject({ id: "inc_1", state: "open", lastMessageAt: 1_005 });
     expect(result.message).toMatchObject({ id: "m_2", incidentId: "inc_1" });
+    expect(db.prepare("SELECT updated_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ updated_at: 1_005 });
     expect(result.events.map((event) => event.kind)).toEqual(["p5"]);
     expect(db.prepare("SELECT kind, fire_at FROM timers ORDER BY kind").all()).toEqual([
       { kind: "expire", fire_at: 1_060 },
@@ -217,6 +218,7 @@ describe("IncidentService", () => {
 
     expect(acked.incident).toMatchObject({ state: "acked", ackedAt: 1_010, closedAt: null });
     expect(acked.events).toEqual([expect.objectContaining({ kind: "ack", incidentId: opened.incident.id })]);
+    expect(db.prepare("SELECT updated_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ updated_at: 1_010 });
     expect(db.prepare("SELECT kind, fire_at FROM timers").all()).toEqual([
       { kind: "desk", fire_at: 1_040 },
     ]);
@@ -241,6 +243,7 @@ describe("IncidentService", () => {
 
     expect(closed.incident).toMatchObject({ state: "closed", closedAt: 1_011 });
     expect(closed.events).toEqual([expect.objectContaining({ kind: "close", incidentId: opened.incident.id })]);
+    expect(db.prepare("SELECT updated_at FROM incidents WHERE id = 'inc_1'").get()).toEqual({ updated_at: 1_011 });
     expect(db.prepare("SELECT * FROM timers").all()).toEqual([]);
   });
 

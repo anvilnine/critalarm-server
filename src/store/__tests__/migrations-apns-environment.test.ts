@@ -28,12 +28,12 @@ function columnsOf(db: ReturnType<typeof openDatabase>, table: string) {
 }
 
 describe("migration 17", () => {
-  it("is the seventeenth and last migration", () => {
+  it("is at least the eighteenth migration", () => {
     const db = openDatabase(":memory:");
     databases.push(db);
     migrate(db);
-    expect(migrationCount).toBe(17);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 17 });
+    expect(migrationCount).toBeGreaterThanOrEqual(18);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: migrationCount });
   });
 
   it("adds apns_environment to devices and nowhere else", () => {

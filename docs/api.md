@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.16.0
-**Status:** draft, 2026-09-22. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+**Version:** 1.17.0
+**Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.17.0** fixes what `since` on `GET /v1/incidents` means. 1.16.0 compared it against `opened_at`, so a client that held an incident as open never heard that it was acked, closed or expired unless the push for that change reached it. Every incident now carries `updated_at` (§3.2), the server bumps it on open, every new message, ack, close, expire and reopen, and `since` compares against it. A client keeps the newest `updated_at` it holds and merges whatever comes back. The retention window (§4.2) still hides rows by `opened_at`.
 
 **1.16.0** is about what happens after the alarm rings and how long the server keeps what it rang about. Four changes. First, the Android push learns the three state kinds `ack`, `close` and `expire` (§4.1, §5.2): until now only the iOS Live Activity heard them, so a second Android phone on the same account rang on until somebody touched it. Second, every alarm push carries `ring_until` (§5.1, §5.2), the epoch second after which the phone must not ring for that incident on its own; the app needs it to re-arm a silenced alarm locally without a network call. Third, `GET /v1/incidents` accepts `since` (§3.2), so a client that keeps its own copy can ask for what is new. Fourth, `history_days` stops being a display hint and becomes retention (§4.2): a hosted or relay server deletes incidents and messages older than the account's window and never returns them, and `history_incidents` goes away. A self-hosted server is not sent a tier and deletes nothing, as before.
 
@@ -285,7 +287,7 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 GET  /v1/incidents[?limit=20][&since=<unix ts>][&state=open|acked|closed|expired][&topic=prod]
 → 200 [{ "id":"inc_9a8b7c", "topic":"prod", "state":"open",
           "opened_at":..., "acked_at":null, "closed_at":null, "last_message_at":...,
-          "messages":[ { ...message object } ] }]
+          "updated_at":..., "messages":[ { ...message object } ] }]
 
 GET  /v1/incidents/{id}
 → 200 { ...incident }                       // used by iOS NSE to fetch title/body in relay-content: none
@@ -308,10 +310,12 @@ Newest first, by `opened_at`. There is no paging in v1, so 200 is the most incid
 return, and a client that wants a longer history cannot reach past it yet. Send `limit` explicitly
 on every call.
 
-**`since` is a unix timestamp in seconds, exclusive, on `opened_at`.** Only incidents that opened
-after that second are returned. It combines with `state`, `topic` and `limit`. Anything that is
+**`since` is a unix timestamp in seconds, exclusive, on `updated_at`.** Only incidents that changed
+after that second are returned. `updated_at` is set when the incident opens and moves forward on
+every new message, ack, close, expire and reopen, so an incident the client already holds comes
+back when its state changes. It combines with `state`, `topic` and `limit`. Anything that is
 not a whole number answers `400 {"error":"invalid request"}`. This is the form a client uses when
-it keeps its own copy: send the newest `opened_at` it holds and merge what comes back. Unlike the
+it keeps its own copy: send the newest `updated_at` it holds and merge what comes back. Unlike the
 poll route (§2), no message id, duration or `all` form is accepted here.
 
 **On a `relay` or `hosted` server this route never returns an incident older than the account's
