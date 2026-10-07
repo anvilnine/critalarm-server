@@ -337,6 +337,58 @@ const migrations: Migration[] = [
     UPDATE incidents SET updated_at = COALESCE(closed_at, acked_at, last_message_at, opened_at);
     CREATE INDEX incidents_updated_at ON incidents(updated_at);
   `,
+  // api.md §4.2 and §4.3, packs. A pack is held beside the tier and stored the
+  // same way the tier is: per billing id, with the account's answer worked out
+  // on read.
+  //
+  // billing_packs is what one billing id holds. expires_at is epoch seconds, or
+  // NULL for no end date, and it is compared against the clock on every read,
+  // so nothing has to write again when time passes. The rows hang off the
+  // billing id, so a merge that repoints a billing id carries them along and
+  // an account delete takes them by cascade.
+  //
+  // account_pack_grants is a pack the operator gave an account directly. No
+  // route writes it.
+  //
+  // The three columns on account_billing_ids fence the store reads. read_seq is
+  // the number given to the last read that started for this id, applied_seq the
+  // number of the last read whose result was written, and checked_at the time
+  // of that write. A result is written only when its number is above
+  // applied_seq, so a read that finishes late cannot undo a newer one.
+  //
+  // billing_reads is the queue of reads that are due. It is a table because
+  // timers are database rows here, so a restart loses no trigger. It carries no
+  // foreign key: a read can be due for a customer id that has no billing row
+  // yet.
+  `
+    CREATE TABLE billing_packs (
+      app_user_id TEXT NOT NULL REFERENCES account_billing_ids(app_user_id) ON DELETE CASCADE,
+      pack TEXT NOT NULL,
+      expires_at INTEGER,
+      PRIMARY KEY (app_user_id, pack)
+    );
+
+    CREATE TABLE account_pack_grants (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      pack TEXT NOT NULL,
+      expires_at INTEGER,
+      reason TEXT NOT NULL,
+      granted_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, pack)
+    );
+
+    ALTER TABLE account_billing_ids ADD COLUMN checked_at INTEGER;
+    ALTER TABLE account_billing_ids ADD COLUMN read_seq INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE account_billing_ids ADD COLUMN applied_seq INTEGER NOT NULL DEFAULT 0;
+
+    CREATE TABLE billing_reads (
+      app_user_id TEXT PRIMARY KEY,
+      due_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      dirty INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX billing_reads_due ON billing_reads(due_at);
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
