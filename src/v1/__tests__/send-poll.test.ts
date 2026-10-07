@@ -87,3 +87,77 @@ it.each(["relay", "hosted"] as const)("%s hides other accounts' topics from poll
     expect((await app.request(`/v1/topics/${name}/send`, { method: "POST", headers: other, body: '{"message":"x"}' })).status).toBe(404);
   }
 });
+
+// A plan that ends changes the tier and nothing else. Topics that were critical
+// stay critical and keep ringing; the free cap only decides what can be switched
+// on from here.
+describe("a plan that has ended", () => {
+  async function overCap() {
+    const context = setup("hosted");
+    const { app, db, headers, dispatch } = context;
+    db.prepare("UPDATE accounts SET tier='hosted' WHERE id='a'").run();
+    for (const name of ["one", "two", "three"]) {
+      const made = await app.request("/v1/topics", { method: "POST", headers, body: JSON.stringify({ name, critical: true }) });
+      expect(made.status).toBe(201);
+    }
+    db.prepare("UPDATE accounts SET tier='free' WHERE id='a'").run();
+    dispatch.mockClear();
+    return context;
+  }
+
+  it("still rings a critical topic that is above the free cap", async () => {
+    const { app, headers, dispatch } = await overCap();
+
+    const sent = await app.request("/v1/topics/three/send", { method: "POST", headers, body: JSON.stringify({ message: "db01 is down", title: "Database", priority: 5 }) });
+
+    expect(sent.status).toBe(200);
+    expect((await sent.json() as { incident_id: string | null }).incident_id).toMatch(/^inc_/);
+    expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ priority: 5, critical: true })]);
+  });
+
+  it("refuses a new critical topic on the free tier", async () => {
+    const { app, headers } = await overCap();
+
+    const fourth = await app.request("/v1/topics", { method: "POST", headers, body: JSON.stringify({ name: "four", critical: true }) });
+
+    expect(fourth.status).toBe(429);
+    expect(await fourth.json()).toEqual({ error: "cap", cap: "critical_topics" });
+  });
+
+  it("refuses to switch on a topic that was not critical while above the cap", async () => {
+    const { app, headers } = await overCap();
+    expect((await app.request("/v1/topics", { method: "POST", headers, body: JSON.stringify({ name: "plain" }) })).status).toBe(201);
+
+    const on = await app.request("/v1/topics/plain", { method: "PATCH", headers, body: JSON.stringify({ critical: true }) });
+
+    expect(on.status).toBe(429);
+    expect(await on.json()).toEqual({ error: "cap", cap: "critical_topics" });
+  });
+
+  it("does not let an over-cap topic that was switched off be switched back on", async () => {
+    const { app, headers, db } = await overCap();
+
+    // Three on, cap of two: turning one off leaves two, which is still at the cap.
+    expect((await app.request("/v1/topics/three", { method: "PATCH", headers, body: JSON.stringify({ critical: false }) })).status).toBe(200);
+    const back = await app.request("/v1/topics/three", { method: "PATCH", headers, body: JSON.stringify({ critical: true }) });
+
+    expect(back.status).toBe(429);
+    expect(await back.json()).toEqual({ error: "cap", cap: "critical_topics" });
+    expect(db.prepare("SELECT name, critical FROM topics WHERE account_id='a' ORDER BY name").all()).toEqual([
+      { name: "one", critical: 1 },
+      { name: "three", critical: 0 },
+      { name: "two", critical: 1 },
+    ]);
+  });
+
+  it("lets a topic switch on again once the count is below the cap", async () => {
+    const { app, headers } = await overCap();
+
+    for (const name of ["two", "three"]) {
+      expect((await app.request(`/v1/topics/${name}`, { method: "PATCH", headers, body: JSON.stringify({ critical: false }) })).status).toBe(200);
+    }
+    const back = await app.request("/v1/topics/three", { method: "PATCH", headers, body: JSON.stringify({ critical: true }) });
+
+    expect(back.status).toBe(200);
+  });
+});
