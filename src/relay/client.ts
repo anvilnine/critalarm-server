@@ -12,10 +12,12 @@ export class RelayClient {
   }
 
   async forwardOne(event: DeliveryEvent): Promise<Response | undefined> {
-    // p5 rings locally, so the relay never hears it. The three state kinds do go
-    // over the wire: a device behind the relay has to hear that the incident was
-    // handled on another phone (api.md §4.1).
-    if (event.kind === "p5") return undefined;
+    // api.md §4.1. Every kind goes over the wire, p5 included, so a phone behind
+    // the relay hears about a message that joins a live incident. One p5 stays
+    // home: the one that joins an acknowledged incident, which the server marks
+    // not critical while it has an incident. The wire has no field for that
+    // state, so the relay could not tell it from a p5 that should ring.
+    if (event.kind === "p5" && event.incidentId !== null && !event.critical) return undefined;
     const key = await this.key();
     const payload: RelayPayload = { topic_hash: event.topicHash, incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind, ring_until: event.ringUntil };
     if (this.options.relayContent === "full") { payload.title = event.title; payload.body = event.body; }
