@@ -654,7 +654,7 @@ A pack belongs to the account, so every device on it holds the pack. Nothing in 
 
 **`POST /relay/v1/packs/refresh` reads the store inside the request.** An app calls it after a purchase or a restore, so nobody waits for a webhook. It reads three sets of customer ids: the caller's own `account_id`, every billing id already linked to that account, and the `account_id` of every account that was merged into it. Reading the account's own id is what links a first purchase that has produced no webhook yet. Limited to 6 requests per 60 seconds per account.
 
-**`confirmed` describes that read and nothing else.** It is `true` when every one of those ids was read successfully in this call. A customer the store has never seen is a successful read with nothing on it. It is `false` when any read failed, and on a relay that does not read the store (§4.3) it is always `false`. Either way `tier`, `caps` and `packs` are what the account holds when the call returns, from every source. So `confirmed` is not a statement about `packs`: an account can hold a pack by grant when the store lists none.
+**`confirmed` describes that read and nothing else.** It is `true` when every one of those ids was read successfully in this call. A customer the store has never seen is a successful read with nothing on it, unless the relay holds a paid tier or a pack for that id (§4.3). It is `false` when any read failed, and on a relay that does not read the store (§4.3) it is always `false`. Either way `tier`, `caps` and `packs` are what the account holds when the call returns, from every source. So `confirmed` is not a statement about `packs`: an account can hold a pack by grant when the store lists none.
 
 | `confirmed` | the pack is in `packs` | What a client may conclude |
 |---|---|---|
@@ -742,7 +742,7 @@ An account may hold more than one `app_user_id`, because a merge brings both sid
 
 A billing failure is not an expiry. RevenueCat keeps an entitlement on the list while a payment is being retried, and the relay keeps the tier and the packs for as long as it is listed. Crit Alarm is an alarm, and a card that failed on a Tuesday is not a reason to stop ringing.
 
-**When a read fails, nothing changes.** The tier, the packs and their timestamps stay as they were. The relay tries again after 1, 5, 15 and 60 minutes, then leaves it to the daily read. A failed read never lowers a tier and never removes a pack. A customer RevenueCat has never seen is a successful read with an empty list.
+**When a read fails, nothing changes.** The tier, the packs and their timestamps stay as they were. The relay tries again after 1, 5, 15 and 60 minutes, then leaves it to the daily read. A failed read never lowers a tier and never removes a pack. A customer RevenueCat has never seen is a successful read with an empty list, with one exception. When the relay holds a paid tier or a pack for that customer id and RevenueCat answers that it does not know the id, the read counts as failed: nothing changes and it is retried. A relay pointed at the wrong store project would otherwise read every paying customer as unknown and take every plan away.
 
 An entitlement the configuration does not name is logged. A read that contains one may still raise a tier or add a pack, and may not lower a tier or remove a pack.
 
