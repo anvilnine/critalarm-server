@@ -81,6 +81,9 @@ export interface Config {
   revenueCatPackEntitlements?: Record<string, PackId>;
   // Packs the configuration attaches to a tier. Empty unless set.
   packIncludes?: PackIncludes;
+  // api.md §4.5. False switches the weekly check scan off. Unset is on, and
+  // only a relay or a hosted server runs it at all.
+  weeklyChecks?: boolean;
   auth?: AuthConfig;
 }
 
@@ -269,6 +272,14 @@ function readsValue(value: string | undefined): ReadsSetting {
   return value;
 }
 
+// WEEKLY_CHECKS. Unset or empty is `on`. A value that is neither word stops
+// startup, so a typo is never read as either answer.
+function weeklyChecksValue(value: string | undefined): boolean {
+  if (value === undefined || value === "" || value === "on") return true;
+  if (value !== "off") throw configError("WEEKLY_CHECKS");
+  return false;
+}
+
 function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
@@ -400,6 +411,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const authSettings = authConfig(env, readFile);
   return {
     mode,
+    weeklyChecks: weeklyChecksValue(env.WEEKLY_CHECKS),
     revenueCatReads,
     revenueCatPackEntitlements,
     packIncludes,

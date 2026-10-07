@@ -14,6 +14,8 @@ import type { AuthHandler } from "./auth/better-auth.js";
 import type { IdentityResolver } from "./auth/identity.js";
 import type { TokenRevoker } from "./auth/revoke.js";
 import type { StoreReads } from "./tier/types.js";
+import { createCheckRouter } from "./check/router.js";
+import { CheckStore } from "./check/store.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -52,6 +54,9 @@ export function createApp(deps: AppDependencies): Hono {
     counters.add(LOCAL_KEY, "pushes_delivered", result?.delivered ?? 0);
     return result;
   };
+  // api.md §4.5. The weekly check routes sit beside the other device routes,
+  // so a self-hosted server does not carry them either.
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, clock: deps.clock, store: new CheckStore(deps.db, deps.clock, counters, deps.config.packIncludes ?? {}), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
     app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));
