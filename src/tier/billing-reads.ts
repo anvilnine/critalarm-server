@@ -178,6 +178,9 @@ export class BillingReads {
         if (dirty || flight.follow !== undefined) {
           const next = this.start(appUserId, flight.follow?.trigger ?? "webhook");
           flight.follow?.resolve(next);
+        } else {
+          // No read is out for this customer now, so no number is outstanding.
+          this.unlinked.delete(appUserId);
         }
         return outcome;
       });
