@@ -267,7 +267,8 @@ export class BillingReads {
       const accountId = resolveAccount({ db }, appUserId);
       if (row === undefined) {
         // No account, so nothing to hang a result on. And a customer with
-        // nothing live is not linked: an account that never bought gets no row.
+        // nothing live is not linked, so an account the store lists nothing for
+        // gets no row.
         if (accountId === null || (view.tier === "free" && view.packs.size === 0)) {
           if (accountId === null) report({ event: "billing_read_unresolved", app_user_id: appUserId, trigger });
           db.prepare("DELETE FROM billing_reads WHERE app_user_id = ? AND dirty = 0").run(appUserId);

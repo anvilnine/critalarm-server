@@ -234,11 +234,11 @@ describe("the webhook with reading switched on", () => {
     expect(billingRow(db, "acc_1")).toMatchObject({ entitled_tier: "hosted", applied_seq: 2 });
   });
 
-  it("links a customer who bought only a pack, on the first event that resolves", async () => {
+  it("links a customer whose only entitlement gives a pack, on the first event that resolves", async () => {
     const { db, listed, deliver } = setup();
     listed.set("acc_1", listing(entitlement("ent_pack")));
 
-    await deliver({ app_user_id: "acc_1", type: "NON_RENEWING_PURCHASE", entitlement_ids: ["ent_pack"] });
+    await deliver({ app_user_id: "acc_1", type: "INITIAL_PURCHASE", entitlement_ids: ["ent_pack"] });
 
     expect(billingRow(db, "acc_1")).toMatchObject({ account_id: "acc_1", entitled_tier: "free", applied_seq: 1 });
     expect(storedPacks(db)).toEqual(PACK);
