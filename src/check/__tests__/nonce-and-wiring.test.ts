@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, type Config } from "../../config.js";
 import type { ApnsTransport } from "../../push/apns.js";
+import { ApnsProviderToken } from "../../push/apns-token.js";
 import type { PushSender } from "../../push/types.js";
 import { loggedPath } from "../../request-log.js";
 import { LOCAL_KEY, type Stats } from "../../stats/counters.js";
@@ -289,6 +290,22 @@ describe("where the scan runs, and the setting that switches it off", () => {
     stop();
     expect(closed).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sends the check with the provider token it is handed, and signs none of its own", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const db = database();
+    const clock = new FakeClock();
+    const token = new ApnsProviderToken({ teamId: "team_1", keyId: "key_1", privateKey });
+    const held = token.get(clock.now());
+    const seen: string[] = [];
+    const checks = createChecks(withApns, { db, clock, fetch: async () => new Response(null), apnsToken: token, apnsTransport: () => ({ send: async (_path, headers) => { seen.push(headers.authorization ?? ""); return { status: 200, headers: {}, body: "" }; }, close: () => {} }) });
+    addAccount(db, "acc_1");
+    addDevice(db, "dev_a", "acc_1");
+    db.prepare("INSERT INTO device_checks (device_id, enabled, enrolled_at, next_attempt_at, next_due_at) VALUES ('dev_a', 1, ?, ?, ?)").run(T0, T0, T0);
+    expect(await checks.scheduler?.scan()).toBe(1);
+    expect(seen).toEqual([`bearer ${held}`]);
+    expect(token.minted).toBe(1);
   });
 
   it("with no provider configured for a platform, the attempt is used and nothing is sent", async () => {
