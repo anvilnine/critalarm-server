@@ -452,7 +452,7 @@ const migrations: Migration[] = [
       closed_at INTEGER,
       attempts INTEGER NOT NULL DEFAULT 0,
       result TEXT CHECK (result IN ('received', 'missed', 'refused', 'skipped')),
-      reason TEXT CHECK (reason IN ('pack', 'no_token', 'disabled')),
+      reason TEXT CHECK (reason IN ('pack', 'no_token', 'disabled', 'held')),
       attempt_received INTEGER,
       receipt_at INTEGER,
       device_received_at INTEGER,

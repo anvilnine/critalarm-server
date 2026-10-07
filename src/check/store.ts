@@ -16,7 +16,7 @@ import { ALARM_HOLD_S, ATTEMPT_OFFSETS_S, MAX_ATTEMPTS, MIN_ROUND_GAP_S, ROUND_L
 export const CHECK_PACK: PackId = "pro";
 
 export type RoundResult = "received" | "missed" | "refused" | "skipped";
-export type SkipReason = "pack" | "no_token" | "disabled";
+export type SkipReason = "pack" | "no_token" | "disabled" | "held";
 export type CheckState = "waiting" | "received" | "missed_once" | "missed_repeatedly" | "token_refused" | "no_token" | "off";
 export type AttemptOutcome = "accepted" | "refused" | "failed";
 
@@ -127,7 +127,7 @@ export class CheckStore {
       this.db.prepare("UPDATE device_checks SET enabled = 0, next_attempt_at = NULL WHERE device_id = ?").run(deviceId);
       const round = this.openRound(state);
       if (round === undefined) return;
-      if (now >= round.closes_at) this.close(round, "missed", null, round.closes_at);
+      if (now >= round.closes_at) this.expire(round);
       else this.close(round, "skipped", "disabled", now);
     })();
   }
@@ -161,7 +161,7 @@ export class CheckStore {
       let round = this.db.prepare(`SELECT ${ROUND_COLUMNS} FROM check_rounds WHERE device_id = ? AND nonce_hash = ?`).get(deviceId, sha256(checkId)) as RoundRow | undefined;
       if (round === undefined) return null;
       if (round.result === null && now >= round.closes_at) {
-        this.close(round, "missed", null, round.closes_at);
+        this.expire(round);
         round = this.round(round.id) ?? round;
       }
       let counted: boolean;
@@ -209,19 +209,23 @@ export class CheckStore {
       if (device === undefined) return null;
       let round = this.openRound(state);
       if (round !== undefined && now >= round.closes_at) {
-        this.close(round, "missed", null, round.closes_at);
+        this.expire(round);
         return null;
       }
       // The pack is asked for at every attempt, so one that lapses between two
       // pushes of a round stops the second.
       if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packIncludes)) return this.skip(state, round, "pack", now);
       if (device.push_token === "") return this.skip(state, round, "no_token", now);
+      // The round opens when the scan reaches the device, held or not, and its
+      // close time is fixed then.
+      round ??= this.open(deviceId, now);
+      // The hold applies to every push of the round. A held push waits for the
+      // hold to end, and if the round closes first it is never sent.
       if (device.last_alarm_push_at !== null && now - device.last_alarm_push_at < ALARM_HOLD_S) {
         const until = device.last_alarm_push_at + ALARM_HOLD_S;
-        this.db.prepare("UPDATE device_checks SET next_attempt_at = ? WHERE device_id = ?").run(round === undefined ? until : Math.min(until, round.closes_at), deviceId);
+        this.db.prepare("UPDATE device_checks SET next_attempt_at = ? WHERE device_id = ?").run(Math.min(until, round.closes_at), deviceId);
         return null;
       }
-      round ??= this.open(deviceId, now);
       const attempt = round.attempts + 1;
       if (attempt > MAX_ATTEMPTS) {
         this.db.prepare("UPDATE device_checks SET next_attempt_at = ? WHERE device_id = ?").run(round.closes_at, deviceId);
@@ -231,8 +235,12 @@ export class CheckStore {
       // same attempt fail the whole transaction.
       this.db.prepare("INSERT INTO check_attempts (round_id, attempt, recorded_at) VALUES (?, ?, ?)").run(round.id, attempt, now);
       this.db.prepare("UPDATE check_rounds SET attempts = ? WHERE id = ?").run(attempt, round.id);
-      const offset = ATTEMPT_OFFSETS_S[attempt];
-      const next = offset === undefined ? round.closes_at : Math.min(round.opened_at + offset, round.closes_at);
+      // The next push goes at the next of the round's three times that is
+      // still ahead. A time that passed while a push was held is not made up,
+      // so two pushes never leave back to back.
+      const opened = round.opened_at;
+      const ahead = attempt >= MAX_ATTEMPTS ? undefined : ATTEMPT_OFFSETS_S.map((offset) => opened + offset).find((time) => time > now);
+      const next = ahead === undefined ? round.closes_at : Math.min(ahead, round.closes_at);
       this.db.prepare("UPDATE device_checks SET next_attempt_at = ? WHERE device_id = ?").run(next, deviceId);
       return {
         roundId: round.id,
@@ -301,7 +309,17 @@ export class CheckStore {
     const state = this.state(deviceId);
     if (state === undefined) return;
     const round = this.openRound(state);
-    if (round !== undefined && this.clock.now() >= round.closes_at) this.close(round, "missed", null, round.closes_at);
+    if (round !== undefined && this.clock.now() >= round.closes_at) this.expire(round);
+  }
+
+  // A round whose close time has come with no receipt. If a push went out and
+  // nothing came back, that is a miss. If no push was ever sent, every one of
+  // them was held back behind alarms to the device, and no answer was owed:
+  // the round is skipped with the reason "held" and counts toward nothing.
+  // Either way it closes at its own close time, whenever this runs.
+  private expire(round: RoundRow): void {
+    if (round.attempts === 0) this.close(round, "skipped", "held", round.closes_at);
+    else this.close(round, "missed", null, round.closes_at);
   }
 
   private skip(state: StateRow, round: RoundRow | undefined, reason: SkipReason, now: number): null {
