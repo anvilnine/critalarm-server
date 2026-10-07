@@ -76,7 +76,7 @@ export function createTierRouter(deps: TierDependencies): Hono {
       const context = bearer === undefined ? undefined : authenticateDevice(deps.db, bearer);
       if (bearer !== undefined && context === null) return c.json({ error: "unauthorized" }, 401);
       const registration = registerDevice(deps, input, bearer, context ?? undefined, joinBearer);
-      const response = { account_id: registration.accountId, tier: registration.tier, caps: capsFor(registration.tier) };
+      const response = { account_id: registration.accountId, tier: registration.tier, caps: capsFor(registration.tier), packs: packs(registration.accountId) };
       if (registration.deviceToken === undefined) return c.json(response, 200);
       const join = registration.accountJoinToken === undefined ? {} : { account_join_token: registration.accountJoinToken };
       return c.json({ device_token: registration.deviceToken, ...join, ...response }, 201);
@@ -97,7 +97,7 @@ export function createTierRouter(deps: TierDependencies): Hono {
       if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
       const account = updateDevice(deps, c.req.param("deviceId"), input, bearer);
       if (account === null) return c.json({ error: "not found" }, 404);
-      return c.json({ account_id: account.account_id, tier: account.tier, caps: capsFor(account.tier) });
+      return c.json({ account_id: account.account_id, tier: account.tier, caps: capsFor(account.tier), packs: packs(account.account_id) });
     } catch (error: unknown) {
       if (error instanceof z.ZodError) return c.json({ error: "invalid request" }, 400);
       throw error;
