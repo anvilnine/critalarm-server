@@ -10,6 +10,7 @@ import { openDatabase } from "./store/database.js";
 import { migrate } from "./store/migrations.js";
 import type { DeliveryEvent, IdGenerator } from "./incident/types.js";
 import { ApnsSender } from "./push/apns.js";
+import { ApnsProviderToken } from "./push/apns-token.js";
 import { FcmSender } from "./push/fcm.js";
 import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
@@ -31,14 +32,18 @@ const ids: IdGenerator = { message: () => `m_${crypto.randomUUID()}`, incident: 
 // when none had been sent. Before FCM was added to the dev server, every
 // Android push was counted and none went out.
 const noop: PushSender = { send: async () => ({ status: 501, stale: false }) };
-const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock });
+// One provider token for the one APNs key. The alarm sender and the weekly
+// check sender are both given it, so Apple sees a single token being refreshed.
+const apnsToken = config.apns === undefined ? undefined : new ApnsProviderToken(config.apns);
+const apnsSender = config.apns === undefined || apnsToken === undefined ? undefined : new ApnsSender({ ...config.apns, clock, providerToken: apnsToken });
 const apns: PushSender = apnsSender ?? noop;
 const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clock, fetch });
 // api.md §4.5, the weekly check. It has its own senders and its own scan, and
-// the only thing it adds here is a note of when an alarm last went to a device,
-// written after the alarm send has returned. On a self-hosted server, or with
+// the only thing it adds here is a note of when an alarm last reached a
+// device: one number put in a map after the alarm send has returned, written
+// to the database later by the check scan. On a self-hosted server, or with
 // WEEKLY_CHECKS=off, `noting` hands back the sender it was given.
-const checks = createChecks(config, { db, clock, fetch });
+const checks = createChecks(config, { db, clock, fetch, ...(apnsToken === undefined ? {} : { apnsToken }) });
 const dispatcher = new PushDispatcher(db, { apns: checks.noting(apns), fcm: checks.noting(fcm), liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
 const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;

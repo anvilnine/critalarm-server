@@ -406,8 +406,13 @@ const migrations: Migration[] = [
   //
   // check_attempts is one row per push of a round, written before the push is
   // sent. The primary key is what stops an attempt from being recorded, and so
-  // sent, twice. outcome stays NULL when the process stopped before the
-  // provider answered.
+  // sent, twice. outcome is what the provider said, and stays NULL when the
+  // process stopped before it answered. Only `accepted` means a push went out,
+  // and a round is a miss only when one of its attempts has it.
+  //
+  // check_rounds.held_until is the end of the last alarm hold the scan saw for
+  // the round. At the close it tells a round whose pushes were held to the end
+  // from one the relay simply never got to.
   //
   // check_secret holds one random key. A round's check_id is worked out from
   // that key and the round's id each time a push is built, which is how three
@@ -452,7 +457,8 @@ const migrations: Migration[] = [
       closed_at INTEGER,
       attempts INTEGER NOT NULL DEFAULT 0,
       result TEXT CHECK (result IN ('received', 'missed', 'refused', 'skipped')),
-      reason TEXT CHECK (reason IN ('pack', 'no_token', 'disabled', 'held')),
+      reason TEXT CHECK (reason IN ('pack', 'no_token', 'disabled', 'held', 'unsent')),
+      held_until INTEGER,
       attempt_received INTEGER,
       receipt_at INTEGER,
       device_received_at INTEGER,
@@ -465,7 +471,7 @@ const migrations: Migration[] = [
       round_id TEXT NOT NULL REFERENCES check_rounds(id) ON DELETE CASCADE,
       attempt INTEGER NOT NULL CHECK (attempt IN (1, 2, 3)),
       recorded_at INTEGER NOT NULL,
-      outcome TEXT CHECK (outcome IN ('accepted', 'refused', 'failed')),
+      outcome TEXT CHECK (outcome IN ('accepted', 'refused', 'failed', 'cancelled')),
       status INTEGER,
       PRIMARY KEY (round_id, attempt)
     );

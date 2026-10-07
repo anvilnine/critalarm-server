@@ -5,7 +5,7 @@ import { ApnsSender, type ApnsTransport } from "../../push/apns.js";
 import type { CheckAnswer } from "../../push/check.js";
 import { PushDispatcher } from "../../push/dispatcher.js";
 import type { PushDevice, PushResult, PushSender } from "../../push/types.js";
-import { notingAlarmPushes } from "../device-hooks.js";
+import { AlarmNotes, notingAlarmPushes } from "../device-hooks.js";
 import { roundAfter } from "../schedule.js";
 import { T0, addAccount, addDevice, setup, type Harness } from "./fakes.js";
 
@@ -45,7 +45,7 @@ function alarmSetup(options: { noting: boolean; enrol: boolean }) {
   const apns: PushSender = new ApnsSender({ teamId: "team_1", keyId: "key_1", privateKey, bundleId: "app.critalarm", environment: "production", clock: harness.clock, transport: () => transport });
   const android: { device: PushDevice; event: DeliveryEvent }[] = [];
   const fcm: PushSender = { send: async (device, delivery) => { android.push({ device, event: delivery }); return { status: 200, stale: false }; } };
-  const wrap = (sender: PushSender) => (options.noting ? notingAlarmPushes(sender, harness.db, harness.clock) : sender);
+  const wrap = (sender: PushSender) => (options.noting ? notingAlarmPushes(sender, harness.notes, harness.clock) : sender);
   const dispatcher = new PushDispatcher(harness.db, { apns: wrap(apns), fcm: wrap(fcm) }, harness.clock);
   return { ...harness, wire, android, dispatcher };
 }
@@ -123,7 +123,7 @@ describe("the relay never delays, reorders or alters an alarm push because of a 
     const seen: unknown[] = [];
     const inner: PushSender = { send: async (...args) => { seen.push(args); return result; } };
     const delivery = event("open");
-    const returned = await notingAlarmPushes(inner, harness.db, harness.clock).send(device, delivery);
+    const returned = await notingAlarmPushes(inner, harness.notes, harness.clock).send(device, delivery);
     expect(returned).toBe(result);
     expect(seen).toEqual([[device, delivery]]);
     expect((seen[0] as unknown[])[0]).toBe(device);
@@ -134,18 +134,94 @@ describe("the relay never delays, reorders or alters an alarm push because of a 
     const harness = setup();
     const failure = new Error("apns transport failed");
     const inner: PushSender = { send: async () => { throw failure; } };
-    await expect(notingAlarmPushes(inner, harness.db, harness.clock).send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).rejects.toBe(failure);
+    await expect(notingAlarmPushes(inner, harness.notes, harness.clock).send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).rejects.toBe(failure);
   });
 
-  it("a note that cannot be written never reaches the alarm", async () => {
+  it("the note is never written on the alarm path: a write that blocks or throws cannot delay or change the next alarm send", async () => {
+    const harness = setup();
+    const order: string[] = [];
+    // A write that must not run while alarms are going out. If the wrapper
+    // called it, the order below would show it between the two sends.
+    const notes = new AlarmNotes((deviceId) => {
+      order.push(`write ${deviceId}`);
+      throw new Error("database is locked");
+    });
+    const result: PushResult = { status: 200, stale: false };
+    const inner: PushSender = { send: async (device) => { order.push(`send ${device.id}`); return result; } };
+    const sender = notingAlarmPushes(inner, notes, harness.clock);
+    const devices = ["dev_a", "dev_b", "dev_c"].map((id): PushDevice => ({ id, accountId: "acc_1", platform: "ios", pushToken: id }));
+    // The dispatcher's loop: one send awaited after another.
+    for (const device of devices) expect(await sender.send(device, event("open"))).toBe(result);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(order).toEqual(["send dev_a", "send dev_b", "send dev_c"]);
+    // Only the check scan writes, later, and a failed write is swallowed.
+    expect(() => notes.flush()).not.toThrow();
+    expect(order.slice(3).sort()).toEqual(["write dev_a", "write dev_b", "write dev_c"]);
+  });
+
+  it("a note that cannot even be taken never reaches the alarm", async () => {
+    const harness = setup();
+    const result: PushResult = { status: 200, stale: false };
+    const broken = { add: () => { throw new Error("out of memory"); } } as unknown as AlarmNotes;
+    const sender = notingAlarmPushes({ send: async () => result }, broken, harness.clock);
+    expect(await sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).toBe(result);
+    const noClock = notingAlarmPushes({ send: async () => result }, harness.notes, { now: () => { throw new Error("no clock"); } });
+    expect(await noClock.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).toBe(result);
+  });
+
+  it("a burst of repeats to one device is one write, with the newest time", async () => {
+    const harness = setup();
+    const writes: [string, number][] = [];
+    const notes = new AlarmNotes((deviceId, at) => { writes.push([deviceId, at]); });
+    const sender = notingAlarmPushes({ send: async () => ({ status: 200, stale: false }) }, notes, harness.clock);
+    for (let n = 0; n < 50; n += 1) {
+      harness.clock.value = T0 + n * 30;
+      await sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("repeat"));
+    }
+    expect(writes).toEqual([]);
+    notes.flush();
+    notes.flush();
+    expect(writes).toEqual([["dev_a", T0 + 49 * 30]]);
+  });
+
+  it("an alarm push the provider refused, or that failed, holds nothing", async () => {
+    for (const result of [{ status: 410, stale: true }, { status: 400, stale: false }, { status: 500, stale: false }, { status: 501, stale: false }, { status: 200, stale: true }] as PushResult[]) {
+      const harness = setup();
+      addAccount(harness.db, "acc_1");
+      addDevice(harness.db, "dev_a", "acc_1");
+      await harness.api.enable("dev_a");
+      const sender = notingAlarmPushes({ send: async () => result }, harness.notes, harness.clock);
+      harness.clock.value = T0;
+      await sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"));
+      await harness.scanAt(T0 + MINUTE);
+      expect(harness.sender.sent).toHaveLength(1);
+      expect(harness.db.prepare("SELECT last_alarm_push_at FROM devices WHERE id = 'dev_a'").get()).toEqual({ last_alarm_push_at: null });
+    }
+  });
+
+  it("an alarm push that throws holds nothing", async () => {
     const harness = setup();
     addAccount(harness.db, "acc_1");
     addDevice(harness.db, "dev_a", "acc_1");
-    const result: PushResult = { status: 200, stale: false };
-    const sender = notingAlarmPushes({ send: async () => result }, harness.db, harness.clock);
-    harness.db.exec("DROP INDEX device_checks_due; DROP TABLE check_attempts; DROP TABLE check_rounds; DROP TABLE device_checks;");
-    harness.db.exec("ALTER TABLE devices DROP COLUMN last_alarm_push_at");
-    expect(await sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).toBe(result);
+    await harness.api.enable("dev_a");
+    const sender = notingAlarmPushes({ send: async () => { throw new Error("transport"); } }, harness.notes, harness.clock);
+    await expect(sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"))).rejects.toThrow("transport");
+    await harness.scanAt(T0 + MINUTE);
+    expect(harness.sender.sent).toHaveLength(1);
+  });
+
+  it("an alarm push the provider accepted holds the check, once the scan has taken the note", async () => {
+    const harness = setup();
+    addAccount(harness.db, "acc_1");
+    addDevice(harness.db, "dev_a", "acc_1");
+    await harness.api.enable("dev_a");
+    const sender = notingAlarmPushes({ send: async () => ({ status: 200, stale: false }) }, harness.notes, harness.clock);
+    harness.clock.value = T0;
+    await sender.send({ id: "dev_a", accountId: "acc_1", platform: "ios", pushToken: "t" }, event("open"));
+    expect(harness.db.prepare("SELECT last_alarm_push_at FROM devices WHERE id = 'dev_a'").get()).toEqual({ last_alarm_push_at: null });
+    await harness.scanAt(T0 + MINUTE);
+    expect(harness.sender.sent).toEqual([]);
+    expect(harness.db.prepare("SELECT last_alarm_push_at FROM devices WHERE id = 'dev_a'").get()).toEqual({ last_alarm_push_at: T0 });
   });
 
   it("the alarm path reads nothing the check wrote: the dispatcher sends the same with every check table gone", async () => {
@@ -318,8 +394,8 @@ describe("no check is started within 30 minutes after an open, a repeat or a reo
       await enrolBoth(harness);
       harness.clock.value = T0;
       await harness.dispatcher.dispatch([event(kind)]);
-      expect(harness.db.prepare("SELECT COUNT(*) AS n FROM devices WHERE last_alarm_push_at IS NOT NULL").get()).toEqual({ n: 0 });
       await harness.scanAt(T0 + MINUTE);
+      expect(harness.db.prepare("SELECT COUNT(*) AS n FROM devices WHERE last_alarm_push_at IS NOT NULL").get()).toEqual({ n: 0 });
       expect(harness.sender.sent).toHaveLength(2);
     }
   });

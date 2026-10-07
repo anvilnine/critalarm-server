@@ -4,7 +4,8 @@ import type { Clock } from "../incident/types.js";
 import type { ApnsTransport } from "../push/apns.js";
 import { ApnsCheckSender, FcmCheckSender } from "../push/check.js";
 import type { PushFetch, PushSender } from "../push/types.js";
-import { notingAlarmPushes } from "./device-hooks.js";
+import type { ApnsProviderToken } from "../push/apns-token.js";
+import { AlarmNotes, alarmNoteWriter, notingAlarmPushes } from "./device-hooks.js";
 import { CheckScheduler, startCheckScheduler, type CheckSenders } from "./scheduler.js";
 import { CheckStore } from "./store.js";
 
@@ -28,6 +29,9 @@ export interface ChecksDependencies {
   db: Database.Database;
   clock: Clock;
   fetch: PushFetch;
+  // The provider token the alarm sender holds, so the two senders present
+  // one token for the one signing key.
+  apnsToken?: ApnsProviderToken;
   // The seam the tests replace.
   apnsTransport?: (authority: string) => ApnsTransport;
 }
@@ -38,17 +42,18 @@ export function checksEnabled(config: Config): boolean {
 
 export function createChecks(config: Config, deps: ChecksDependencies): Checks {
   if (!checksEnabled(config)) return { enabled: false, noting: (sender) => sender, start: () => () => {} };
-  const apns = config.apns === undefined ? undefined : new ApnsCheckSender({ ...config.apns, clock: deps.clock, ...(deps.apnsTransport === undefined ? {} : { transport: deps.apnsTransport }) });
+  const apns = config.apns === undefined ? undefined : new ApnsCheckSender({ ...config.apns, clock: deps.clock, ...(deps.apnsToken === undefined ? {} : { providerToken: deps.apnsToken }), ...(deps.apnsTransport === undefined ? {} : { transport: deps.apnsTransport }) });
   const senders: CheckSenders = {
     ...(apns === undefined ? {} : { ios: apns }),
     ...(config.fcm === undefined ? {} : { android: new FcmCheckSender({ ...config.fcm, clock: deps.clock, fetch: deps.fetch }) }),
   };
   const store = new CheckStore(deps.db, deps.clock, undefined, config.packIncludes ?? {});
-  const scheduler = new CheckScheduler(store, senders);
+  const notes = new AlarmNotes(alarmNoteWriter(deps.db));
+  const scheduler = new CheckScheduler(store, senders, { notes });
   return {
     enabled: true,
     scheduler,
-    noting: (sender) => notingAlarmPushes(sender, deps.db, deps.clock),
+    noting: (sender) => notingAlarmPushes(sender, notes, deps.clock),
     start: (intervalMs) => {
       const stop = startCheckScheduler(scheduler, intervalMs);
       return () => {
