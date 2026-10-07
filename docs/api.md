@@ -894,9 +894,9 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | Value | Meaning |
 |---|---|
 | `received` | a receipt reached the relay while the round was open |
-| `missed` | the round closed with no receipt |
+| `missed` | APNs or FCM accepted at least one push of the round, and it closed with no receipt |
 | `refused` | APNs or FCM refused the device's push token. No receipt was possible |
-| `skipped` | the round ended without an answer being owed: `reason` is `"pack"`, `"no_token"`, `"disabled"` or `"held"`. With the first three, the pack, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. Not counted as a miss |
+| `skipped` | the round ended without an answer being owed: `reason` is `"pack"`, `"no_token"`, `"disabled"`, `"held"` or `"unsent"`. With the first three, the pack, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. `"unsent"` means the relay could not hand any push of the round to APNs or FCM, because the provider was failing or the relay was not running. Not counted as a miss |
 
 **`state`.** It reports what happened to the last rounds and makes no claim about the phone.
 
@@ -922,7 +922,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 **When a device registers a new push token** (`PATCH /relay/v1/devices/{device_id}`, §4.2) while `misses` is above 0, it becomes due at once and its next round opens within 24 hours.
 
-**Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after it sent that device an `open`, `repeat` or `reopen`. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together. The 30 minutes apply to every push of a round, not only the first. A push still held when the round closes is never sent. A round in which every push was held ends as `skipped` with `reason` `"held"`: alarms were reaching the device the whole time, which says more than a check would.
+**Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after APNs or FCM accepted an `open`, `repeat` or `reopen` for that device. An alarm push the provider refused or that failed holds nothing. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together. The 30 minutes apply to every push of a round, not only the first. A push still held when the round closes is never sent. A round in which every push was held ends as `skipped` with `reason` `"held"`: alarms were reaching the device the whole time, which says more than a check would.
 
 `GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
 
