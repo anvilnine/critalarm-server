@@ -9,6 +9,14 @@ import type { DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
 
+// A p5 with no incident is a priority-5 message on a topic whose switch is off.
+// It is a plain notification and never rings. Every other kind keeps the rule
+// the relay always had.
+function isCritical(body: RelayPayload): boolean {
+  if (body.kind === "p5" && !body.incident_id) return false;
+  return body.priority === 5;
+}
+
 export function createRelayRouter(db: Database.Database, dispatch: (event: DeliveryEvent) => Promise<DispatchResult | void>, counters: Counters, registrationSecret?: string): Hono {
   const router = new Hono();
   // Registration used to hand an rk_ key to anyone who asked, and that key
@@ -29,7 +37,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
     if (keyHash === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) === undefined) return c.json({ error: "unauthorized" }, 401);
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
-    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
+    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "p5", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     // The accounts this push is for. The pushing server's message_id has no row
     // here (api.md §4.1), so the relay establishes the owning accounts itself
     // and names one on every dispatch; the dispatcher never guesses. A hash this
@@ -46,7 +54,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
       }
       if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     }
-    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: body.priority === 5 };
+    const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: isCritical(body) };
     let delivered = 0;
     for (const account of accounts) {
       const result = await dispatch({ ...event, accountId: account.account_id });
