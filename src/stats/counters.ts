@@ -8,15 +8,24 @@ import type { Clock } from "../incident/types.js";
 // work the relay does for its own hosted accounts is keyed LOCAL_KEY.
 export const LOCAL_KEY = "local";
 
-export const METRICS = ["pushes_delivered", "alarms_rung", "acks", "incidents_opened"] as const;
+// The four alarm metrics are counted per relay key. The two check metrics
+// (api.md §4.5) are work the relay does on its own account, so they are always
+// stored under LOCAL_KEY, and they appear in `totals` and `days` and not in
+// the per-key rows of `?by=key`, which keep the four fields they always had.
+export const KEY_METRICS = ["pushes_delivered", "alarms_rung", "acks", "incidents_opened"] as const;
+export const CHECK_METRICS = ["checks_sent", "checks_received"] as const;
+export const METRICS = [...KEY_METRICS, ...CHECK_METRICS] as const;
+export type KeyMetric = (typeof KEY_METRICS)[number];
 export type Metric = (typeof METRICS)[number];
 export type Totals = Record<Metric, number>;
+export type KeyTotals = Record<KeyMetric, number>;
 export type DayRow = Totals & { day: string };
+export type KeyDayRow = KeyTotals & { day: string };
 export interface KeyRow {
   relay_key: string;
   zeroed: boolean;
-  totals: Totals;
-  days: DayRow[];
+  totals: KeyTotals;
+  days: KeyDayRow[];
 }
 export interface Stats {
   totals: Totals;
@@ -34,6 +43,10 @@ export function dayKey(seconds: number): string {
 }
 
 function emptyTotals(): Totals {
+  return { pushes_delivered: 0, alarms_rung: 0, acks: 0, incidents_opened: 0, checks_sent: 0, checks_received: 0 };
+}
+
+function emptyKeyTotals(): KeyTotals {
   return { pushes_delivered: 0, alarms_rung: 0, acks: 0, incidents_opened: 0 };
 }
 
@@ -41,6 +54,10 @@ type CountRow = { day: string; relay_key: string; metric: string; count: number 
 
 function isMetric(value: string): value is Metric {
   return (METRICS as readonly string[]).includes(value);
+}
+
+function isKeyMetric(value: string): value is KeyMetric {
+  return (KEY_METRICS as readonly string[]).includes(value);
 }
 
 export class Counters {
@@ -109,7 +126,7 @@ export class Counters {
         totals[row.metric] += row.count;
         if (row.day >= since) dayRow(byDay, row.day)[row.metric] += row.count;
       }
-      if (options.byKey === true) {
+      if (options.byKey === true && isKeyMetric(row.metric)) {
         const key = keyRow(byKey, row.relay_key, zeroed.has(row.relay_key));
         key.totals[row.metric] += row.count;
         if (row.day >= since) dayRowInList(key.days, row.day)[row.metric] += row.count;
@@ -146,10 +163,10 @@ function dayRow(days: Map<string, DayRow>, day: string): DayRow {
   return created;
 }
 
-function dayRowInList(days: DayRow[], day: string): DayRow {
+function dayRowInList(days: KeyDayRow[], day: string): KeyDayRow {
   const existing = days.find((row) => row.day === day);
   if (existing !== undefined) return existing;
-  const created: DayRow = { day, ...emptyTotals() };
+  const created: KeyDayRow = { day, ...emptyKeyTotals() };
   days.push(created);
   return created;
 }
@@ -157,7 +174,7 @@ function dayRowInList(days: DayRow[], day: string): DayRow {
 function keyRow(keys: Map<string, KeyRow>, relayKey: string, zeroed: boolean): KeyRow {
   const existing = keys.get(relayKey);
   if (existing !== undefined) return existing;
-  const created: KeyRow = { relay_key: relayKey, zeroed, totals: emptyTotals(), days: [] };
+  const created: KeyRow = { relay_key: relayKey, zeroed, totals: emptyKeyTotals(), days: [] };
   keys.set(relayKey, created);
   return created;
 }

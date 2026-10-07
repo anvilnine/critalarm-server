@@ -47,7 +47,7 @@ describe("counting rules", () => {
   it("counts an ack and ignores repeat, p4, p5, close and expire", () => {
     const { counters } = setup(noon);
     counters.countEvents(LOCAL_KEY, [event("ack"), event("repeat"), event("p4"), event("p5"), event("close"), event("expire")]);
-    expect(counters.read().totals).toEqual({ acks: 1, alarms_rung: 0, incidents_opened: 0, pushes_delivered: 0 });
+    expect(counters.read().totals).toEqual({ acks: 1, alarms_rung: 0, incidents_opened: 0, pushes_delivered: 0, checks_sent: 0, checks_received: 0 });
   });
 
   it("never records a push that was not delivered", () => {
@@ -69,8 +69,8 @@ describe("day boundary", () => {
     const stats = counters.read();
     expect(stats.totals).toMatchObject({ incidents_opened: 2, alarms_rung: 3 });
     expect(stats.days).toEqual([
-      { day: "2026-09-14", pushes_delivered: 0, alarms_rung: 2, acks: 0, incidents_opened: 1 },
-      { day: "2026-09-13", pushes_delivered: 0, alarms_rung: 1, acks: 0, incidents_opened: 1 },
+      { day: "2026-09-14", pushes_delivered: 0, alarms_rung: 2, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 },
+      { day: "2026-09-13", pushes_delivered: 0, alarms_rung: 1, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 },
     ]);
   });
 
@@ -98,7 +98,7 @@ describe("zeroing a key", () => {
 
     const stats = counters.read({ byKey: true });
     expect(stats.totals).toMatchObject({ incidents_opened: 1, alarms_rung: 1, pushes_delivered: 0 });
-    expect(stats.days).toEqual([{ day: "2026-09-13", pushes_delivered: 0, alarms_rung: 1, acks: 0, incidents_opened: 1 }]);
+    expect(stats.days).toEqual([{ day: "2026-09-13", pushes_delivered: 0, alarms_rung: 1, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 }]);
     expect(db.prepare("SELECT COUNT(*) AS rows FROM counters WHERE relay_key = 'key_abusive'").get()).toEqual({ rows: 3 });
     expect(stats.keys).toEqual([
       { relay_key: "key_abusive", zeroed: true, totals: { pushes_delivered: 9, alarms_rung: 3, acks: 0, incidents_opened: 3 }, days: [{ day: "2026-09-13", pushes_delivered: 9, alarms_rung: 3, acks: 0, incidents_opened: 3 }] },

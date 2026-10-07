@@ -32,7 +32,7 @@ export interface ReconcileDependencies {
 
 type LiveDependencies = ReconcileDependencies & { revenueCatApi: RevenueCatApiConfig };
 
-const API_ORIGIN = "https://api.revenuecat.com";
+export const API_ORIGIN = "https://api.revenuecat.com";
 
 // RevenueCat v2 allows 480 Customer Information requests a minute, which is 8 a
 // second. Source: https://www.revenuecat.com/docs/api-v2
@@ -45,9 +45,9 @@ const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 // Enough pages for any customer a person could really hold. The list is one
 // entitlement per product tier, so page two is already theoretical.
-const MAX_PAGES = 10;
+export const MAX_PAGES = 10;
 
-const activeEntitlementsSchema = z.object({
+export const activeEntitlementsSchema = z.object({
   items: z.array(z.object({
     entitlement_id: z.string().min(1),
     // Milliseconds since epoch, null for a lifetime entitlement.
@@ -56,7 +56,7 @@ const activeEntitlementsSchema = z.object({
   next_page: z.string().nullable().optional(),
 }).passthrough();
 
-type ActiveEntitlement = z.infer<typeof activeEntitlementsSchema>["items"][number];
+export type ActiveEntitlement = z.infer<typeof activeEntitlementsSchema>["items"][number];
 
 function report(fields: Record<string, unknown>): void {
   // The same shape and the same place as push_dropped in push/dispatcher.ts:
