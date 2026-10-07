@@ -81,8 +81,8 @@ describe("GET /relay/v1/internal/stats", () => {
     expect((await push(app, "open")).status).toBe(202);
 
     const body = await (await stats(app)).json() as Stats;
-    expect(body.totals).toEqual({ pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1 });
-    expect(body.days).toEqual([{ day: "2026-09-13", pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1 }]);
+    expect(body.totals).toEqual({ pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 });
+    expect(body.days).toEqual([{ day: "2026-09-13", pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 }]);
     expect(body.servers_total).toBe(1);
     expect(body.devices_active_7d).toBe(2);
   });
@@ -94,7 +94,7 @@ describe("GET /relay/v1/internal/stats", () => {
     await push(app, "repeat");
 
     const body = await (await stats(app)).json() as Stats;
-    expect(body.totals).toEqual({ pushes_delivered: 3, alarms_rung: 2, acks: 0, incidents_opened: 1 });
+    expect(body.totals).toEqual({ pushes_delivered: 3, alarms_rung: 2, acks: 0, incidents_opened: 1, checks_sent: 0, checks_received: 0 });
   });
 
   it("excludes a zeroed key from the totals and still lists it under by=key", async () => {
@@ -103,7 +103,7 @@ describe("GET /relay/v1/internal/stats", () => {
     db.prepare("INSERT INTO counters_zeroed (relay_key, zeroed_at) VALUES (?, ?)").run(KEY_HASH, noon);
 
     const body = await (await stats(app, "/relay/v1/internal/stats?by=key")).json() as Stats;
-    expect(body.totals).toEqual({ pushes_delivered: 0, alarms_rung: 0, acks: 0, incidents_opened: 0 });
+    expect(body.totals).toEqual({ pushes_delivered: 0, alarms_rung: 0, acks: 0, incidents_opened: 0, checks_sent: 0, checks_received: 0 });
     expect(body.servers_total).toBe(0);
     expect(body.keys).toEqual([
       { relay_key: KEY_HASH, zeroed: true, totals: { pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1 }, days: [{ day: "2026-09-13", pushes_delivered: 1, alarms_rung: 1, acks: 0, incidents_opened: 1 }] },

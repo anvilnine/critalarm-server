@@ -77,6 +77,7 @@ src/
   auth/          better-auth, sign-in link and switch, account merge
   admin/         admin token routes
   stats/         counts for the site
+  check/         the weekly check: routes, the scan, what it stores
   v1/            topics, tokens, incidents, account routes
   config.ts
   main.ts        entry point

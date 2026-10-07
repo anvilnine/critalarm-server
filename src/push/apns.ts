@@ -1,7 +1,7 @@
 import { connect, constants, type ClientHttp2Session } from "node:http2";
 import type { DeliveryEvent } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
-import { signJwt } from "./jwt.js";
+import { ApnsProviderToken } from "./apns-token.js";
 import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PrivateKey, PushDevice, PushResult, PushSender } from "./types.js";
 
 export interface ApnsTransportResponse {
@@ -29,17 +29,19 @@ export interface ApnsSenderOptions {
   // The seam the tests replace. One transport per Apple host, so a fake can
   // answer differently for sandbox and production.
   transport?: (authority: string) => ApnsTransport;
+  // The provider token to use, when another sender shares the signing key.
+  // Left out, this sender keeps its own, exactly as before.
+  providerToken?: ApnsProviderToken;
 }
 
-type CachedToken = { value: string; issuedAt: number };
-
 export class ApnsSender implements PushSender, LiveActivitySender {
-  private cachedToken: CachedToken | null = null;
+  private readonly providerToken: ApnsProviderToken;
   // One HTTP/2 session per Apple host. The configured host is dialled up front,
   // the other one only if a token turns out to live there.
   private readonly transports = new Map<ApnsEnvironment, ApnsTransport>();
 
   constructor(private readonly options: ApnsSenderOptions) {
+    this.providerToken = options.providerToken ?? new ApnsProviderToken(options);
     this.transportFor(options.environment);
   }
 
@@ -144,17 +146,7 @@ export class ApnsSender implements PushSender, LiveActivitySender {
   }
 
   private authorization(now: number): string {
-    if (this.cachedToken !== null && now - this.cachedToken.issuedAt < 50 * 60) {
-      return this.cachedToken.value;
-    }
-    const value = signJwt(
-      { alg: "ES256", kid: this.options.keyId },
-      { iss: this.options.teamId, iat: now },
-      this.options.privateKey,
-      "ES256",
-    );
-    this.cachedToken = { value, issuedAt: now };
-    return value;
+    return this.providerToken.get(now);
   }
 }
 

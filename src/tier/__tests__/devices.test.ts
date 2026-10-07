@@ -40,7 +40,7 @@ describe("device registry", () => {
     const response = await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(device) });
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({ device_token: "dv_test_1", account_join_token: "aj_test_1", account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 } });
+    expect(await response.json()).toEqual({ device_token: "dv_test_1", account_join_token: "aj_test_1", account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 }, packs: [] });
     expect(db.prepare("SELECT id, tier, created_at FROM accounts").all()).toEqual([{ id: "acc_1", tier: "free", created_at: 1_000 }]);
     expect(db.prepare("SELECT join_token_hash FROM accounts").get()).toEqual({ join_token_hash: createHash("sha256").update("aj_test_1").digest("hex") });
     expect(JSON.stringify(db.prepare("SELECT * FROM accounts").all())).not.toContain("aj_test_1");
@@ -75,7 +75,7 @@ describe("device registry", () => {
     const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ push_token: "new-token", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 } });
+    expect(await response.json()).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 }, packs: [] });
     expect(db.prepare("SELECT push_token, last_seen, device_token_hash FROM devices").all()).toEqual([{ push_token: "new-token", last_seen: 1_100, device_token_hash: createHash("sha256").update(deviceToken).digest("hex") }]);
   });
 
@@ -158,7 +158,7 @@ describe("known-device POST", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).not.toHaveProperty("device_token");
-    expect(body).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 } });
+    expect(body).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 }, packs: [] });
     expect(db.prepare("SELECT push_token, app_version FROM devices").get()).toEqual({ push_token: "updated", app_version: "2.0.0" });
     expect(db.prepare("SELECT device_token_hash FROM devices").get()).toEqual(before);
     expect(db.prepare("SELECT token FROM device_tokens").get()).toEqual({ token: "updated" });
@@ -210,7 +210,7 @@ describe("account join token", () => {
 
     expect(response.status).toBe(201);
     const body = await response.json();
-    expect(body).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+    expect(body).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps, packs: [] });
     expect(body).not.toHaveProperty("account_join_token");
     expect(db.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT account_id, device_token_hash FROM devices WHERE id = ?").get(secondDeviceId)).toEqual({ account_id: "acc_1", device_token_hash: createHash("sha256").update("dv_test_2").digest("hex") });
@@ -223,7 +223,7 @@ describe("account join token", () => {
     const response = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${deviceToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps, packs: [] });
   });
 
   it("still creates a new anonymous account when no bearer is sent", async () => {
@@ -233,7 +233,7 @@ describe("account join token", () => {
     const response = await app.request("/relay/v1/devices", { method: "POST", body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
 
     expect(response.status).toBe(201);
-    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_join_token: "aj_test_2", account_id: "acc_2", tier: "free", caps: freeCaps });
+    expect(await response.json()).toEqual({ device_token: "dv_test_2", account_join_token: "aj_test_2", account_id: "acc_2", tier: "free", caps: freeCaps, packs: [] });
     expect(db.prepare("SELECT id FROM accounts ORDER BY id").all()).toEqual([{ id: "acc_1" }, { id: "acc_2" }]);
     expect(db.prepare("SELECT account_id FROM devices WHERE id = ?").get(secondDeviceId)).toEqual({ account_id: "acc_2" });
   });
@@ -311,7 +311,7 @@ describe("releasing a device", () => {
     const rejoin = await app.request("/relay/v1/devices", { method: "POST", headers: { Authorization: `Bearer ${joinToken}` }, body: JSON.stringify({ ...device, device_id: secondDeviceId }) });
 
     expect(rejoin.status).toBe(201);
-    expect(await rejoin.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps });
+    expect(await rejoin.json()).toEqual({ device_token: "dv_test_2", account_id: "acc_1", tier: "free", caps: freeCaps, packs: [] });
   });
 
   it("answers 401 for another device's token on the same account and keeps the row", async () => {

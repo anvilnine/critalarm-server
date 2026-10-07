@@ -10,12 +10,15 @@ import { openDatabase } from "./store/database.js";
 import { migrate } from "./store/migrations.js";
 import type { DeliveryEvent, IdGenerator } from "./incident/types.js";
 import { ApnsSender } from "./push/apns.js";
+import { ApnsProviderToken } from "./push/apns-token.js";
 import { FcmSender } from "./push/fcm.js";
 import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
 import { RelayClient } from "./relay/client.js";
 import { createAuthHandler } from "./auth/better-auth.js";
-import { reconcileAccount, startReconcileSweep, type ReconcileDependencies } from "./tier/reconcile.js";
+import { createBilling } from "./tier/billing-startup.js";
+import { createChecks } from "./check/startup.js";
+import { loggedPath } from "./request-log.js";
 
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
@@ -29,10 +32,19 @@ const ids: IdGenerator = { message: () => `m_${crypto.randomUUID()}`, incident: 
 // when none had been sent. Before FCM was added to the dev server, every
 // Android push was counted and none went out.
 const noop: PushSender = { send: async () => ({ status: 501, stale: false }) };
-const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock });
+// One provider token for the one APNs key. The alarm sender and the weekly
+// check sender are both given it, so Apple sees a single token being refreshed.
+const apnsToken = config.apns === undefined ? undefined : new ApnsProviderToken(config.apns);
+const apnsSender = config.apns === undefined || apnsToken === undefined ? undefined : new ApnsSender({ ...config.apns, clock, providerToken: apnsToken });
 const apns: PushSender = apnsSender ?? noop;
 const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clock, fetch });
-const dispatcher = new PushDispatcher(db, { apns, fcm, liveActivity: apnsSender }, clock);
+// api.md §4.5, the weekly check. It has its own senders and its own scan, and
+// the only thing it adds here is a note of when an alarm last reached a
+// device: one number put in a map after the alarm send has returned, written
+// to the database later by the check scan. On a self-hosted server, or with
+// WEEKLY_CHECKS=off, `noting` hands back the sender it was given.
+const checks = createChecks(config, { db, clock, fetch, ...(apnsToken === undefined ? {} : { apnsToken }) });
+const dispatcher = new PushDispatcher(db, { apns: checks.noting(apns), fcm: checks.noting(fcm), liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
 const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
 const dispatch = async (events: readonly DeliveryEvent[]) => {
@@ -47,17 +59,18 @@ const dispatch = async (events: readonly DeliveryEvent[]) => {
 // server starts and serves everything else with no sign-in surface mounted.
 const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db, clock);
 // Guard 4: read entitlements back from RevenueCat instead of trusting the
-// webhook. With no REVENUECAT_SECRET_API_KEY this schedules nothing and says
-// nothing, which is the state every self-hosted server stays in.
-const reconcile: ReconcileDependencies = { db, clock, fetch, ...(config.revenueCatApi === undefined ? {} : { revenueCatApi: config.revenueCatApi }) };
-const stopReconcile = startReconcileSweep(reconcile);
+// webhook. With no REVENUECAT_SECRET_API_KEY this schedules nothing, which is
+// the state every self-hosted server stays in. Which path the reads take is
+// REVENUECAT_READS (api.md §4.3), and unset is the reconcile sweep as it was.
+const billing = createBilling(config, { db, clock, fetch });
+const stopReconcile = billing.start();
 // After a merge the surviving account holds billing ids it did not hold a
 // moment ago. Reading those back is a network call, so it runs after the
 // response rather than inside the merge transaction.
 const reconcileAfterMerge = (accountId: string) => {
-  void reconcileAccount(reconcile, accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
+  void billing.afterMerge(accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
 };
-const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }) });
+const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }), ...(billing.storeReads === undefined ? {} : { storeReads: billing.storeReads }) });
 
 await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);
@@ -65,6 +78,8 @@ const stop = startTimerScanner(incidents, dispatch, 250);
 // so once an hour is enough. On a self-hosted server this starts nothing, and
 // an unset mode is read as self-hosted so nothing is ever deleted by accident.
 const stopPrune = startHistoryPrune(db, clock, config.mode ?? "selfhosted");
+// Once a minute. It does nothing until a device enrols.
+const stopChecks = checks.start();
 // One line per request, off unless asked for. Proving what the server did
 // during device testing meant reading the SQLite file, because nothing was
 // logged at all. Method, path, status and duration only: no tokens, no
@@ -75,11 +90,11 @@ const handler: typeof app.fetch = logRequests
   ? async (request, ...rest) => {
       const startedAt = Date.now();
       const response = await app.fetch(request, ...rest);
-      console.log(`${request.method} ${new URL(request.url).pathname} ${response.status} ${Date.now() - startedAt}ms`);
+      console.log(`${request.method} ${loggedPath(new URL(request.url).pathname)} ${response.status} ${Date.now() - startedAt}ms`);
       return response;
     }
   : app.fetch;
 serve({ fetch: handler, port: config.port });
-const shutdown = () => { stop(); stopPrune(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
+const shutdown = () => { stop(); stopPrune(); stopChecks(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
