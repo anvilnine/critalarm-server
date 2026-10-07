@@ -101,14 +101,63 @@ describe("RevenueCat webhook", () => {
     expect(db.prepare("SELECT devices.id, accounts.tier FROM devices JOIN accounts ON accounts.id = devices.account_id ORDER BY devices.id").all()).toEqual([{ id: "dev_one", tier: "relay" }, { id: "dev_two", tier: "relay" }]);
   });
 
-  it("returns an expired entitlement account to free", async () => {
+  it("returns an account to free when the entitlement its own billing id paid for expires", async () => {
+    const { app, db } = setup();
+    await webhook(app, event({ entitlement_id: "crit_hosted", entitlement_ids: ["crit_hosted"] }));
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+
+    const response = await webhook(app, event({ id: "expiry-event", type: "EXPIRATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 900_000 }));
+
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "free" });
+    expect(db.prepare("SELECT from_tier, to_tier, event_id FROM tier_changes ORDER BY changed_at, rowid").all()).toEqual([
+      { from_tier: "free", to_tier: "hosted", event_id: "webhook-event-id" },
+      { from_tier: "hosted", to_tier: "free", event_id: "expiry-event" },
+    ]);
+  });
+
+  // A tier set by hand (a comp, a gift, a test account) sits on the account and
+  // on no billing row. An event for an id that never paid for it cannot take it
+  // away.
+  it("does not lower a hosted account set by hand when an expiry arrives for an id with no billing row", async () => {
     const { app, db } = setup();
     db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
 
     const response = await webhook(app, event({ type: "EXPIRATION", expiration_at_ms: 900_000 }));
 
     expect(response.status).toBe(200);
-    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "free" });
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+    expect(db.prepare("SELECT app_user_id, entitled_tier FROM account_billing_ids").all()).toEqual([{ app_user_id: "acc_1", entitled_tier: "free" }]);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM tier_changes").get()).toEqual({ count: 0 });
+  });
+
+  it("does not lower a hosted account set by hand when an expiry arrives for an id whose row is at free", async () => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
+    db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('acc_1', 'acc_1', 1, NULL, 'free')").run();
+
+    await webhook(app, event({ type: "EXPIRATION", expiration_at_ms: 900_000 }));
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+  });
+
+  it("does not lower a hosted account set by hand when a relay subscription on it expires", async () => {
+    const { app, db } = setup();
+    await webhook(app, event());
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
+
+    await webhook(app, event({ id: "expiry-event", type: "EXPIRATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 900_000 }));
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+  });
+
+  it("still raises an account set by hand when its billing id buys a higher tier", async () => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET tier = 'relay' WHERE id = 'acc_1'").run();
+
+    await webhook(app, event({ entitlement_id: "crit_hosted", entitlement_ids: ["crit_hosted"] }));
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
   });
 
   it("accepts events for unknown accounts without creating one", async () => {
@@ -278,11 +327,11 @@ describe("RevenueCat webhook", () => {
 
   it("leaves every critical switch on when a plan expires", async () => {
     const { app, db } = setup();
-    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
+    await webhook(app, event({ entitlement_id: "crit_hosted", entitlement_ids: ["crit_hosted"] }));
     const insert = db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES (?, 'acc_1', ?, 'https://alerts.example.com', ?, 1, 30, 1800, 600, 'none', 1)");
     for (const name of ["one", "two", "three"]) insert.run(`top_${name}`, name, `hash_${name}`);
 
-    const response = await webhook(app, event({ type: "EXPIRATION", expiration_at_ms: 900_000 }));
+    const response = await webhook(app, event({ id: "expiry-event", type: "EXPIRATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 900_000 }));
 
     expect(response.status).toBe(200);
     expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "free" });
