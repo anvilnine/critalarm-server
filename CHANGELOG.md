@@ -3,6 +3,30 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.18.0 - 2026-10-07
+
+### Added
+
+- Packs (§4.2). An add-on an account holds beside its tier. `packs` on every
+  registration response, `GET /relay/v1/packs`, and
+  `POST /relay/v1/packs/refresh`, which reads the store and says whether it
+  could. The only pack is `pro`.
+- The weekly check (§4.5, §5.4). A push that shows nothing, sent once a week
+  to a device that asked for it, answered by a receipt. Four routes under
+  `/relay/v1/devices/{device_id}/check` and `/checks`.
+- `{"error":"pack","pack":"..."}` with `403` (§1.8).
+- `checks_sent` and `checks_received` in the internal stats (§4.4).
+
+### Changed
+
+- RevenueCat webhook (§4.3). A relay that reads the store works out the tier
+  and the packs from one read of the customer's active entitlements, and an
+  event only triggers that read. Reads for one customer never cross. A relay
+  that does not read the store applies events to the tier as before and gives
+  no pack for a purchase.
+- Account deletion (§3.7) also erases the account's packs and its devices'
+  weekly check state and rounds.
+
 ## 1.17.0 - 2026-09-23
 
 ### Added
