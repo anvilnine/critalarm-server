@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
 import { readStore, viewEntitlements, type StoreAnswer, type StoreReadConfig } from "./entitlement-read.js";
-import { highestEntitledTier, isHigherTier, resolveAccount } from "./revenuecat.js";
+import { accountTierAfter, highestEntitledTier, isHigherTier, resolveAccount } from "./revenuecat.js";
 import type { Tier } from "./types.js";
 
 // api.md §4.3. The read path: one read of a customer's active entitlements
@@ -313,26 +313,13 @@ export class BillingReads {
         }
       }
 
-      // The account's tier. `highest` is the highest tier across the account's
-      // billing ids, the same ranking the event path uses. It is not written
-      // blindly, because an account can be on a paid tier that none of its
-      // billing rows carries: a merge only ever raises a tier, and a tier can
-      // be set by hand.
-      //
-      //   raise  whenever `highest` is above the account's tier.
-      //   lower  only when this customer id was a source of the tier being
-      //          removed: its own row held a tier at least as high as the
-      //          account's before this read, and holds a lower one now.
-      //   else   the account's tier is left alone.
-      //
-      // So a read of an id whose row paid for nothing can never lower the
-      // account, whatever the store says about it, and an account whose tier
-      // comes from no billing row is never lowered by any read.
+      // The account's tier. Raised whenever the account's billing ids pay for
+      // more, lowered only when this customer id was a source of the tier being
+      // removed. The rule is accountTierAfter, shared with the event path and
+      // the sweep.
       const current = db.prepare("SELECT tier FROM accounts WHERE id = ?").get(row.account_id) as { tier: Tier } | undefined;
       if (current !== undefined) {
-        const highest = highestEntitledTier({ db }, row.account_id);
-        const wasSource = isHigherTier(row.entitled_tier, tier) && !isHigherTier(current.tier, row.entitled_tier);
-        const next = isHigherTier(highest, current.tier) || wasSource ? highest : current.tier;
+        const next = accountTierAfter({ current: current.tier, highest: highestEntitledTier({ db }, row.account_id), rowBefore: row.entitled_tier, rowAfter: tier });
         if (next !== current.tier) {
           db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(next, row.account_id);
           db.prepare("INSERT INTO tier_changes (id, account_id, from_tier, to_tier, reason, event_id, changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
