@@ -44,7 +44,7 @@ function entitledTier(deps: TierDependencies, event: RevenueCatEvent["event"]): 
 // linked before the merge still lands on the account that owns the devices now.
 // The chain is kept one hop by the merge itself; the bound is here so a cycle
 // written by hand cannot spin forever.
-function followMerge(deps: TierDependencies, accountId: string): string | null {
+export function followMerge(deps: Pick<TierDependencies, "db">, accountId: string): string | null {
   let current = accountId;
   for (let hop = 0; hop < 8; hop += 1) {
     const row = deps.db.prepare("SELECT id, merged_into FROM accounts WHERE id = ?").get(current) as { id: string; merged_into: string | null } | undefined;
@@ -59,7 +59,7 @@ function followMerge(deps: TierDependencies, accountId: string): string | null {
 // working ("app_user_id is the account_id", set on the SDK right after
 // registration): the first event for an id is what links it, so a subscriber
 // who bought before this table existed still resolves.
-function resolveAccount(deps: TierDependencies, appUserId: string): string | null {
+export function resolveAccount(deps: Pick<TierDependencies, "db">, appUserId: string): string | null {
   const linked = deps.db.prepare("SELECT account_id FROM account_billing_ids WHERE app_user_id = ?").get(appUserId) as { account_id: string } | undefined;
   if (linked !== undefined) return followMerge(deps, linked.account_id);
   const account = deps.db.prepare("SELECT id FROM accounts WHERE id = ?").get(appUserId) as { id: string } | undefined;
