@@ -13,6 +13,7 @@ import type { DispatchResult } from "./domain-events.js";
 import type { AuthHandler } from "./auth/better-auth.js";
 import type { IdentityResolver } from "./auth/identity.js";
 import type { TokenRevoker } from "./auth/revoke.js";
+import type { StoreReads } from "./tier/types.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -28,7 +29,7 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads; }
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
@@ -40,7 +41,7 @@ export function createApp(deps: AppDependencies): Hono {
     const handler = deps.authHandler;
     app.on(["POST", "GET"], "/api/auth/*", c => handler(c.req.raw));
   }
-  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }) }));
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
   // key, so it counts under LOCAL_KEY. Forwarded pushes are counted in the
   // relay router instead, where the pushing server's key is known.
