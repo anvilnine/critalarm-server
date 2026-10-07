@@ -389,6 +389,87 @@ const migrations: Migration[] = [
     );
     CREATE INDEX billing_reads_due ON billing_reads(due_at);
   `,
+  // api.md §4.5 and §5.4, the weekly check.
+  //
+  // device_checks is one row per device that has ever enrolled. It is the
+  // timer: the scan reads next_attempt_at and nothing is held in memory.
+  // next_due_at is when the next round is due, and round_id names the round
+  // that is open now, if one is. misses, last_result and second_miss_at are
+  // kept here and not worked out from the rounds, because rounds are deleted
+  // after 90 days and the state must outlive them.
+  //
+  // check_rounds is one row per round. closes_at is written once, when the
+  // round opens. result is written once, when it closes, and every write that
+  // sets it is guarded by `result IS NULL`, so nothing reopens a round.
+  // nonce_hash is the sha256 of the check_id the push carries. The check_id
+  // itself is in no column.
+  //
+  // check_attempts is one row per push of a round, written before the push is
+  // sent. The primary key is what stops an attempt from being recorded, and so
+  // sent, twice. outcome stays NULL when the process stopped before the
+  // provider answered.
+  //
+  // check_secret holds one random key. A round's check_id is worked out from
+  // that key and the round's id each time a push is built, which is how three
+  // pushes hours apart, with a restart between them, carry the same check_id
+  // while only its hash is stored with the round.
+  //
+  // devices.last_alarm_push_at is the last time an open, a repeat or a reopen
+  // was sent to the device. The check scan reads it. Nothing on the alarm path
+  // does.
+  //
+  // All three check tables hang off devices with ON DELETE CASCADE, so
+  // releasing a device or erasing an account takes them with it.
+  `
+    ALTER TABLE devices ADD COLUMN last_alarm_push_at INTEGER;
+
+    CREATE TABLE check_secret (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      secret TEXT NOT NULL
+    );
+
+    CREATE TABLE device_checks (
+      device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      enrolled_at INTEGER NOT NULL,
+      next_attempt_at INTEGER,
+      next_due_at INTEGER NOT NULL,
+      round_id TEXT,
+      misses INTEGER NOT NULL DEFAULT 0,
+      last_result TEXT CHECK (last_result IN ('received', 'missed', 'refused')),
+      second_miss_at INTEGER,
+      last_sent_at INTEGER,
+      last_received_at INTEGER
+    );
+    CREATE INDEX device_checks_due ON device_checks(next_attempt_at, device_id);
+
+    CREATE TABLE check_rounds (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      nonce_hash TEXT NOT NULL UNIQUE,
+      opened_at INTEGER NOT NULL,
+      closes_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      result TEXT CHECK (result IN ('received', 'missed', 'refused', 'skipped')),
+      reason TEXT CHECK (reason IN ('pack', 'no_token', 'disabled')),
+      attempt_received INTEGER,
+      receipt_at INTEGER,
+      device_received_at INTEGER,
+      late_receipt_at INTEGER
+    );
+    CREATE INDEX check_rounds_device ON check_rounds(device_id, opened_at);
+    CREATE INDEX check_rounds_opened ON check_rounds(opened_at);
+
+    CREATE TABLE check_attempts (
+      round_id TEXT NOT NULL REFERENCES check_rounds(id) ON DELETE CASCADE,
+      attempt INTEGER NOT NULL CHECK (attempt IN (1, 2, 3)),
+      recorded_at INTEGER NOT NULL,
+      outcome TEXT CHECK (outcome IN ('accepted', 'refused', 'failed')),
+      status INTEGER,
+      PRIMARY KEY (round_id, attempt)
+    );
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
