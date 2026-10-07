@@ -3,6 +3,7 @@ import { parse } from "yaml";
 import { z } from "zod";
 import { parseApplePrivateKey, type AppleSigningKey } from "./auth/apple-client-secret.js";
 import type { RevenueCatApiConfig } from "./tier/reconcile.js";
+import { isPackId, type PackId, type PackIncludes } from "./tier/packs.js";
 
 export interface ApnsConfig {
   teamId: string;
@@ -68,8 +69,22 @@ export interface Config {
   // The read-only secret API key the reconcile sweep uses, with the project it
   // reads. Unset means the sweep never starts (tier/reconcile.ts).
   revenueCatApi?: RevenueCatApiConfig;
+  // api.md §4.3. Which path decides the tier and the packs. `off` applies each
+  // webhook event to the tier, as every version before 1.18.0 did. `shadow`
+  // does the same and also reads the store beside it, logging what the read
+  // would have written and writing nothing. `on` makes the read the only
+  // writer. This is the value the operator asked for. A relay with no API key
+  // runs as `off` whatever it says (tier/billing-startup.ts).
+  revenueCatReads?: ReadsSetting;
+  // Which RevenueCat entitlement identifier gives which pack. Separate from the
+  // tier map on purpose: a pack is not a tier.
+  revenueCatPackEntitlements?: Record<string, PackId>;
+  // Packs the configuration attaches to a tier. Empty unless set.
+  packIncludes?: PackIncludes;
   auth?: AuthConfig;
 }
+
+export type ReadsSetting = "off" | "shadow" | "on";
 
 const providerSchema = z.object({
   "team-id": z.string().min(1).optional(),
@@ -210,6 +225,50 @@ function entitlementsValue(value: string | undefined): Record<string, "free" | "
   return entitlements;
 }
 
+// REVENUECAT_PACK_ENTITLEMENTS, the same comma separated `key=value` form as
+// the tier map above, with a pack name on the right. A pair that does not
+// parse stops startup for the same reason: a dropped pair gives nobody the
+// pack and reports nothing.
+function packEntitlementsValue(value: string | undefined): Record<string, PackId> {
+  const entitlements: Record<string, PackId> = {};
+  for (const pair of (value ?? "").split(",")) {
+    if (pair.trim() === "") continue;
+    const separator = pair.indexOf("=");
+    const key = pair.slice(0, separator).trim();
+    const pack = pair.slice(separator + 1).trim();
+    if (separator === -1 || key === "" || !isPackId(pack)) throw configError("RevenueCat pack entitlements");
+    entitlements[key] = pack;
+  }
+  return entitlements;
+}
+
+// PACK_INCLUDES, comma separated `tier=pack` pairs. Unset or empty means no
+// tier carries any pack, which is how it ships.
+function packIncludesValue(value: string | undefined): PackIncludes {
+  const includes: Partial<Record<"free" | "relay" | "hosted", PackId[]>> = {};
+  for (const pair of (value ?? "").split(",")) {
+    if (pair.trim() === "") continue;
+    const separator = pair.indexOf("=");
+    const tier = pair.slice(0, separator).trim();
+    const pack = pair.slice(separator + 1).trim();
+    if (separator === -1 || !isPackId(pack)) throw configError("PACK_INCLUDES");
+    if (tier !== "free" && tier !== "relay" && tier !== "hosted") throw configError("PACK_INCLUDES");
+    const listed = includes[tier] ?? [];
+    if (!listed.includes(pack)) listed.push(pack);
+    includes[tier] = listed;
+  }
+  return includes;
+}
+
+// REVENUECAT_READS. Unset or empty is `off`. Anything that is not one of the
+// three words stops startup: this setting moves the code that decides who is on
+// a paid tier, and a typo must not be read as either answer.
+function readsValue(value: string | undefined): ReadsSetting {
+  if (value === undefined || value === "") return "off";
+  if (value !== "off" && value !== "shadow" && value !== "on") throw configError("REVENUECAT_READS");
+  return value;
+}
+
 function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
@@ -335,9 +394,15 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   if (revenueCatApiKey === "") throw configError("RevenueCat secret API key");
   if (revenueCatApiKey !== undefined && (revenueCatProjectId === undefined || revenueCatProjectId === "")) throw configError("RevenueCat project id");
   if (revenueCatApiKey !== undefined && Object.keys(revenueCatEntitlements).length === 0) throw configError("RevenueCat entitlements");
+  const revenueCatReads = readsValue(env.REVENUECAT_READS);
+  const revenueCatPackEntitlements = packEntitlementsValue(env.REVENUECAT_PACK_ENTITLEMENTS);
+  const packIncludes = packIncludesValue(env.PACK_INCLUDES);
   const authSettings = authConfig(env, readFile);
   return {
     mode,
+    revenueCatReads,
+    revenueCatPackEntitlements,
+    packIncludes,
     baseUrl: urlValue("base-url", stringValue(env, "BASE_URL", file["base-url"])),
     relayUrl: urlValue("relay-url", stringValue(env, "RELAY_URL", file["relay-url"]) ?? "https://relay.critalarm.app"),
     relayUrlExplicit,
