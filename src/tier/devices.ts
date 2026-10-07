@@ -4,6 +4,7 @@ import { setAlarmToken } from "./device-tokens.js";
 import { capsFor } from "./caps.js";
 import { sweepDeviceIntoTopics } from "./subscriptions.js";
 import type { AccountContext, TierDependencies } from "./types.js";
+import { checkDueAfterNewToken } from "../check/device-hooks.js";
 
 const deviceId = z.string().regex(/^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 export const registrationSchema = z.object({
@@ -95,9 +96,13 @@ export function updateDevice(deps: TierDependencies, deviceIdValue: string, inpu
   const context = authenticateDevice(deps.db, bearer);
   if (context === null) return null;
   if (context.deviceId !== deviceIdValue) return null;
+  const before = deps.db.prepare("SELECT push_token FROM devices WHERE id = ?").get(deviceIdValue) as { push_token: string } | undefined;
   deps.db.prepare("UPDATE devices SET push_token = ?, app_version = ?, last_seen = ?, platform = COALESCE(?, platform) WHERE id = ?").run(input.push_token, input.app_version, deps.clock.now(), platform ?? null, deviceIdValue);
   const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceIdValue) as { platform: "ios" | "android" } | undefined;
   if (device !== undefined) setAlarmToken(deps.db, deps.clock, deviceIdValue, device.platform, input.push_token);
+  // api.md §4.5. A new push token on a device with missed checks makes it due
+  // at once.
+  if (before !== undefined && before.push_token !== input.push_token) checkDueAfterNewToken(deps.db, deps.clock, deviceIdValue);
   return accountForContext(deps, context);
 }
 

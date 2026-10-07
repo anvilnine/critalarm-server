@@ -16,6 +16,8 @@ import type { PushSender } from "./push/types.js";
 import { RelayClient } from "./relay/client.js";
 import { createAuthHandler } from "./auth/better-auth.js";
 import { createBilling } from "./tier/billing-startup.js";
+import { createChecks } from "./check/startup.js";
+import { loggedPath } from "./request-log.js";
 
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
@@ -32,7 +34,12 @@ const noop: PushSender = { send: async () => ({ status: 501, stale: false }) };
 const apnsSender = config.apns === undefined ? undefined : new ApnsSender({ ...config.apns, clock });
 const apns: PushSender = apnsSender ?? noop;
 const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clock, fetch });
-const dispatcher = new PushDispatcher(db, { apns, fcm, liveActivity: apnsSender }, clock);
+// api.md §4.5, the weekly check. It has its own senders and its own scan, and
+// the only thing it adds here is a note of when an alarm last went to a device,
+// written after the alarm send has returned. On a self-hosted server, or with
+// WEEKLY_CHECKS=off, `noting` hands back the sender it was given.
+const checks = createChecks(config, { db, clock, fetch });
+const dispatcher = new PushDispatcher(db, { apns: checks.noting(apns), fcm: checks.noting(fcm), liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
 const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
 const dispatch = async (events: readonly DeliveryEvent[]) => {
@@ -66,6 +73,8 @@ const stop = startTimerScanner(incidents, dispatch, 250);
 // so once an hour is enough. On a self-hosted server this starts nothing, and
 // an unset mode is read as self-hosted so nothing is ever deleted by accident.
 const stopPrune = startHistoryPrune(db, clock, config.mode ?? "selfhosted");
+// Once a minute. It does nothing until a device enrols.
+const stopChecks = checks.start();
 // One line per request, off unless asked for. Proving what the server did
 // during device testing meant reading the SQLite file, because nothing was
 // logged at all. Method, path, status and duration only: no tokens, no
@@ -76,11 +85,11 @@ const handler: typeof app.fetch = logRequests
   ? async (request, ...rest) => {
       const startedAt = Date.now();
       const response = await app.fetch(request, ...rest);
-      console.log(`${request.method} ${new URL(request.url).pathname} ${response.status} ${Date.now() - startedAt}ms`);
+      console.log(`${request.method} ${loggedPath(new URL(request.url).pathname)} ${response.status} ${Date.now() - startedAt}ms`);
       return response;
     }
   : app.fetch;
 serve({ fetch: handler, port: config.port });
-const shutdown = () => { stop(); stopPrune(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
+const shutdown = () => { stop(); stopPrune(); stopChecks(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);

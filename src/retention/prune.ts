@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
 import { capsFor } from "../tier/caps.js";
 import type { Tier } from "../tier/types.js";
+import { ROUND_RETENTION_S } from "../check/schedule.js";
 
 export type ServerMode = "selfhosted" | "relay" | "hosted";
 
@@ -47,6 +48,14 @@ export function pruneHistory(db: Database.Database, clock: Clock, mode: ServerMo
   return { accounts: accounts.length, incidents, messages };
 }
 
+// api.md §4.5. A weekly check round is kept for 90 days, whatever the tier. A
+// round that is still open is never deleted, whatever its age. Only a relay or
+// a hosted server has rounds, and only they delete anything on a schedule.
+export function pruneCheckRounds(db: Database.Database, clock: Clock, mode: ServerMode): number {
+  if (mode !== "hosted" && mode !== "relay") return 0;
+  return db.prepare("DELETE FROM check_rounds WHERE result IS NOT NULL AND opened_at < ?").run(clock.now() - ROUND_RETENTION_S).changes;
+}
+
 // Its own timer, next to the incident timer scanner and slower than it: the
 // window moves by a day, so once an hour is plenty. The first run waits a
 // minute so a boot is not competing with it.
@@ -64,6 +73,11 @@ export function startHistoryPrune(
       pruneHistory(db, clock, mode);
     } catch (error: unknown) {
       console.error("history prune failed", error);
+    }
+    try {
+      pruneCheckRounds(db, clock, mode);
+    } catch (error: unknown) {
+      console.error("check round prune failed", error);
     }
   };
   const first = setTimeout(() => {
