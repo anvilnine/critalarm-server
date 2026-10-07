@@ -275,6 +275,47 @@ describe("RevenueCat webhook", () => {
     expect(response.status).toBe(200);
     expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
   });
+
+  it("leaves every critical switch on when a plan expires", async () => {
+    const { app, db } = setup();
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
+    const insert = db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES (?, 'acc_1', ?, 'https://alerts.example.com', ?, 1, 30, 1800, 600, 'none', 1)");
+    for (const name of ["one", "two", "three"]) insert.run(`top_${name}`, name, `hash_${name}`);
+
+    const response = await webhook(app, event({ type: "EXPIRATION", expiration_at_ms: 900_000 }));
+
+    expect(response.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "free" });
+    expect(db.prepare("SELECT name, critical FROM topics WHERE account_id = 'acc_1' ORDER BY name").all()).toEqual([
+      { name: "one", critical: 1 },
+      { name: "three", critical: 1 },
+      { name: "two", critical: 1 },
+    ]);
+  });
+
+  it("does not downgrade on a cancel while the period is still running", async () => {
+    const { app, db } = setup();
+    await webhook(app, event());
+
+    const cancel = await webhook(app, event({ id: "cancel", type: "CANCELLATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 9_000_000 }));
+
+    expect(cancel.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "relay" });
+    expect(db.prepare("SELECT event_id, applied FROM billing_events WHERE event_id = 'cancel'").get()).toEqual({ event_id: "cancel", applied: 1 });
+  });
+
+  // What the code does today. A refund arrives as a cancel whose period is
+  // already over, and any event whose expiry is in the past drops the billing id
+  // to free, whatever its type.
+  it("drops to free on a cancel whose period has already ended", async () => {
+    const { app, db } = setup();
+    await webhook(app, event());
+
+    const cancel = await webhook(app, event({ id: "refund", type: "CANCELLATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 900_000 }));
+
+    expect(cancel.status).toBe(200);
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "free" });
+  });
 });
 
 // The map the dashboard identifiers land in comes from an environment variable
