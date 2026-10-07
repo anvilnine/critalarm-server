@@ -877,7 +877,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 **Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account holds the `pro` pack (§4.2). `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
 
-**A round.** A round opens when the relay reaches the device, and at that moment the relay fixes the round's close time: 24 hours later, by the relay's clock. It is returned as `closes_at` and never changes. A round is up to three pushes: one when it opens, one 6 hours later and one 18 hours later. They carry the same `check_id` and an `attempt` of 1, 2 or 3. The first counted receipt ends the round and no further push is sent. After its first round each device has a fixed moment in the week, which the relay derives from the `device_id` to spread its load, and rounds are 7 days apart. Two devices may have the same moment. `next_due_at` is when the next round is due.
+**A round.** A round opens when the relay reaches the device, and at that moment the relay fixes the round's close time: 24 hours later, by the relay's clock. It is returned as `closes_at` and never changes. A round is up to three pushes: one when it opens, one 6 hours later and one 18 hours later. They carry the same `check_id` and an `attempt` of 1, 2 or 3. The first counted receipt ends the round and no further push is sent. After its first round each device has a fixed moment in the week, which the relay derives from the `device_id` to spread its load, and rounds are 7 days apart. The second round opens at the device's first fixed moment that is at least 3 days after the first round opened, so the gap between the first two rounds is 3 to 10 days. Two devices may have the same moment. `next_due_at` is when the next round is due.
 
 **When more devices are due than the relay sends at once, the oldest due goes first and none is skipped.** A round can therefore open later than `next_due_at`. It is never dropped for being late, and it runs for its own 24 hours from the moment it opens.
 
@@ -896,7 +896,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | `received` | a receipt reached the relay while the round was open |
 | `missed` | the round closed with no receipt |
 | `refused` | APNs or FCM refused the device's push token. No receipt was possible |
-| `skipped` | nothing was sent: `reason` is `"pack"`, `"no_token"` or `"disabled"`. Not counted as a miss |
+| `skipped` | the round ended without an answer being owed: `reason` is `"pack"`, `"no_token"`, `"disabled"` or `"held"`. With the first three, the pack, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. Not counted as a miss |
 
 **`state`.** It reports what happened to the last rounds and makes no claim about the phone.
 
@@ -912,6 +912,8 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 `misses` is how many closed rounds in a row were `missed` or `refused`. `skipped` rounds change nothing.
 
+**Fields with nothing to report are `null`.** `last_sent_at` and `last_received_at` are `null` until there is one. `next_due_at` and `notice_after` are `null` while `state` is `off`. When `misses` is already 2 or more, `notice_after` is the second at which the run of misses reached two, which is in the past.
+
 **One missed round is a prompt to look, and nothing more.** iOS does not promise to deliver a background push and may hold one back to save power, so a single miss is weak evidence. A client shows `missed_once` on its reliability screen and raises nothing else. It raises a notice only at two rounds in a row: `misses` of 2 or more.
 
 **A device must not rely on the relay to say that checks stopped arriving**, because the push that would bring the news is the thing that failed. `notice_after` is the second at which this device will have missed two rounds in a row if no check arrives from now on. A client stores it from this route and from every receipt response, and raises its notice by itself when its own clock passes that second with no check received since. The threshold is the same two rounds either way.
@@ -920,9 +922,9 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 **When a device registers a new push token** (`PATCH /relay/v1/devices/{device_id}`, §4.2) while `misses` is above 0, it becomes due at once and its next round opens within 24 hours.
 
-**Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after it sent that device an `open`, `repeat` or `reopen`. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together.
+**Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after it sent that device an `open`, `repeat` or `reopen`. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together. The 30 minutes apply to every push of a round, not only the first. A push still held when the round closes is never sent. A round in which every push was held ends as `skipped` with `reason` `"held"`: alarms were reaching the device the whole time, which says more than a check would.
 
-`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today.
+`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
 
 ---
 
