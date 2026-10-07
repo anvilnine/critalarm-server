@@ -16,9 +16,9 @@ import { ALARM_HOLD_S, ATTEMPT_OFFSETS_S, MAX_ATTEMPTS, MIN_ROUND_GAP_S, ROUND_L
 export const CHECK_PACK: PackId = "pro";
 
 export type RoundResult = "received" | "missed" | "refused" | "skipped";
-export type SkipReason = "pack" | "no_token" | "disabled" | "held";
+export type SkipReason = "pack" | "no_token" | "disabled" | "held" | "unsent";
 export type CheckState = "waiting" | "received" | "missed_once" | "missed_repeatedly" | "token_refused" | "no_token" | "off";
-export type AttemptOutcome = "accepted" | "refused" | "failed";
+export type AttemptOutcome = "accepted" | "refused" | "failed" | "cancelled";
 
 export interface CheckView {
   enabled: boolean;
@@ -224,6 +224,7 @@ export class CheckStore {
       if (device.last_alarm_push_at !== null && now - device.last_alarm_push_at < ALARM_HOLD_S) {
         const until = device.last_alarm_push_at + ALARM_HOLD_S;
         this.db.prepare("UPDATE device_checks SET next_attempt_at = ? WHERE device_id = ?").run(Math.min(until, round.closes_at), deviceId);
+        this.db.prepare("UPDATE check_rounds SET held_until = ? WHERE id = ?").run(until, round.id);
         return null;
       }
       const attempt = round.attempts + 1;
@@ -253,9 +254,47 @@ export class CheckStore {
     })();
   }
 
+  // Asked immediately before the bytes of a planned push leave, after any
+  // provider token has been fetched. The pack, the enrolment, the device and
+  // its token were checked when the attempt was planned, and time has passed
+  // since. False means send nothing. Where the contract names a result for
+  // the reason, the round is closed with it here.
+  confirm(planned: PlannedCheck): boolean {
+    const now = this.clock.now();
+    return this.db.transaction((): boolean => {
+      const round = this.round(planned.roundId);
+      // No round: the device was released. A result: the round already ended,
+      // by a receipt, by the device switching off, or by its close time.
+      if (round === undefined || round.result !== null) return false;
+      const state = this.state(round.device_id);
+      const device = this.device(round.device_id);
+      if (state === undefined || device === undefined || state.round_id !== round.id) return false;
+      if (state.enabled !== 1) {
+        this.close(round, "skipped", "disabled", now);
+        return false;
+      }
+      if (now >= round.closes_at) {
+        this.expire(round);
+        return false;
+      }
+      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packIncludes)) {
+        this.close(round, "skipped", "pack", now);
+        return false;
+      }
+      if (device.push_token === "") {
+        this.close(round, "skipped", "no_token", now);
+        return false;
+      }
+      // A different token than the one this push was built for. This push is
+      // not sent, and the round's next one goes to the new token.
+      return device.push_token === planned.pushToken;
+    })();
+  }
+
   // What the provider said about an attempt. A refused token ends the round.
   // Anything else that is not an acceptance used the attempt and changes
-  // nothing more.
+  // nothing more: the attempt is never sent again, and it is not a push that
+  // went out.
   record(roundId: string, attempt: number, outcome: AttemptOutcome, status: number): void {
     const now = this.clock.now();
     this.db.transaction(() => {
@@ -312,14 +351,33 @@ export class CheckStore {
     if (round !== undefined && this.clock.now() >= round.closes_at) this.expire(round);
   }
 
-  // A round whose close time has come with no receipt. If a push went out and
-  // nothing came back, that is a miss. If no push was ever sent, every one of
-  // them was held back behind alarms to the device, and no answer was owed:
-  // the round is skipped with the reason "held" and counts toward nothing.
-  // Either way it closes at its own close time, whenever this runs.
+  // A round whose close time has come with no receipt.
+  //
+  // It is a miss only when a provider accepted at least one of its pushes. An
+  // attempt on record is not that: it may have failed, timed out, or never
+  // left because the relay stopped.
+  //
+  // With no accepted push, no answer was owed and the round is skipped. The
+  // reason is "held" when no attempt was ever recorded, the scan held the
+  // round at least once, and a hold was still running at the round's close,
+  // so alarms kept every push back. It is
+  // "unsent" for everything else: provider errors, timeouts, a relay that was
+  // not running. Either way it closes at its own close time, whenever this
+  // runs.
   private expire(round: RoundRow): void {
-    if (round.attempts === 0) this.close(round, "skipped", "held", round.closes_at);
-    else this.close(round, "missed", null, round.closes_at);
+    const accepted = this.db.prepare("SELECT 1 FROM check_attempts WHERE round_id = ? AND outcome = 'accepted' LIMIT 1").get(round.id);
+    if (accepted !== undefined) {
+      this.close(round, "missed", null, round.closes_at);
+      return;
+    }
+    // The hold the scan last wrote on the round can be older than the newest
+    // alarm, because a held device is not looked at again until its hold was
+    // due to end. The device's own last alarm time is read as well.
+    const held = this.db.prepare("SELECT held_until FROM check_rounds WHERE id = ?").get(round.id) as { held_until: number | null } | undefined;
+    const lastAlarm = this.device(round.device_id)?.last_alarm_push_at ?? null;
+    const holdEnds = Math.max(held?.held_until ?? 0, lastAlarm === null ? 0 : lastAlarm + ALARM_HOLD_S);
+    const heldToTheEnd = round.attempts === 0 && held !== undefined && held.held_until !== null && holdEnds >= round.closes_at;
+    this.close(round, "skipped", heldToTheEnd ? "held" : "unsent", round.closes_at);
   }
 
   private skip(state: StateRow, round: RoundRow | undefined, reason: SkipReason, now: number): null {

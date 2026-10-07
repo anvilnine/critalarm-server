@@ -1,6 +1,7 @@
 import { generateKeyPairSync, verify } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApnsTransport, ApnsTransportResponse } from "../apns.js";
+import { ApnsSender, type ApnsTransport, type ApnsTransportResponse } from "../apns.js";
+import { ApnsProviderToken } from "../apns-token.js";
 import { ApnsCheckSender, FcmCheckSender, apnsCheckHeaders, apnsCheckPayload, fcmCheckMessage } from "../check.js";
 
 // api.md §5.4. The exact headers and bodies of the weekly check push, and what
@@ -163,6 +164,52 @@ describe("the APNs check push", () => {
     expect(logged).not.toContain("secret-push-token");
   });
 
+  it("gives up on a transport that never answers", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sender = new ApnsCheckSender({ teamId: "t", keyId: "k", privateKey: ec.privateKey, bundleId: "app.critalarm", environment: "production", clock: { now: () => 1_000 }, timeoutMs: 20, transport: () => ({ send: () => new Promise(() => {}), close: () => {} }) });
+    expect(await sender.sendCheck({ platform: "ios", pushToken: "token" }, push)).toEqual({ outcome: "failed", status: 0 });
+  });
+
+  it("asks whether the check is still wanted before each request, and sends nothing when it is not", async () => {
+    const none = apns();
+    expect(await none.sender.sendCheck({ platform: "ios", pushToken: "token" }, push, () => false)).toEqual({ outcome: "cancelled", status: 0 });
+    expect(none.sent).toEqual([]);
+    // Wanted for the first host, not for the second.
+    const both = apns(() => ({ status: 400, headers: {}, body: '{"reason":"BadDeviceToken"}' }));
+    let asked = 0;
+    expect(await both.sender.sendCheck({ platform: "ios", pushToken: "token" }, push, () => { asked += 1; return asked === 1; })).toEqual({ outcome: "cancelled", status: 0 });
+    expect(both.sent).toHaveLength(1);
+  });
+
+  it("uses the provider token it is given, the one the alarm sender holds, and mints none of its own", async () => {
+    const token = new ApnsProviderToken({ teamId: "team_1", keyId: "key_1", privateKey: ec.privateKey });
+    const alarmWire: Record<string, string>[] = [];
+    const checkWire: Record<string, string>[] = [];
+    let now = 1_000;
+    const clock = { now: () => now };
+    const alarm = new ApnsSender({ teamId: "team_1", keyId: "key_1", privateKey: ec.privateKey, bundleId: "app.critalarm", environment: "production", clock, providerToken: token, transport: () => ({ send: async (_path, headers) => { alarmWire.push(headers); return { status: 200, headers: {}, body: "" }; }, close: () => {} }) });
+    const check = new ApnsCheckSender({ teamId: "team_1", keyId: "key_1", privateKey: ec.privateKey, bundleId: "app.critalarm", environment: "production", clock, providerToken: token, transport: () => ({ send: async (_path, headers) => { checkWire.push(headers); return { status: 200, headers: {}, body: "" }; }, close: () => {} }) });
+    const device = { id: "dev_1", accountId: "acc_1", platform: "ios" as const, pushToken: "t" };
+    const event = { kind: "open" as const, topicHash: "h", topic: "prod", incidentId: "inc_1", messageId: "m_1", priority: 5 as const, maxRingS: 60, ringUntil: 1_060, server: "s", title: "t", body: "b", critical: true };
+
+    await alarm.send(device, event);
+    now = 1_500;
+    await check.sendCheck({ platform: "ios", pushToken: "t" }, push);
+    now = 2_000;
+    await alarm.send(device, event);
+    const tokens = [alarmWire[0]?.authorization, checkWire[0]?.authorization, alarmWire[1]?.authorization];
+    expect(new Set(tokens).size).toBe(1);
+    expect(token.minted).toBe(1);
+
+    // Whichever of the two sends first after the 50 minutes refreshes it, once.
+    now = 1_000 + 50 * 60;
+    await check.sendCheck({ platform: "ios", pushToken: "t" }, push);
+    await alarm.send(device, event);
+    expect(checkWire[1]?.authorization).toBe(alarmWire[2]?.authorization);
+    expect(checkWire[1]?.authorization).not.toBe(tokens[0]);
+    expect(token.minted).toBe(2);
+  });
+
   it("closes the connections it opened", async () => {
     const { sender, closed } = apns();
     sender.close();
@@ -206,9 +253,58 @@ describe("the FCM check push", () => {
     for (const word of [...forbidden, "collapse", "notification", "high", "server", "title", "body", "incident"]) expect(wire).not.toContain(word);
   });
 
-  it("reads UNREGISTERED as a refused token", async () => {
-    const gone = fcm(() => Response.json({ error: { code: 404, status: "NOT_FOUND", details: [{ errorCode: "UNREGISTERED" }] } }, { status: 404 }));
+  it("reads a 404 that names the token as UNREGISTERED as a refused token", async () => {
+    const gone = fcm(() => Response.json({ error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND", details: [{ "@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", errorCode: "UNREGISTERED" }] } }, { status: 404 }));
     expect(await gone.sender.sendCheck({ platform: "android", pushToken: "t" }, push)).toEqual({ outcome: "refused", status: 404 });
+  });
+
+  it("reads any other 404 as a provider failure, not a refused token", async () => {
+    const bodies: (Response | (() => Response))[] = [
+      () => Response.json({ error: { code: 404, message: "Project not found.", status: "NOT_FOUND" } }, { status: 404 }),
+      () => Response.json({ error: { code: 404, status: "NOT_FOUND", details: [{ errorCode: "SENDER_ID_MISMATCH" }] } }, { status: 404 }),
+      () => new Response("<html>Not Found</html>", { status: 404 }),
+      () => new Response(null, { status: 404 }),
+      // The word alone, outside the error code, names nothing.
+      () => Response.json({ error: { code: 404, message: "UNREGISTERED route", status: "NOT_FOUND" } }, { status: 404 }),
+    ];
+    for (const body of bodies) {
+      const { sender } = fcm(body as () => Response);
+      expect(await sender.sendCheck({ platform: "android", pushToken: "t" }, push)).toEqual({ outcome: "failed", status: 404 });
+    }
+  });
+
+  it("gives up on a token request that never settles", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sender = new FcmCheckSender({ projectId: "p", clientEmail: "e", privateKey: rsa.privateKey, tokenUrl: "https://oauth.example.test/token", clock: { now: () => 1_000 }, timeoutMs: 20, fetch: () => new Promise<Response>(() => {}) });
+    expect(await sender.sendCheck({ platform: "android", pushToken: "t" }, push)).toEqual({ outcome: "failed", status: 0 });
+  });
+
+  it("gives up on a check request that never settles", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sender = new FcmCheckSender({
+      projectId: "p", clientEmail: "e", privateKey: rsa.privateKey, tokenUrl: "https://oauth.example.test/token", clock: { now: () => 1_000 }, timeoutMs: 20,
+      fetch: (request) => (request.url === "https://oauth.example.test/token" ? Promise.resolve(Response.json({ access_token: "a", expires_in: 3_600 })) : new Promise<Response>(() => {})),
+    });
+    expect(await sender.sendCheck({ platform: "android", pushToken: "t" }, push)).toEqual({ outcome: "failed", status: 0 });
+  });
+
+  it("gives up on a response body that never arrives", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const hanging = { ok: false, status: 404, text: () => new Promise<string>(() => {}), json: () => new Promise<unknown>(() => {}) } as unknown as Response;
+    const sender = new FcmCheckSender({
+      projectId: "p", clientEmail: "e", privateKey: rsa.privateKey, tokenUrl: "https://oauth.example.test/token", clock: { now: () => 1_000 }, timeoutMs: 20,
+      fetch: (request) => Promise.resolve(request.url === "https://oauth.example.test/token" ? Response.json({ access_token: "a", expires_in: 3_600 }) : hanging),
+    });
+    expect(await sender.sendCheck({ platform: "android", pushToken: "t" }, push)).toEqual({ outcome: "failed", status: 0 });
+  });
+
+  it("asks whether the check is still wanted after the access token arrives, and sends nothing when it is not", async () => {
+    const { sender, sends, tokenRequests } = fcm();
+    const asked: number[] = [];
+    const answer = await sender.sendCheck({ platform: "android", pushToken: "t" }, push, () => { asked.push(tokenRequests()); return false; });
+    expect(answer).toEqual({ outcome: "cancelled", status: 0 });
+    expect(asked).toEqual([1]);
+    expect(sends).toEqual([]);
   });
 
   it("reads every other answer as a failed attempt", async () => {

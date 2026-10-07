@@ -7,6 +7,7 @@ import type { CheckAnswer, CheckPush, CheckSender, CheckTarget } from "../../pus
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
+import { AlarmNotes, alarmNoteWriter } from "../device-hooks.js";
 import { CheckScheduler } from "../scheduler.js";
 import { CheckStore, type CheckView, type RoundView } from "../store.js";
 
@@ -33,8 +34,12 @@ export interface SentCheck {
 export class FakeCheckSender implements CheckSender {
   readonly sent: SentCheck[] = [];
   reply: (sent: SentCheck) => CheckAnswer | Promise<CheckAnswer> = () => ({ outcome: "accepted", status: 200 });
+  // Runs where a real sender would be fetching a provider token.
+  before: () => void | Promise<void> = () => {};
 
-  async sendCheck(target: CheckTarget, push: CheckPush): Promise<CheckAnswer> {
+  async sendCheck(target: CheckTarget, push: CheckPush, stillWanted: () => boolean = () => true): Promise<CheckAnswer> {
+    await this.before();
+    if (!stillWanted()) return { outcome: "cancelled", status: 0 };
     const sent = { target, push };
     this.sent.push(sent);
     return this.reply(sent);
@@ -81,6 +86,7 @@ export interface Harness {
   counters: Counters;
   store: CheckStore;
   scheduler: CheckScheduler;
+  notes: AlarmNotes;
   app: Hono;
   api: {
     call(method: string, path: string, token?: string, body?: unknown): Response | Promise<Response>;
@@ -100,7 +106,8 @@ export function setup(options: SetupOptions = {}): Harness {
   const sender = new FakeCheckSender();
   const counters = new Counters(db, clock);
   const store = new CheckStore(db, clock, counters, options.config?.packIncludes ?? {});
-  const scheduler = new CheckScheduler(store, { ios: sender, android: sender }, options.batch);
+  const notes = new AlarmNotes(alarmNoteWriter(db));
+  const scheduler = new CheckScheduler(store, { ios: sender, android: sender }, { notes, ...(options.batch === undefined ? {} : { batch: options.batch }) });
   const app = createApp({ config: { ...config, ...options.config }, db, clock, ids: { message: () => "m_1", incident: () => "inc_1", timer: () => "tm_1" }, dispatch: async () => {} });
 
   const call = (method: string, path: string, token?: string, body?: unknown) =>
@@ -127,9 +134,9 @@ export function setup(options: SetupOptions = {}): Harness {
   // leaves behind.
   const restart = () => {
     const next = new FakeCheckSender();
-    return { sender: next, scheduler: new CheckScheduler(new CheckStore(db, clock, new Counters(db, clock)), { ios: next, android: next }, options.batch) };
+    return { sender: next, scheduler: new CheckScheduler(new CheckStore(db, clock, new Counters(db, clock)), { ios: next, android: next }, options.batch === undefined ? {} : { batch: options.batch }) };
   };
-  return { db, clock, sender, counters, store, scheduler, app, api, scanAt, restart };
+  return { db, clock, sender, counters, store, scheduler, notes, app, api, scanAt, restart };
 }
 
 // One enrolled device on an account that holds the pack.
