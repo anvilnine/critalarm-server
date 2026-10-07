@@ -353,6 +353,20 @@ export function mergeAccounts(db: Database.Database, clock: Clock, identities: I
         .run(`tch_${randomUUID()}`, target, counts.tier_before, counts.tier_after, `merge from ${source}`, null, clock.now());
     }
 
+    // Packs (api.md §4.3): the merged account holds the union of both sides.
+    // What a billing id holds moved with the billing id above. An operator
+    // grant is keyed on (account_id, pack), so a plain repoint aborts when
+    // both sides hold one. The longer one is kept instead, where no end date
+    // is longer than any end date, and then the source's rows go.
+    db.prepare(
+      `INSERT INTO account_pack_grants (account_id, pack, expires_at, reason, granted_at)
+         SELECT ?, pack, expires_at, reason, granted_at FROM account_pack_grants WHERE account_id = ?
+         ON CONFLICT(account_id, pack) DO UPDATE SET expires_at = CASE
+           WHEN account_pack_grants.expires_at IS NULL OR excluded.expires_at IS NULL THEN NULL
+           ELSE MAX(account_pack_grants.expires_at, excluded.expires_at) END`,
+    ).run(target, source);
+    db.prepare("DELETE FROM account_pack_grants WHERE account_id = ?").run(source);
+
     // relay_p4_usage is keyed on (account_id, day_start), so a plain repoint
     // aborts as soon as both accounts have sent a priority 4 today. The counts
     // add up instead, and then the source's rows go.
@@ -435,6 +449,12 @@ export function deleteAccount(db: Database.Database, accountId: string): DeleteC
     // find its event id and apply nothing (api.md §4.3).
     db.prepare(`UPDATE billing_events SET account_id = NULL WHERE account_id IN (${marks})`).run(...family);
     db.prepare(`DELETE FROM account_merges WHERE from_account IN (${marks}) OR into_account IN (${marks})`).run(...family, ...family);
+    // Packs go by cascade: billing_packs with the billing ids, and
+    // account_pack_grants with the account. billing_reads carries no foreign
+    // key, because a read can be queued for a customer id that has no billing
+    // row yet, so a read queued for this account is removed here. The customer
+    // ids are the account ids themselves and their linked billing ids.
+    db.prepare(`DELETE FROM billing_reads WHERE app_user_id IN (${marks}) OR app_user_id IN (SELECT app_user_id FROM account_billing_ids WHERE account_id IN (${marks}))`).run(...family, ...family);
     // Tombstones first. accounts.merged_into points at the survivor and has no
     // ON DELETE either, so deleting the survivor while a tombstone still names
     // it breaks the foreign key. accountFamily lists the survivor first, so the

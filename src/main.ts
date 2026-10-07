@@ -15,7 +15,7 @@ import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
 import { RelayClient } from "./relay/client.js";
 import { createAuthHandler } from "./auth/better-auth.js";
-import { reconcileAccount, startReconcileSweep, type ReconcileDependencies } from "./tier/reconcile.js";
+import { createBilling } from "./tier/billing-startup.js";
 
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
@@ -47,17 +47,18 @@ const dispatch = async (events: readonly DeliveryEvent[]) => {
 // server starts and serves everything else with no sign-in surface mounted.
 const authHandler = (config.mode ?? "relay") === "selfhosted" ? undefined : createAuthHandler(config, db, clock);
 // Guard 4: read entitlements back from RevenueCat instead of trusting the
-// webhook. With no REVENUECAT_SECRET_API_KEY this schedules nothing and says
-// nothing, which is the state every self-hosted server stays in.
-const reconcile: ReconcileDependencies = { db, clock, fetch, ...(config.revenueCatApi === undefined ? {} : { revenueCatApi: config.revenueCatApi }) };
-const stopReconcile = startReconcileSweep(reconcile);
+// webhook. With no REVENUECAT_SECRET_API_KEY this schedules nothing, which is
+// the state every self-hosted server stays in. Which path the reads take is
+// REVENUECAT_READS (api.md §4.3), and unset is the reconcile sweep as it was.
+const billing = createBilling(config, { db, clock, fetch });
+const stopReconcile = billing.start();
 // After a merge the surviving account holds billing ids it did not hold a
 // moment ago. Reading those back is a network call, so it runs after the
 // response rather than inside the merge transaction.
 const reconcileAfterMerge = (accountId: string) => {
-  void reconcileAccount(reconcile, accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
+  void billing.afterMerge(accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
 };
-const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }) });
+const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }), ...(billing.storeReads === undefined ? {} : { storeReads: billing.storeReads }) });
 
 await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);
