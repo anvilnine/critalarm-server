@@ -6,6 +6,7 @@ import type { CheckAnswer } from "../../push/check.js";
 import { PushDispatcher } from "../../push/dispatcher.js";
 import type { PushDevice, PushResult, PushSender } from "../../push/types.js";
 import { notingAlarmPushes } from "../device-hooks.js";
+import { roundAfter } from "../schedule.js";
 import { T0, addAccount, addDevice, setup, type Harness } from "./fakes.js";
 
 // api.md §4.5, checks and alarms. The relay never delays, reorders or alters
@@ -166,11 +167,11 @@ describe("no check is started within 30 minutes after an open, a repeat or a reo
         await harness.scanAt(time);
         expect(harness.sender.sent).toEqual([]);
       }
-      expect(await harness.api.rounds("dev_a")).toEqual([]);
+      // The round opened when the relay reached the device. Its push is held.
+      expect(await harness.api.rounds("dev_a")).toMatchObject([{ opened_at: T0, closes_at: T0 + 86_400, attempts: 0, result: null }]);
       await harness.scanAt(T0 + 30 * MINUTE);
-      expect(harness.sender.sent).toHaveLength(1);
-      // The round opens when the push goes, and runs its own 24 hours.
-      expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ opened_at: T0 + 30 * MINUTE, closes_at: T0 + 30 * MINUTE + 86_400 });
+      expect(harness.sender.sent.map((sent) => sent.push.attempt)).toEqual([1]);
+      expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ opened_at: T0, closes_at: T0 + 86_400, attempts: 1 });
     });
   }
 
@@ -202,6 +203,101 @@ describe("no check is started within 30 minutes after an open, a repeat or a reo
     expect(harness.sender.sent).toEqual([]);
     await harness.scanAt(T0 + 150 * MINUTE);
     expect(harness.sender.sent).toHaveLength(1);
+  });
+
+  // An alarm that repeats through a whole round. Every push of the round is
+  // held, none is sent, and the round is not a miss.
+  const repeatThrough = async (harness: ReturnType<typeof alarmSetup>, from: number, to: number) => {
+    for (let time = from; time <= to; time += 20 * MINUTE) {
+      harness.clock.value = time;
+      await harness.dispatcher.dispatch([event("repeat")]);
+      await harness.scheduler.scan();
+    }
+  };
+
+  it("a round in which every push was held ends as skipped with reason held, and misses does not change", async () => {
+    const harness = alarmSetup({ noting: true, enrol: true });
+    await harness.api.enable("dev_a");
+    await repeatThrough(harness, T0, T0 + 86_400 + 3_600);
+    expect(harness.sender.sent).toEqual([]);
+    expect(await harness.api.rounds("dev_a")).toEqual([{ id: expect.stringMatching(/^rnd_/), opened_at: T0, closes_at: T0 + 86_400, closed_at: T0 + 86_400, attempts: 0, result: "skipped", reason: "held", attempt_received: null, receipt_at: null, device_received_at: null, late_receipt_at: null }]);
+    expect(await harness.api.check("dev_a")).toMatchObject({ misses: 0, state: "waiting" });
+    expect(harness.db.prepare("SELECT COUNT(*) AS n FROM check_attempts").get()).toEqual({ n: 0 });
+  });
+
+  it("a held round after a miss leaves misses at 1, and it is closed as held by a read with no scan", async () => {
+    const harness = alarmSetup({ noting: true, enrol: true });
+    await harness.api.enable("dev_a");
+    for (const offset of [0, 6 * 3_600, 18 * 3_600, 86_400]) await harness.scanAt(T0 + offset);
+    expect(await harness.api.check("dev_a")).toMatchObject({ misses: 1, state: "missed_once" });
+    const next = roundAfter("dev_a", T0);
+    await repeatThrough(harness, next, next + 86_400 - 20 * MINUTE);
+    // No scan runs past the close. Reading the state is enough.
+    harness.clock.value = next + 86_400;
+    expect(await harness.api.check("dev_a")).toMatchObject({ misses: 1, state: "missed_once" });
+    expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ result: "skipped", reason: "held", attempts: 0, closed_at: next + 86_400 });
+  });
+
+  it("a round whose first push went out, with the later ones held and no receipt, ends as missed", async () => {
+    const harness = alarmSetup({ noting: true, enrol: true });
+    await harness.api.enable("dev_a");
+    await harness.scanAt(T0);
+    expect(harness.sender.sent).toHaveLength(1);
+    await repeatThrough(harness, T0 + 5 * 3_600, T0 + 86_400 + 3_600);
+    expect(harness.sender.sent).toHaveLength(1);
+    expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ attempts: 1, result: "missed", reason: null, closed_at: T0 + 86_400 });
+    expect(await harness.api.check("dev_a")).toMatchObject({ misses: 1, state: "missed_once" });
+  });
+
+  it("a round whose first pushes were held and whose last went out, with no receipt, ends as missed", async () => {
+    const harness = alarmSetup({ noting: true, enrol: true });
+    await harness.api.enable("dev_a");
+    await repeatThrough(harness, T0, T0 + 10 * 3_600);
+    expect(harness.sender.sent).toEqual([]);
+    // The hold lifts between the second push's time and the third's. One push
+    // goes then, not two, and the third goes at its normal time.
+    await harness.scanAt(T0 + 10 * 3_600 + 30 * MINUTE);
+    await harness.scanAt(T0 + 10 * 3_600 + 31 * MINUTE);
+    expect(harness.sender.sent.map((sent) => sent.push.attempt)).toEqual([1]);
+    await harness.scanAt(T0 + 18 * 3_600);
+    expect(harness.sender.sent.map((sent) => sent.push.attempt)).toEqual([1, 2]);
+    await harness.scanAt(T0 + 86_400);
+    expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ attempts: 2, result: "missed", reason: null });
+  });
+
+  it("state and notice_after after a held round are what they are after any skipped round", async () => {
+    const outcome = async (how: "held" | "pack") => {
+      const harness = alarmSetup({ noting: true, enrol: true });
+      await harness.api.enable("dev_a");
+      // One answered round first, so there is a state to keep.
+      await harness.scanAt(T0);
+      await harness.api.receipt("dev_a", harness.sender.sent[0]?.push.checkId ?? "");
+      const next = roundAfter("dev_a", T0);
+      if (how === "held") {
+        await repeatThrough(harness, next, next + 86_400);
+      } else {
+        harness.db.prepare("DELETE FROM account_pack_grants").run();
+        await harness.scanAt(next);
+        harness.db.prepare("INSERT INTO account_pack_grants (account_id, pack, expires_at, reason, granted_at) VALUES ('acc_1', 'pro', NULL, 'test', 1)").run();
+      }
+      harness.clock.value = next + 86_400 + 60;
+      const round = (await harness.api.rounds("dev_a"))[0];
+      return { round, check: await harness.api.check("dev_a"), next };
+    };
+    const held = await outcome("held");
+    const pack = await outcome("pack");
+    expect(held.round).toMatchObject({ result: "skipped", reason: "held" });
+    expect(pack.round).toMatchObject({ result: "skipped", reason: "pack" });
+    expect(held.check).toEqual(pack.check);
+    expect(held.check).toMatchObject({ state: "received", misses: 0, next_due_at: held.next + 7 * 86_400, notice_after: held.next + 14 * 86_400 + 86_400 });
+  });
+
+  it("a late receipt cannot arrive for a held round, because no push carried its check_id", async () => {
+    const harness = alarmSetup({ noting: true, enrol: true });
+    await harness.api.enable("dev_a");
+    await repeatThrough(harness, T0, T0 + 86_400 + 3_600);
+    expect(harness.sender.sent).toEqual([]);
+    expect(harness.counters.read().totals).toMatchObject({ checks_sent: 0, checks_received: 0 });
   });
 
   it("holds only the device the alarm went to", async () => {

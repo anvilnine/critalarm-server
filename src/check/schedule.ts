@@ -12,7 +12,7 @@ export const ROUND_LENGTH_S = DAY_S;
 // When each of a round's pushes is due, counted from the moment it opened.
 export const ATTEMPT_OFFSETS_S = [0, 6 * HOUR_S, 18 * HOUR_S] as const;
 export const MAX_ATTEMPTS = ATTEMPT_OFFSETS_S.length;
-// No check is started for a device this soon after an alarm push to it.
+// No push of a round goes to a device this soon after an alarm push to it.
 export const ALARM_HOLD_S = 30 * 60;
 // The next round is at the device's first slot at least this long after the
 // last one opened. A round that opened on its slot is therefore followed by
