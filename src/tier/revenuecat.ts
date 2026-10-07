@@ -87,6 +87,28 @@ export function isHigherTier(tier: Tier, than: Tier): boolean {
   return RANK[tier] > RANK[than];
 }
 
+// The account's tier after one billing id's row was written. Every path that
+// writes a row decides here: the event path below, the store read
+// (billing-reads.ts) and the daily sweep (reconcile.ts).
+//
+// `highest` is not written blindly, because an account can be on a paid tier
+// that none of its billing rows carries: a merge only ever raises a tier, and
+// a tier can be set by hand.
+//
+//   raise  whenever `highest` is above the account's tier.
+//   lower  only when this billing id was a source of the tier being removed:
+//          its own row held a tier at least as high as the account's before
+//          the write, and holds a lower one now.
+//   else   the account's tier is left alone.
+//
+// So an id whose row paid for nothing can never lower the account, whatever
+// the store says about it, and an account whose tier comes from no billing row
+// is never lowered by an event, a read or the sweep.
+export function accountTierAfter(tiers: { current: Tier; highest: Tier; rowBefore: Tier; rowAfter: Tier }): Tier {
+  const wasSource = isHigherTier(tiers.rowBefore, tiers.rowAfter) && !isHigherTier(tiers.current, tiers.rowBefore);
+  return isHigherTier(tiers.highest, tiers.current) || wasSource ? tiers.highest : tiers.current;
+}
+
 export function applyRevenueCatEvent(deps: TierDependencies, event: RevenueCatEvent): void {
   const body = event.event;
   const receivedAt = deps.clock.now();
@@ -101,7 +123,7 @@ export function applyRevenueCatEvent(deps: TierDependencies, event: RevenueCatEv
 
     const accountId = resolveAccount(deps, body.app_user_id);
     const tier = entitledTier(deps, body);
-    const link = deps.db.prepare("SELECT last_event_at FROM account_billing_ids WHERE app_user_id = ?").get(body.app_user_id) as { last_event_at: number | null } | undefined;
+    const link = deps.db.prepare("SELECT last_event_at, entitled_tier FROM account_billing_ids WHERE app_user_id = ?").get(body.app_user_id) as { last_event_at: number | null; entitled_tier: Tier } | undefined;
     // Ordering is per billing id, not per account: one account can hold several
     // subscriptions and they expire independently.
     const stale = link !== undefined && link.last_event_at !== null && eventAt < link.last_event_at;
@@ -120,7 +142,8 @@ export function applyRevenueCatEvent(deps: TierDependencies, event: RevenueCatEv
       .run(body.app_user_id, accountId, receivedAt, eventAt, tier);
 
     const current = deps.db.prepare("SELECT tier FROM accounts WHERE id = ?").get(accountId) as { tier: Tier };
-    const next = highestEntitledTier(deps, accountId);
+    // An id with no row until this event paid for nothing before it.
+    const next = accountTierAfter({ current: current.tier, highest: highestEntitledTier(deps, accountId), rowBefore: link?.entitled_tier ?? "free", rowAfter: tier });
     if (next === current.tier) return;
     deps.db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(next, accountId);
     // "Tier became free" answers no support ticket. "Tier became free because
