@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.17.0
+**Version:** 1.18.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.18.0** adds packs and a weekly delivery check. A pack is an add-on an account holds beside its tier, and the only one is `pro`. `packs` appears on every registration response and on `GET /relay/v1/packs`, and `POST /relay/v1/packs/refresh` asks the relay to read the store again and says whether it could (§4.2). A relay that reads the store now works out the tier and the packs together from one read of the customer's active entitlements, and a webhook event only triggers that read. A relay that does not read the store applies events to the tier as before and gives no pack for a purchase (§4.3). The weekly check is a push that shows nothing: the relay sends it to a device that asked for it, the app answers with a receipt, and the relay reports whether the last rounds were answered (§4.5, §5.4). An answered check shows that a push reached the holder of the device's credential. It does not show that an alarm would ring. Everything is additive on the wire. A client that knows none of it sees one new field on a registration response and nothing else. No route lets an app create an alert, and a check shows nothing on the phone.
 
 **1.17.0** fixes what `since` on `GET /v1/incidents` means. 1.16.0 compared it against `opened_at`, so a client that held an incident as open never heard that it was acked, closed or expired unless the push for that change reached it. Every incident now carries `updated_at` (§3.2), the server bumps it on open, every new message, ack, close, expire and reopen, and `since` compares against it. A client keeps the newest `updated_at` it holds and merges whatever comes back. The retention window (§4.2) still hides rows by `opened_at`.
 
@@ -171,6 +173,7 @@ Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code.
 | `{"error":"streaming not supported"}` | `501` from `/json` without `poll=1`, `/sse`, `/ws`, `/raw` (§2) |
 | `{"error":"not found"}` | `404`, including a row owned by another account |
 | `{"error":"cap","cap":"..."}` | `429` from a cap (§4.2) |
+| `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2, §4.5) |
 
 ---
 
@@ -488,7 +491,7 @@ An account with no identity is deleted on `dv_` alone. Every device on it holds 
 
 Only an `open` incident blocks. An `acked` one does not: nothing is ringing, and a person must never be stuck unable to leave.
 
-The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
+The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, its packs, its devices' weekly check state and rounds, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
 
 After `204` every credential of the account is dead: `dv_`, `aj_` and every `tk_`. The app treats it like signing out and registers again with a new `device_id`. The other devices on the account get `401` on their next call and do the same.
 
@@ -542,12 +545,13 @@ POST /relay/v1/devices                                  // registration. no auth
         "account_join_token":"aj_...",                  // create path only. absent on a join
         "account_id":"acc_...",
         "tier":"free"|"relay"|"hosted",
-        "caps":{ "devices":5, "critical_topics":2, "p4_daily":50, "history_days":7 } }
+        "caps":{ "devices":5, "critical_topics":2, "p4_daily":50, "history_days":7 },
+        "packs":[ { "id":"pro", "expires_at":null } ] }
 
 PATCH  /relay/v1/devices/{device_id}                     // re-register: new push token, new app version
   Authorization: Bearer dv_...
   { "push_token":"...", "app_version":"1.0.1" }
-→ 200 { "account_id":"acc_...", "tier":"...", "caps":{...} }
+→ 200 { "account_id":"acc_...", "tier":"...", "caps":{...}, "packs":[...] }
 
 POST   /relay/v1/devices/{device_id}/subscriptions
   Authorization: Bearer dv_...
@@ -574,6 +578,18 @@ DELETE /relay/v1/devices/{device_id}/tokens/{kind}          // drop every token 
 DELETE /relay/v1/devices/{device_id}/tokens/{kind}/{activity_id}
   Authorization: Bearer dv_...
 → 204
+
+GET    /relay/v1/packs
+  Authorization: Bearer dv_...
+→ 200 { "packs":[ { "id":"pro", "expires_at":null } ], "checked_at":1759812345 }
+
+POST   /relay/v1/packs/refresh                          // ask the relay to read the store again
+  Authorization: Bearer dv_...
+→ 200 { "confirmed":true,  "checked_at":1759812345,
+        "tier":"free", "caps":{...}, "packs":[ { "id":"pro", "expires_at":null } ] }
+→ 200 { "confirmed":false, "checked_at":1759700000,     // the store could not be read
+        "tier":"free", "caps":{...}, "packs":[] }
+→ 429 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
 **A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android has no Live Activity tokens.
@@ -630,6 +646,29 @@ These are launch guesses, set by gut and adjusted from relay metrics after 30 da
 
 **Ring until acked has no cap field.** The app offers the "no limit" option when `tier != "free"` and disables it otherwise. The ring ceiling itself is the server's `max_ring_s` config, which the account holder owns.
 
+**Packs.** A pack is an add-on an account holds beside its tier. `packs` lists the packs the account holds at the moment of the response, and is `[]` when it holds none. `id` is the pack's name. `expires_at` is epoch seconds, or `null` when the pack has no end date. A client reads `packs` and never infers a pack from `tier`. It treats an `id` it does not know as absent. The only pack in 1.18.0 is `pro`, which the weekly check (§4.5) asks for.
+
+A pack belongs to the account, so every device on it holds the pack. Nothing in this contract says how a pack is bought, what it costs or how long it lasts. A pack can reach an account from a store purchase (§4.3), from a grant by the relay's operator, or from the relay's own configuration, and `packs` reports the result without saying which.
+
+`GET /relay/v1/packs` answers from what the relay holds and never calls the store.
+
+**`POST /relay/v1/packs/refresh` reads the store inside the request.** An app calls it after a purchase or a restore, so nobody waits for a webhook. It reads three sets of customer ids: the caller's own `account_id`, every billing id already linked to that account, and the `account_id` of every account that was merged into it. Reading the account's own id is what links a first purchase that has produced no webhook yet. Limited to 6 requests per 60 seconds per account.
+
+**`confirmed` describes that read and nothing else.** It is `true` when every one of those ids was read successfully in this call. A customer the store has never seen is a successful read with nothing on it. It is `false` when any read failed, and on a relay that does not read the store (§4.3) it is always `false`. Either way `tier`, `caps` and `packs` are what the account holds when the call returns, from every source. So `confirmed` is not a statement about `packs`: an account can hold a pack by grant when the store lists none.
+
+| `confirmed` | the pack is in `packs` | What a client may conclude |
+|---|---|---|
+| `true` | yes | the account holds it |
+| `true` | no | the store was read and the account holds it from no source |
+| `false` | yes | the account already held it. The store could not be asked |
+| `false` | no | nothing. The store could not be asked. Keep what was showing and ask again later |
+
+A client must never read `"confirmed":false` with an empty list as "no pack", and must never tell a buyer that a purchase failed because of it.
+
+**`checked_at`** is the oldest successful store read among the account's billing ids, in epoch seconds: how old the stalest part of the answer is. It is `null` when no billing id of the account has ever been read successfully, which includes an account with no billing id. `"confirmed":true` with `"checked_at":null` is therefore a real answer: the store was asked now and knew nothing.
+
+**A self-hosted server is not involved.** A phone connected to a self-hosted server still registers with the relay, still has an account there, and reads its packs from the relay like any other phone. Its server is never told.
+
 **`device_id` must survive a reinstall.** The app generates it once and stores it where deleting the app does not. Losing it orphans the account, silently breaks every webhook the user configured, and detaches a live subscription from its purchase.
 
 | Platform | Where | Survives |
@@ -663,7 +702,7 @@ POST /relay/v1/devices
   { "device_id":"dev_<uuid>", "platform":"ios", "push_token":"...", "app_version":"1.0.0" }
 → 201 { "device_token":"dv_...",                        // this handset's own token
         "account_id":"acc_...",                         // the account the aj_ belongs to
-        "tier":"...", "caps":{...} }
+        "tier":"...", "caps":{...}, "packs":[...] }
 ```
 
 A `device_id` the server has never seen, presented with a valid `aj_`, joins that account instead of creating a new one. The same request with no bearer creates a new anonymous account, which is what every existing client does and which does not change. An `aj_` matching no account answers `401`. A join that would exceed `caps.devices` answers `429 {"error":"cap","cap":"devices"}` and issues no token.
@@ -695,9 +734,19 @@ Body is RevenueCat's webhook event. `app_user_id` is **looked up** to find the a
 
 An account may hold more than one `app_user_id`, because a merge brings both sides' subscriptions with it. Tier is then the **highest live entitlement** across them, never the last event to arrive. Without that rule, one lapsed subscription downgrades an account somebody else is still paying for.
 
-Two things the server must not do with this webhook. It must not apply an event it has already applied, because events are retried. And it must not apply an event older than the last one applied for that `app_user_id`, because they arrive out of order, and an `EXPIRATION` overtaking a renewal cancels a live subscription. A billing failure is not an expiry: no event that only reports a payment problem may lower a tier. Crit Alarm is an alarm, and a card that failed on a Tuesday is not a reason to stop ringing.
+**An event carries no answer. It names the customers to read.** Those are `app_user_id` and, on a transfer, every id in `transferred_from` and `transferred_to`. An event with no `app_user_id` is accepted when it names a customer in one of the other two fields. The relay keeps the id of every event, and an id it has already seen triggers nothing, because events are retried.
 
-Updates `tier` on the resolved account, so every device under it changes tier in one write.
+**One read decides the tier and the packs.** For each named customer that resolves to an account, the relay reads that customer's active entitlements from RevenueCat and writes both results from that one list, in one write: the tier the customer pays for, and the packs (§4.2). An entitlement the relay's configuration maps to a tier counts toward the tier. One it maps to a pack gives that pack. Nothing else in the event is used. Its type, its expiry and the entitlements it names decide nothing, so an event cannot be applied twice and cannot be applied out of order, and an `EXPIRATION` that overtakes a renewal changes nothing the list does not show. A purchase, a renewal, an expiry, a refund, a cancelled renewal and a transfer all end the same way: the entitlement is on the list or it is not. An expiry of a pack cannot lower a tier, and an expiry of a tier cannot remove a pack. The write changes the resolved account, so every device under it changes in one write, and an account with several `app_user_id`s holds the union of their packs.
+
+**Reads for one customer never cross.** At most one read per `app_user_id` runs at a time. A trigger that arrives while one is running starts no second read and causes exactly one more after it. Every read takes a number when it starts, one higher than the last number given for that customer, and its result is written only if that number is higher than the number of the last result written. A read that finishes after a newer one has been written writes nothing. This holds for every read, whatever started it: a webhook, a retry, `POST /relay/v1/packs/refresh` (§4.2) or the daily read of every known customer.
+
+A billing failure is not an expiry. RevenueCat keeps an entitlement on the list while a payment is being retried, and the relay keeps the tier and the packs for as long as it is listed. Crit Alarm is an alarm, and a card that failed on a Tuesday is not a reason to stop ringing.
+
+**When a read fails, nothing changes.** The tier, the packs and their timestamps stay as they were. The relay tries again after 1, 5, 15 and 60 minutes, then leaves it to the daily read. A failed read never lowers a tier and never removes a pack. A customer RevenueCat has never seen is a successful read with an empty list.
+
+An entitlement the configuration does not name is logged. A read that contains one may still raise a tier or add a pack, and may not lower a tier or remove a pack.
+
+**A relay that does not read the store.** Reading needs a RevenueCat API key and a setting that switches reading on. A relay without both starts and runs. It applies each event to the tier directly, as every version before 1.18.0 did: never an event it has already applied, never an event older than the last one applied for that `app_user_id`, and never a lower tier for an event that only reports a payment problem. Such a relay gives and removes no pack because of a purchase.
 
 Using `device_id` here would attach the purchase to a handset. A reinstall or a second handset would then leave the server with two records for one paying person and no way to join them.
 
@@ -723,11 +772,11 @@ and an unset `STATS_KEY` leaves the route unmounted.
 
 ```json
 {
-  "totals": { "pushes_delivered": 41230, "alarms_rung": 8801, "acks": 8120, "incidents_opened": 8611 },
+  "totals": { "pushes_delivered": 41230, "alarms_rung": 8801, "acks": 8120, "incidents_opened": 8611, "checks_sent": 2210, "checks_received": 1984 },
   "servers_total": 214,
   "devices_active_7d": 963,
   "days": [
-    { "day": "2026-09-13", "pushes_delivered": 612, "alarms_rung": 130, "acks": 121, "incidents_opened": 128 }
+    { "day": "2026-09-13", "pushes_delivered": 612, "alarms_rung": 130, "acks": 121, "incidents_opened": 128, "checks_sent": 31, "checks_received": 28 }
   ]
 }
 ```
@@ -749,6 +798,8 @@ own hosted accounts has no relay key and is stored under the literal
 | `alarms_rung` | An `open` or a `reopen` forwarded through `POST /relay/v1/push`, or opened locally. `repeat`, `p4`, `p5`, `close` and `expire` are not alarms. |
 | `acks` | An incident acknowledged through `POST /v1/incidents/{id}/ack`. |
 | `incidents_opened` | An `open`. A `reopen` is a new alarm on an incident that already exists, so it is not a new incident. |
+| `checks_sent` | One weekly check push (§5.4) that APNs or FCM accepted. Not counted in `pushes_delivered`. Stored under `local`. |
+| `checks_received` | One check round answered by a receipt while the round was open (§4.5). |
 
 **`?by=key`** adds a `keys` array for abuse review, one entry per relay key,
 busiest first:
@@ -783,6 +834,95 @@ critalarm account delete --email <address>    # by the sign-in email
 ```
 
 It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing.
+
+### 4.5 Weekly check
+
+```
+PUT    /relay/v1/devices/{device_id}/check
+  Authorization: Bearer dv_...
+  { "enabled":true }
+→ 200 { ...check }
+→ 403 {"error":"pack","pack":"pro"}                     // enabling without the pack
+
+GET    /relay/v1/devices/{device_id}/check
+  Authorization: Bearer dv_...
+→ 200 { "enabled":true,
+        "state":"waiting"|"received"|"missed_once"|"missed_repeatedly"
+               |"token_refused"|"no_token"|"off",
+        "reason":null|"pack"|"disabled",
+        "misses":0,
+        "last_sent_at":1759800000, "last_received_at":1759800004,
+        "next_due_at":1760404800, "notice_after":1761096000 }
+
+POST   /relay/v1/devices/{device_id}/checks/{check_id}/receipt
+  Authorization: Bearer dv_...
+  { "attempt":1, "received_at":1759800004 }             // both optional
+→ 200 { "counted":true, "next_due_at":1760404800, "notice_after":1761096000 }
+→ 404 {"error":"not found"}                             // no such check for this device
+
+GET    /relay/v1/devices/{device_id}/checks[?limit=20]
+  Authorization: Bearer dv_...
+→ 200 [{ "id":"rnd_81f0", "opened_at":1759800000, "closes_at":1759886400,
+          "closed_at":1759800004, "attempts":1,
+          "result":"received"|"missed"|"refused"|"skipped",
+          "attempt_received":1, "receipt_at":1759800004, "device_received_at":1759800004,
+          "late_receipt_at":null, "reason":null }]
+```
+
+Once a week the relay sends an enrolled device a push that shows nothing (§5.4), and the app answers with a receipt. The check is never an alert: it carries no title, no body and no sound, it opens no incident, and the app shows nothing when it arrives.
+
+All four routes take the device's own `dv_`, and each reaches that one device's data. Another device's token answers `404`, as on every device route, including another device on the same account.
+
+**What a counted receipt shows, and what it does not.** It shows that something holding this device's `dv_` received this round's push and reached the relay while the round was open. So the push token was live and the push provider accepted a push for it. It does not show that the app was woken in the background: the relay cannot see what state the app was in. It does not show that an alarm would ring. An alarm travels as an alert, at a higher priority, with a sound, and depends on notification permission and on settings the check never touches. It does not show that the user's server can reach the relay either: the relay sends the check straight to the phone, so for a phone on a self-hosted server that leg is not exercised at all. Only a real publish covers those, and `POST /v1/test` (§3.3) is one. A client must not present an answered check as proof that alarms work.
+
+**Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account holds the `pro` pack (§4.2). `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
+
+**A round.** A round opens when the relay reaches the device, and at that moment the relay fixes the round's close time: 24 hours later, by the relay's clock. It is returned as `closes_at` and never changes. A round is up to three pushes: one when it opens, one 6 hours later and one 18 hours later. They carry the same `check_id` and an `attempt` of 1, 2 or 3. The first counted receipt ends the round and no further push is sent. After its first round each device has a fixed moment in the week, which the relay derives from the `device_id` to spread its load, and rounds are 7 days apart. Two devices may have the same moment. `next_due_at` is when the next round is due.
+
+**When more devices are due than the relay sends at once, the oldest due goes first and none is skipped.** A round can therefore open later than `next_due_at`. It is never dropped for being late, and it runs for its own 24 hours from the moment it opens.
+
+**An attempt is recorded before it is sent.** If the relay restarts, an attempt on record counts as sent and is not sent again, and the next attempt goes at its normal time. A round can therefore have fewer than three pushes reach the provider. It never gets a repeat because of a restart. A device may still receive the same push twice. Both copies carry the same `check_id`, one receipt answers both, and a client must treat a second copy as harmless.
+
+**A closed round stays closed.** A round closes when a receipt is counted or when the relay's clock reaches `closes_at`, and its `result` is written once. Nothing reopens it: not a late receipt, and not a change to the relay's clock.
+
+**The receipt.** `check_id` is in the push and nowhere else. No route returns it, and the list of rounds names each round by a different id. A receipt counts when it reaches the relay while its round is open, by the relay's clock, and the response says `"counted":true`. A round that closed as `missed` stays `missed`: a receipt that arrives after the close is recorded in `late_receipt_at`, answers `"counted":false`, and changes no result. Sending the same receipt twice gives the same answer both times and changes nothing the second time.
+
+`received_at` and `attempt` are notes. `received_at` is the device's clock when the push arrived. The relay stores it as `device_received_at` and uses it for nothing: it never reopens a round and never moves a receipt into one. `attempt` is stored as `attempt_received` only when it is a whole number from 1 to the number of attempts the relay has on record for that round. Any other value, or none, is stored as `null`. Neither field can make a receipt count or stop it counting, and neither can cause an error.
+
+**`result` of a round.**
+
+| Value | Meaning |
+|---|---|
+| `received` | a receipt reached the relay while the round was open |
+| `missed` | the round closed with no receipt |
+| `refused` | APNs or FCM refused the device's push token. No receipt was possible |
+| `skipped` | nothing was sent: `reason` is `"pack"`, `"no_token"` or `"disabled"`. Not counted as a miss |
+
+**`state`.** It reports what happened to the last rounds and makes no claim about the phone.
+
+| Value | When |
+|---|---|
+| `waiting` | enrolled, and no round has closed yet |
+| `received` | the last closed round was `received` |
+| `missed_once` | the last closed round was `missed`, and the one before it was not |
+| `missed_repeatedly` | the last two or more closed rounds were `missed` or `refused` |
+| `token_refused` | the last closed round was `refused`, and the one before it was not |
+| `no_token` | the relay holds no push token for the device |
+| `off` | not enrolled (`reason` `"disabled"`), or the account no longer holds the pack (`reason` `"pack"`) |
+
+`misses` is how many closed rounds in a row were `missed` or `refused`. `skipped` rounds change nothing.
+
+**One missed round is a prompt to look, and nothing more.** iOS does not promise to deliver a background push and may hold one back to save power, so a single miss is weak evidence. A client shows `missed_once` on its reliability screen and raises nothing else. It raises a notice only at two rounds in a row: `misses` of 2 or more.
+
+**A device must not rely on the relay to say that checks stopped arriving**, because the push that would bring the news is the thing that failed. `notice_after` is the second at which this device will have missed two rounds in a row if no check arrives from now on. A client stores it from this route and from every receipt response, and raises its notice by itself when its own clock passes that second with no check received since. The threshold is the same two rounds either way.
+
+**When a device is released.** `DELETE /relay/v1/devices/{device_id}` (§4.2) removes the device's check state and its rounds with it. A round that was open at that moment ends without a result of `missed` and counts toward nothing. A device that registers again under a new `device_id`, which is what signing out does (§3.7), has no check state and no misses. It starts fresh and enrols again.
+
+**When a device registers a new push token** (`PATCH /relay/v1/devices/{device_id}`, §4.2) while `misses` is above 0, it becomes due at once and its next round opens within 24 hours.
+
+**Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after it sent that device an `open`, `repeat` or `reopen`. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together.
+
+`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today.
 
 ---
 
@@ -914,6 +1054,49 @@ A device with no `la_start` token gets no activity and no error. A device whose
 activity has no `la_update` token keeps the activity on screen until iOS times
 it out, because the server has nothing to send the end to. Neither case blocks
 or delays the alarm push.
+
+### 5.4 Weekly check
+
+Sent by the relay to a device enrolled in §4.5. It shows nothing on either platform.
+
+**APNs.** Sent to the device's `apns` token, the same token an alarm uses.
+
+```
+headers:
+  apns-topic:       <bundle_id>
+  apns-push-type:   background
+  apns-priority:    5
+  apns-expiration:  0
+
+{
+  "aps": { "content-available": 1 },
+  "kind": "check",
+  "check_id": "chk_5c1d",
+  "attempt": 1
+}
+```
+
+`aps` holds `content-available` and nothing else: no `alert`, no `sound`, no `badge`, no `category`. `apns-expiration` is `0`, which asks APNs to try once and not store the push. There is no `apns-collapse-id`.
+
+**FCM.**
+
+```
+{
+  "message": {
+    "token": "...",
+    "android": { "priority": "normal", "ttl": "21600s" },
+    "data": { "kind": "check", "check_id": "chk_5c1d", "attempt": "1" }
+  }
+}
+```
+
+Data-only, at normal priority, with no `collapse_key`. High priority is kept for pushes that end in something the user sees.
+
+**Why it is sent this way.** The relay keeps a check out of an alarm's way as far as it can from its own side: the check asks for no stored place on APNs, uses none of FCM's collapse keys, and merges with nothing. What a provider does with it after that is the provider's, and this contract promises nothing about it.
+
+**What the app does with it.** It records the arrival time, sends the receipt (§4.5), and does nothing else. It posts no notification, plays no sound, starts no Live Activity and schedules no alarm. A build that does not know `kind: "check"` ignores the push, and the relay does not send one to a device that has not enrolled. The same push may arrive more than once, and the app answers each copy the same way.
+
+There is no `server` field, no `title` and no `body`. The receipt goes to the relay the device registered with.
 
 ---
 
