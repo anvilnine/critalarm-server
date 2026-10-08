@@ -9,6 +9,7 @@ import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { AlarmNotes, alarmNoteWriter } from "../device-hooks.js";
 import { CheckScheduler } from "../scheduler.js";
+import type { StoreReads } from "../../tier/types.js";
 import { CheckStore, type CheckView, type RoundView } from "../store.js";
 
 // Fakes for the weekly check tests. No test that uses them reaches a network:
@@ -77,7 +78,13 @@ export function addDevice(db: TestDatabase, id: string, accountId: string, platf
 
 export const config: Config = { mode: "relay", baseUrl: "https://alerts.example.com", relayUrl: "https://relay.example.com", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false, statsKey: "stats-key" };
 
-export interface SetupOptions { batch?: number; config?: Partial<Config> }
+export interface SetupOptions {
+  batch?: number;
+  config?: Partial<Config>;
+  // Builds the store reads of a relay that reads the store. Absent means the
+  // relay does not, which is the default.
+  storeReads?: (db: TestDatabase, clock: FakeClock) => StoreReads;
+}
 
 export interface Harness {
   db: TestDatabase;
@@ -105,10 +112,11 @@ export function setup(options: SetupOptions = {}): Harness {
   const clock = new FakeClock();
   const sender = new FakeCheckSender();
   const counters = new Counters(db, clock);
-  const store = new CheckStore(db, clock, counters, options.config?.packIncludes ?? {});
+  const storeReads = options.storeReads?.(db, clock);
+  const store = new CheckStore(db, clock, counters, { includes: options.config?.packIncludes ?? {}, storeReads: storeReads?.mode === "on" });
   const notes = new AlarmNotes(alarmNoteWriter(db));
   const scheduler = new CheckScheduler(store, { ios: sender, android: sender }, { notes, ...(options.batch === undefined ? {} : { batch: options.batch }) });
-  const app = createApp({ config: { ...config, ...options.config }, db, clock, ids: { message: () => "m_1", incident: () => "inc_1", timer: () => "tm_1" }, dispatch: async () => {} });
+  const app = createApp({ config: { ...config, ...options.config }, db, clock, ids: { message: () => "m_1", incident: () => "inc_1", timer: () => "tm_1" }, dispatch: async () => {}, ...(storeReads === undefined ? {} : { storeReads }) });
 
   const call = (method: string, path: string, token?: string, body?: unknown) =>
     app.request(path, {

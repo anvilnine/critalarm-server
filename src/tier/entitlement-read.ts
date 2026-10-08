@@ -64,23 +64,24 @@ export async function readStore(deps: StoreReadDependencies, appUserId: string):
 export interface StoreView {
   // Every identifier exactly as the store returned it, before any mapping.
   entitlementIds: string[];
-  // Live identifiers that neither map names.
+  // Listed identifiers that neither map names.
   unknownIds: string[];
-  // The highest tier the live entitlements pay for.
+  // The highest tier the listed entitlements pay for.
   tier: Tier;
-  // Each pack the live entitlements give, with its end in epoch seconds or null
+  // Each pack the listed entitlements give, with its end in epoch seconds or null
   // for no end date.
   packs: Map<PackId, number | null>;
 }
 
-export function viewEntitlements(items: readonly ActiveEntitlement[], config: Pick<StoreReadConfig, "entitlements" | "packEntitlements">, nowSeconds: number): StoreView {
-  const nowMs = nowSeconds * 1_000;
+// The list is the answer (api.md §4.3): an entitlement is on it or it is not.
+// No clock is read here. The store lists an entitlement through a renewal and
+// through a billing grace period, sometimes with an expiry a little behind the
+// relay's clock, and a relay clock can run ahead. Dropping a listed entitlement
+// for its expiry would lower a tier and remove a pack the store still gives.
+// The expiry is only carried along as the pack's end date.
+export function viewEntitlements(items: readonly ActiveEntitlement[], config: Pick<StoreReadConfig, "entitlements" | "packEntitlements">): StoreView {
   const view: StoreView = { entitlementIds: items.map((item) => item.entitlement_id), unknownIds: [], tier: "free", packs: new Map() };
   for (const item of items) {
-    // Read the expiry, do not trust the list membership alone. The store keeps
-    // an entitlement listed through a billing grace period with a future
-    // expiry, and that one counts. One whose expiry has passed does not.
-    if (item.expires_at !== undefined && item.expires_at !== null && item.expires_at <= nowMs) continue;
     const tier = Object.hasOwn(config.entitlements, item.entitlement_id) ? config.entitlements[item.entitlement_id] : undefined;
     const pack = Object.hasOwn(config.packEntitlements, item.entitlement_id) ? config.packEntitlements[item.entitlement_id] : undefined;
     if (tier === undefined && pack === undefined) {

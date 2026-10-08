@@ -7,6 +7,8 @@ import type { Tier } from "../types.js";
 const NOW = 1_700_000_000;
 const clock = { now: () => NOW };
 const TIERS: Tier[] = ["free", "relay", "hosted"];
+// The rules of a relay that reads the store and writes what it reads.
+const READING = { storeReads: true };
 
 function setup(tier: Tier = "free") {
   const db = openDatabase(":memory:");
@@ -45,13 +47,46 @@ describe("packsFor", () => {
     expect(packsFor(db, clock, "acc_1")).toEqual([{ id: "pro", expires_at: null }]);
   });
 
-  it("reports a pack whose end is in the future, and drops it once the clock reaches the end", () => {
+  // api.md §4.3: a failed read never removes a pack. With reading switched
+  // on, the saved end date is what the store last said, and only a successful
+  // read that no longer lists the entitlement ends a store pack, by deleting
+  // its row.
+  it("with reading on, keeps a store pack past its saved end date, with the date the store last gave", () => {
     const db = setup();
     link(db, "rc_1");
     billingPack(db, "rc_1", NOW + 10);
-    expect(packsFor(db, clock, "acc_1")).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
-    expect(packsFor(db, { now: () => NOW + 10 }, "acc_1")).toEqual([]);
-    expect(packsFor(db, { now: () => NOW + 11 }, "acc_1")).toEqual([]);
+    const held = [{ id: "pro", expires_at: NOW + 10 }];
+    expect(packsFor(db, clock, "acc_1", READING)).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 10 }, "acc_1", READING)).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 11 }, "acc_1", READING)).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 400 * 86_400 }, "acc_1", READING)).toEqual(held);
+    expect(holdsPack(db, { now: () => NOW + 11 }, "acc_1", "pro", READING)).toBe(true);
+  });
+
+  it("with reading on, drops a store pack when its row goes, which is what a successful read that no longer lists it does", () => {
+    const db = setup();
+    link(db, "rc_1");
+    billingPack(db, "rc_1", NOW + 10);
+    db.prepare("DELETE FROM billing_packs WHERE app_user_id = 'rc_1'").run();
+    expect(packsFor(db, { now: () => NOW + 11 }, "acc_1", READING)).toEqual([]);
+  });
+
+  // No read can delete the row there, and no read failed, so the date ends it.
+  it("on a relay that does not write what the store lists, ends a store pack on its saved end date", () => {
+    const db = setup();
+    link(db, "rc_1");
+    billingPack(db, "rc_1", NOW + 10);
+    const held = [{ id: "pro", expires_at: NOW + 10 }];
+    for (const rules of [undefined, {}, { storeReads: false }, { includes: {} }]) {
+      expect(packsFor(db, clock, "acc_1", rules)).toEqual(held);
+      expect(packsFor(db, { now: () => NOW + 9 }, "acc_1", rules)).toEqual(held);
+      expect(packsFor(db, { now: () => NOW + 10 }, "acc_1", rules)).toEqual([]);
+      expect(packsFor(db, { now: () => NOW + 11 }, "acc_1", rules)).toEqual([]);
+      expect(holdsPack(db, { now: () => NOW + 11 }, "acc_1", "pro", rules)).toBe(false);
+    }
+    // A store pack with no end date is held either way.
+    db.prepare("UPDATE billing_packs SET expires_at = NULL").run();
+    expect(packsFor(db, { now: () => NOW + 11 }, "acc_1")).toEqual([{ id: "pro", expires_at: null }]);
   });
 
   it("does not report a pack another account's billing id holds", () => {
@@ -73,6 +108,27 @@ describe("packsFor", () => {
     const db = setup();
     grant(db, "acc_1", NOW - 1);
     expect(packsFor(db, clock, "acc_1")).toEqual([]);
+  });
+
+  it("ends an operator grant on its date with no read and no write, on an account that has a billing id too, reading on or off", () => {
+    const db = setup();
+    link(db, "rc_1");
+    grant(db, "acc_1", NOW + 10);
+    for (const rules of [READING, {}]) {
+      expect(packsFor(db, { now: () => NOW + 9 }, "acc_1", rules)).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
+      expect(packsFor(db, { now: () => NOW + 10 }, "acc_1", rules)).toEqual([]);
+      expect(holdsPack(db, { now: () => NOW + 10 }, "acc_1", "pro", rules)).toBe(false);
+    }
+    expect(db.prepare("SELECT COUNT(*) AS n FROM account_pack_grants").get()).toEqual({ n: 1 });
+  });
+
+  it("a grant that has ended adds nothing to a store pack that is kept past its date", () => {
+    const db = setup();
+    link(db, "rc_1");
+    billingPack(db, "rc_1", NOW + 10);
+    grant(db, "acc_1", NOW + 50);
+    expect(packsFor(db, { now: () => NOW + 20 }, "acc_1", READING)).toEqual([{ id: "pro", expires_at: NOW + 50 }]);
+    expect(packsFor(db, { now: () => NOW + 60 }, "acc_1", READING)).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
   });
 
   it("reports one entry per pack when several sources hold it, with the latest end", () => {
@@ -119,7 +175,7 @@ describe("the include map", () => {
         const includes: PackIncludes = { [listed]: [pack] };
         for (const tier of TIERS) {
           const db = setup(tier);
-          expect(packsFor(db, clock, "acc_1", includes)).toEqual(tier === listed ? [{ id: pack, expires_at: null }] : []);
+          expect(packsFor(db, clock, "acc_1", { includes })).toEqual(tier === listed ? [{ id: pack, expires_at: null }] : []);
         }
       }
     }
