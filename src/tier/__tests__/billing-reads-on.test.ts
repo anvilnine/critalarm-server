@@ -109,15 +109,41 @@ describe("the webhook with reading switched on", () => {
     expect(storedPacks(db)).toEqual(PACK);
   });
 
-  it("an entitlement the store lists with an expiry already passed does not count", async () => {
+  // The list is the answer and the relay's clock is not. The store lists an
+  // entitlement through a renewal with an expiry a few seconds behind, and a
+  // relay clock can run ahead.
+  it("an entitlement the store lists a few seconds past its expiry keeps the tier and the pack", async () => {
+    const { db, listed, deliver } = setup();
+    paying(db);
+    const justPastMs = (NOW - 5) * 1_000;
+    listed.set("acc_1", listing(entitlement("ent_hosted", justPastMs), entitlement("ent_pack", justPastMs)));
+
+    await deliver({ app_user_id: "acc_1", type: "RENEWAL", entitlement_ids: ["ent_hosted"], expiration_at_ms: FUTURE_MS });
+
+    expect(tierOf(db, "acc_1")).toBe("hosted");
+    expect(billingRow(db, "acc_1")).toMatchObject({ entitled_tier: "hosted", applied_seq: 1, checked_at: NOW });
+    expect(storedPacks(db)).toEqual([{ app_user_id: "acc_1", pack: "pro", expires_at: NOW - 5 }]);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM tier_changes").get()).toEqual({ n: 0 });
+  });
+
+  it("a first purchase the store lists a few seconds past its expiry is still given", async () => {
+    const { db, listed, deliver } = setup();
+    listed.set("acc_1", listing(entitlement("ent_hosted", (NOW - 5) * 1_000)));
+
+    await deliver({ app_user_id: "acc_1", type: "INITIAL_PURCHASE" });
+
+    expect(tierOf(db, "acc_1")).toBe("hosted");
+  });
+
+  it("an entitlement the store lists counts however far its expiry is behind the relay's clock", async () => {
     const { db, listed, deliver } = setup();
     paying(db);
     listed.set("acc_1", listing(entitlement("ent_hosted", PAST_MS), entitlement("ent_pack", PAST_MS)));
 
     await deliver({ app_user_id: "acc_1", type: "RENEWAL", entitlement_ids: ["ent_hosted"], expiration_at_ms: FUTURE_MS });
 
-    expect(tierOf(db, "acc_1")).toBe("free");
-    expect(storedPacks(db)).toEqual([]);
+    expect(tierOf(db, "acc_1")).toBe("hosted");
+    expect(storedPacks(db)).toEqual([{ app_user_id: "acc_1", pack: "pro", expires_at: NOW - 86_400 }]);
   });
 
   it("a billing problem during the grace period keeps the tier and the pack", async () => {
@@ -312,15 +338,16 @@ describe("an entitlement the configuration does not name", () => {
     expect(billingRow(db, "acc_1")).toMatchObject({ entitled_tier: "hosted", applied_seq: 1 });
   });
 
-  it("does not hold a tier up once its own expiry has passed", async () => {
+  it("still guards the tier and the pack when the store lists it with an expiry that has passed", async () => {
     const { db, listed, deliver } = setup();
     paying(db);
     listed.set("acc_1", listing(entitlement("ent_mystery", PAST_MS)));
 
     await deliver({ app_user_id: "acc_1", type: "EXPIRATION" });
 
-    expect(tierOf(db, "acc_1")).toBe("free");
-    expect(storedPacks(db)).toEqual([]);
+    expect(tierOf(db, "acc_1")).toBe("hosted");
+    expect(storedPacks(db)).toEqual(PACK);
+    expect(logged(log)).toContainEqual({ event: "billing_unknown_entitlement", app_user_id: "acc_1", entitlement_id: "ent_mystery" });
   });
 });
 
