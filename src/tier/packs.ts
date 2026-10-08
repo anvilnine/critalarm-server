@@ -24,6 +24,17 @@ export interface PackEntry {
 // operator sets it.
 export type PackIncludes = Partial<Record<Tier, readonly PackId[]>>;
 
+// What a reader of packs has to be told. It is built once where the process
+// is wired and handed to every reader, so the pack routes and the weekly check
+// always answer by the same rules.
+export interface PackRules {
+  // Packs the configuration attaches to a tier. Absent means none.
+  includes?: PackIncludes;
+  // True only on a relay that reads the store and writes what it reads
+  // (api.md §4.3, REVENUECAT_READS=on with an API key). Absent means false.
+  storeReads?: boolean;
+}
+
 type Held = { pack: string; expires_at: number | null };
 
 // Three sources, one answer: what the account's billing ids hold, what the
@@ -31,18 +42,26 @@ type Held = { pack: string; expires_at: number | null };
 //
 // The two stored sources end in different ways.
 //
-//   store pack      ends when a read of the store succeeds and no longer lists
-//                   its entitlement. That read deletes the row. The saved end
-//                   date alone ends nothing: api.md §4.3 says a failed read
-//                   never removes a pack, and a renewal whose read failed
-//                   leaves an old end date behind. So a store pack can be
-//                   reported with an end date that has passed.
+//   store pack      on a relay that reads the store (rules.storeReads), ends
+//                   when a read succeeds and no longer lists its entitlement.
+//                   That read deletes the row. The saved end date alone ends
+//                   nothing: api.md §4.3 says a failed read never removes a
+//                   pack, and a renewal whose read failed leaves an old end
+//                   date behind. So a store pack can be reported with an end
+//                   date that has passed.
+//
+//                   On a relay that does not write what the store lists
+//                   (reading off, shadow, or no API key) no read will ever
+//                   delete the row, and no read failed either. There a store
+//                   pack ends on its saved end date, like a grant. This is
+//                   also what ends the packs of a relay that had reading on
+//                   and switched it off.
 //   operator grant  ends on its date. The clock is read here, on every call,
 //                   so it ends on time with no second write and no read.
 //
 // One entry per pack: no end date wins over any end date, and otherwise the
 // latest end is reported.
-export function packsFor(db: Database.Database, clock: Clock, accountId: string, includes: PackIncludes = {}): PackEntry[] {
+export function packsFor(db: Database.Database, clock: Clock, accountId: string, rules: PackRules = {}): PackEntry[] {
   const account = db.prepare("SELECT tier FROM accounts WHERE id = ?").get(accountId) as { tier: Tier } | undefined;
   if (account === undefined) return [];
   const now = clock.now();
@@ -50,13 +69,13 @@ export function packsFor(db: Database.Database, clock: Clock, accountId: string,
     .prepare(
       `SELECT p.pack AS pack, p.expires_at AS expires_at
          FROM billing_packs p JOIN account_billing_ids b ON b.app_user_id = p.app_user_id
-        WHERE b.account_id = ?
+        WHERE b.account_id = ? AND (? = 1 OR p.expires_at IS NULL OR p.expires_at > ?)
        UNION ALL
        SELECT pack, expires_at FROM account_pack_grants
         WHERE account_id = ? AND (expires_at IS NULL OR expires_at > ?)`,
     )
-    .all(accountId, accountId, now) as Held[];
-  for (const pack of includes[account.tier] ?? []) held.push({ pack, expires_at: null });
+    .all(accountId, rules.storeReads === true ? 1 : 0, now, accountId, now) as Held[];
+  for (const pack of rules.includes?.[account.tier] ?? []) held.push({ pack, expires_at: null });
 
   const best = new Map<PackId, number | null>();
   for (const row of held) {
@@ -72,8 +91,8 @@ export function packsFor(db: Database.Database, clock: Clock, accountId: string,
   return PACK_IDS.filter((id) => best.has(id)).map((id) => ({ id, expires_at: best.get(id) ?? null }));
 }
 
-export function holdsPack(db: Database.Database, clock: Clock, accountId: string, pack: PackId, includes: PackIncludes = {}): boolean {
-  return packsFor(db, clock, accountId, includes).some((entry) => entry.id === pack);
+export function holdsPack(db: Database.Database, clock: Clock, accountId: string, pack: PackId, rules: PackRules = {}): boolean {
+  return packsFor(db, clock, accountId, rules).some((entry) => entry.id === pack);
 }
 
 // api.md §4.2, checked_at: the oldest successful store read among the account's

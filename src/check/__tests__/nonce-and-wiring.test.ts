@@ -292,6 +292,36 @@ describe("where the scan runs, and the setting that switches it off", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  // The scan's own store is built from the configuration, not from the app's
+  // dependencies, so this is the one place the read mode comes from readsMode.
+  it("keeps a store pack past its saved end date in the scan only when the configuration switches reading on", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const key = { revenueCatApi: { secretApiKey: "sk-fake-not-a-real-key", projectId: "proj_fake", entitlements: {} } };
+    const cases: [Partial<Config>, number][] = [
+      [{ ...key, revenueCatReads: "on" }, 1],
+      [{ ...key, revenueCatReads: "shadow" }, 0],
+      [{ ...key, revenueCatReads: "off" }, 0],
+      [key, 0],
+      // The setting without the API key reads nothing.
+      [{ revenueCatReads: "on" }, 0],
+    ];
+    for (const [extra, expected] of cases) {
+      const db = database();
+      const clock = new FakeClock();
+      const sent: string[] = [];
+      const checks = createChecks({ ...withApns, ...extra }, { db, clock, fetch: async () => new Response(null), apnsTransport: () => ({ send: async (_path, _headers, body) => { sent.push(body); return { status: 200, headers: {}, body: "" }; }, close: () => {} }) });
+      addAccount(db, "acc_1", { pack: false });
+      addDevice(db, "dev_a", "acc_1");
+      db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('acc_1', 'acc_1', 1, NULL, 'free')").run();
+      db.prepare("INSERT INTO billing_packs (app_user_id, pack, expires_at) VALUES ('acc_1', 'pro', ?)").run(T0 - 60);
+      db.prepare("INSERT INTO device_checks (device_id, enabled, enrolled_at, next_attempt_at, next_due_at) VALUES ('dev_a', 1, ?, ?, ?)").run(T0, T0, T0);
+
+      await checks.scheduler?.scan();
+
+      expect(sent).toHaveLength(expected);
+    }
+  });
+
   it("sends the check with the provider token it is handed, and signs none of its own", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const db = database();

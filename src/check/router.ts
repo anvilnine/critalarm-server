@@ -3,7 +3,7 @@ import type { Context } from "hono";
 import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
 import { authenticateDevice, bearerFromHeader } from "../tier/auth.js";
-import { holdsPack, packRequired, type PackIncludes } from "../tier/packs.js";
+import { holdsPack, packRequired, type PackRules } from "../tier/packs.js";
 import type { AccountContext } from "../tier/types.js";
 import { CHECK_PACK, type CheckStore } from "./store.js";
 
@@ -18,7 +18,8 @@ export interface CheckRouterDependencies {
   db: Database.Database;
   clock: Clock;
   store: CheckStore;
-  packIncludes?: PackIncludes;
+  // The same rules the store was given.
+  packRules?: PackRules;
 }
 
 const DEFAULT_ROUNDS_LIMIT = 20;
@@ -41,7 +42,7 @@ export function createCheckRouter(deps: CheckRouterDependencies): Hono {
     const body = await c.req.json().catch(() => null) as { enabled?: unknown } | null;
     if (body === null || typeof body !== "object" || typeof body.enabled !== "boolean") return c.json({ error: "invalid request" }, 400);
     if (body.enabled) {
-      if (!holdsPack(deps.db, deps.clock, context.accountId, CHECK_PACK, deps.packIncludes)) return packRequired(CHECK_PACK);
+      if (!holdsPack(deps.db, deps.clock, context.accountId, CHECK_PACK, deps.packRules)) return packRequired(CHECK_PACK);
       deps.store.enable(context.deviceId);
     } else {
       deps.store.disable(context.deviceId);
