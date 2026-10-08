@@ -342,13 +342,15 @@ const migrations: Migration[] = [
   // on read.
   //
   // billing_packs is what one billing id holds. expires_at is epoch seconds, or
-  // NULL for no end date, and it is compared against the clock on every read,
-  // so nothing has to write again when time passes. The rows hang off the
+  // NULL for no end date. It is the end the store last reported and it ends
+  // nothing by itself: the row goes when a store read succeeds and no longer
+  // lists the entitlement (tier/packs.ts). The rows hang off the
   // billing id, so a merge that repoints a billing id carries them along and
   // an account delete takes them by cascade.
   //
   // account_pack_grants is a pack the operator gave an account directly. No
-  // route writes it.
+  // route writes it. Its expires_at is compared against the clock on every
+  // read, so a grant ends on its date with no second write.
   //
   // The three columns on account_billing_ids fence the store reads. read_seq is
   // the number given to the last read that started for this id, applied_seq the

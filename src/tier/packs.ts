@@ -28,9 +28,20 @@ type Held = { pack: string; expires_at: number | null };
 
 // Three sources, one answer: what the account's billing ids hold, what the
 // operator granted, and what the configuration attaches to the account's tier.
-// The clock is read here, on every call, so a pack ends on time with no second
-// write. One entry per pack: no end date wins over any end date, and otherwise
-// the latest end is reported.
+//
+// The two stored sources end in different ways.
+//
+//   store pack      ends when a read of the store succeeds and no longer lists
+//                   its entitlement. That read deletes the row. The saved end
+//                   date alone ends nothing: api.md §4.3 says a failed read
+//                   never removes a pack, and a renewal whose read failed
+//                   leaves an old end date behind. So a store pack can be
+//                   reported with an end date that has passed.
+//   operator grant  ends on its date. The clock is read here, on every call,
+//                   so it ends on time with no second write and no read.
+//
+// One entry per pack: no end date wins over any end date, and otherwise the
+// latest end is reported.
 export function packsFor(db: Database.Database, clock: Clock, accountId: string, includes: PackIncludes = {}): PackEntry[] {
   const account = db.prepare("SELECT tier FROM accounts WHERE id = ?").get(accountId) as { tier: Tier } | undefined;
   if (account === undefined) return [];
@@ -39,12 +50,12 @@ export function packsFor(db: Database.Database, clock: Clock, accountId: string,
     .prepare(
       `SELECT p.pack AS pack, p.expires_at AS expires_at
          FROM billing_packs p JOIN account_billing_ids b ON b.app_user_id = p.app_user_id
-        WHERE b.account_id = ? AND (p.expires_at IS NULL OR p.expires_at > ?)
+        WHERE b.account_id = ?
        UNION ALL
        SELECT pack, expires_at FROM account_pack_grants
         WHERE account_id = ? AND (expires_at IS NULL OR expires_at > ?)`,
     )
-    .all(accountId, now, accountId, now) as Held[];
+    .all(accountId, accountId, now) as Held[];
   for (const pack of includes[account.tier] ?? []) held.push({ pack, expires_at: null });
 
   const best = new Map<PackId, number | null>();
