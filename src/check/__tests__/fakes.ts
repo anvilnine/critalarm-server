@@ -9,7 +9,7 @@ import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { AlarmNotes, alarmNoteWriter } from "../device-hooks.js";
 import { CheckScheduler } from "../scheduler.js";
-import type { StoreReads } from "../../tier/types.js";
+import type { StoreReads, Tier } from "../../tier/types.js";
 import { CheckStore, type CheckView, type RoundView } from "../store.js";
 
 // Fakes for the weekly check tests. No test that uses them reaches a network:
@@ -53,19 +53,23 @@ export function database(): TestDatabase {
   return db;
 }
 
-export function addAccount(db: TestDatabase, id: string, options: { pack?: boolean; tier?: "free" | "relay" | "hosted" } = {}): void {
-  db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, ?, 1)").run(id, options.tier ?? "free");
-  if (options.pack !== false) grantPack(db, id);
+// An account is on `hosted` unless the test says otherwise, because that is
+// the tier that gets the check. It holds no pack unless the test asks for one.
+export function addAccount(db: TestDatabase, id: string, options: { tier?: Tier; pack?: boolean } = {}): void {
+  db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES (?, ?, 1)").run(id, options.tier ?? "hosted");
+  if (options.pack === true) grantPack(db, id);
 }
 
-// The pack reaches the account as an operator grant here. Which source it
-// comes from makes no difference to the check.
-export function grantPack(db: TestDatabase, accountId: string, expiresAt: number | null = null): void {
-  db.prepare("INSERT OR REPLACE INTO account_pack_grants (account_id, pack, expires_at, reason, granted_at) VALUES (?, 'pro', ?, 'test', 1)").run(accountId, expiresAt);
+// Writes the account's tier the way api.md §4.3 leaves it: one column on the
+// account row. The tests that go through a store read do not use this.
+export function setTier(db: TestDatabase, accountId: string, tier: Tier): void {
+  db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(tier, accountId);
 }
 
-export function removePack(db: TestDatabase, accountId: string): void {
-  db.prepare("DELETE FROM account_pack_grants WHERE account_id = ?").run(accountId);
+// The `pro` pack as an operator grant with no end date. Only the tests that
+// show a pack is not enough for a check use it.
+export function grantPack(db: TestDatabase, accountId: string): void {
+  db.prepare("INSERT OR REPLACE INTO account_pack_grants (account_id, pack, expires_at, reason, granted_at) VALUES (?, 'pro', NULL, 'test', 1)").run(accountId);
 }
 
 // The device's dv_ token is `dv_` plus the part of its id after `dev_`.
@@ -113,7 +117,7 @@ export function setup(options: SetupOptions = {}): Harness {
   const sender = new FakeCheckSender();
   const counters = new Counters(db, clock);
   const storeReads = options.storeReads?.(db, clock);
-  const store = new CheckStore(db, clock, counters, { includes: options.config?.packIncludes ?? {}, storeReads: storeReads?.mode === "on" });
+  const store = new CheckStore(db, clock, counters);
   const notes = new AlarmNotes(alarmNoteWriter(db));
   const scheduler = new CheckScheduler(store, { ios: sender, android: sender }, { notes, ...(options.batch === undefined ? {} : { batch: options.batch }) });
   const app = createApp({ config: { ...config, ...options.config }, db, clock, ids: { message: () => "m_1", incident: () => "inc_1", timer: () => "tm_1" }, dispatch: async () => {}, ...(storeReads === undefined ? {} : { storeReads }) });
@@ -147,7 +151,7 @@ export function setup(options: SetupOptions = {}): Harness {
   return { db, clock, sender, counters, store, scheduler, notes, app, api, scanAt, restart };
 }
 
-// One enrolled device on an account that holds the pack.
+// One enrolled device on a hosted account.
 export async function enrolled(options: SetupOptions = {}): Promise<Harness> {
   const harness = setup(options);
   addAccount(harness.db, "acc_1");
