@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.18.0
+**Version:** 1.19.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.19.0** moves the weekly check from the `pro` pack to the Hosted tier. A device is sent checks only while its account's tier is `hosted` (§4.5). `free` does not get them, and neither does `relay`, which has the same caps as `hosted` but is not the Hosted plan. Hosted and the `pro` pack are separate and neither includes the other, so holding `pro` no longer gets a device a check and a Hosted account needs no pack for one. `PUT .../check` with `"enabled":true` on any other tier answers `403 {"error":"tier","tier":"hosted"}`, a new error (§1.8), where 1.18.0 answered `{"error":"pack","pack":"pro"}`. The `reason` value `"pack"` becomes `"tier"` in both places it appeared: on `GET .../check` beside `"state":"off"`, and on a round that closed as `skipped`. A phone on a self-hosted server cannot get the weekly check, because no plan is sold there. Packs are untouched: `packs`, `GET /relay/v1/packs`, `POST /relay/v1/packs/refresh` and the `pack` error stay as they were, and no route in this version answers the `pack` error. This version changes what 1.18.0 said and adds no route and no field. An app built for 1.18.0 meets a `403` with no `pack` field and a `reason` it does not know. It reads the first as a switch that failed and the second as no reason, so it shows the check as off and never as working.
 
 **1.18.0** adds packs and a weekly delivery check. A pack is an add-on an account holds beside its tier, and the only one is `pro`. `packs` appears on every registration response and on `GET /relay/v1/packs`, and `POST /relay/v1/packs/refresh` asks the relay to read the store again and says whether it could (§4.2). A relay that reads the store now works out the tier and the packs together from one read of the customer's active entitlements, and a webhook event only triggers that read. A relay that does not read the store applies events to the tier as before and gives no pack for a purchase (§4.3). The weekly check is a push that shows nothing: the relay sends it to a device that asked for it, the app answers with a receipt, and the relay reports whether the last rounds were answered (§4.5, §5.4). An answered check shows that a push reached the holder of the device's credential. It does not show that an alarm would ring. Everything is additive on the wire. A client that knows none of it sees one new field on a registration response and nothing else. No route lets an app create an alert, and a check shows nothing on the phone.
 
@@ -173,7 +175,8 @@ Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code.
 | `{"error":"streaming not supported"}` | `501` from `/json` without `poll=1`, `/sse`, `/ws`, `/raw` (§2) |
 | `{"error":"not found"}` | `404`, including a row owned by another account |
 | `{"error":"cap","cap":"..."}` | `429` from a cap (§4.2) |
-| `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2, §4.5) |
+| `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2). No route answers it in 1.19.0 |
+| `{"error":"tier","tier":"..."}` | `403` from a route that needs a tier the account is not on. `tier` names the tier the route needs (§4.5) |
 
 ---
 
@@ -646,7 +649,7 @@ These are launch guesses, set by gut and adjusted from relay metrics after 30 da
 
 **Ring until acked has no cap field.** The app offers the "no limit" option when `tier != "free"` and disables it otherwise. The ring ceiling itself is the server's `max_ring_s` config, which the account holder owns.
 
-**Packs.** A pack is an add-on an account holds beside its tier. `packs` lists the packs the account holds at the moment of the response, and is `[]` when it holds none. `id` is the pack's name. `expires_at` is epoch seconds, or `null` when the pack has no end date. A client reads `packs` and never infers a pack from `tier`. It treats an `id` it does not know as absent. The only pack in 1.18.0 is `pro`, which the weekly check (§4.5) asks for.
+**Packs.** A pack is an add-on an account holds beside its tier. `packs` lists the packs the account holds at the moment of the response, and is `[]` when it holds none. `id` is the pack's name. `expires_at` is epoch seconds, or `null` when the pack has no end date. A client reads `packs` and never infers a pack from `tier`. It treats an `id` it does not know as absent. The only pack is `pro`. No route in this contract asks for it: the weekly check (§4.5) goes by the tier, and the app reads `packs` to unlock features that are built into the app.
 
 A pack belongs to the account, so every device on it holds the pack. Nothing in this contract says how a pack is bought, what it costs or how long it lasts. A pack can reach an account from a store purchase (§4.3), from a grant by the relay's operator, or from the relay's own configuration, and `packs` reports the result without saying which.
 
@@ -842,14 +845,14 @@ PUT    /relay/v1/devices/{device_id}/check
   Authorization: Bearer dv_...
   { "enabled":true }
 → 200 { ...check }
-→ 403 {"error":"pack","pack":"pro"}                     // enabling without the pack
+→ 403 {"error":"tier","tier":"hosted"}                  // enabling on a tier that does not get the check
 
 GET    /relay/v1/devices/{device_id}/check
   Authorization: Bearer dv_...
 → 200 { "enabled":true,
         "state":"waiting"|"received"|"missed_once"|"missed_repeatedly"
                |"token_refused"|"no_token"|"off",
-        "reason":null|"pack"|"disabled",
+        "reason":null|"tier"|"disabled",
         "misses":0,
         "last_sent_at":1759800000, "last_received_at":1759800004,
         "next_due_at":1760404800, "notice_after":1761096000 }
@@ -873,9 +876,13 @@ Once a week the relay sends an enrolled device a push that shows nothing (§5.4)
 
 All four routes take the device's own `dv_`, and each reaches that one device's data. Another device's token answers `404`, as on every device route, including another device on the same account.
 
-**What a counted receipt shows, and what it does not.** It shows that something holding this device's `dv_` received this round's push and reached the relay while the round was open. So the push token was live and the push provider accepted a push for it. It does not show that the app was woken in the background: the relay cannot see what state the app was in. It does not show that an alarm would ring. An alarm travels as an alert, at a higher priority, with a sound, and depends on notification permission and on settings the check never touches. It does not show that the user's server can reach the relay either: the relay sends the check straight to the phone, so for a phone on a self-hosted server that leg is not exercised at all. Only a real publish covers those, and `POST /v1/test` (§3.3) is one. A client must not present an answered check as proof that alarms work.
+**What a counted receipt shows, and what it does not.** It shows that something holding this device's `dv_` received this round's push and reached the relay while the round was open. So the push token was live and the push provider accepted a push for it. It does not show that the app was woken in the background: the relay cannot see what state the app was in. It does not show that an alarm would ring. An alarm travels as an alert, at a higher priority, with a sound, and depends on notification permission and on settings the check never touches. It does not show that a publish reaches the relay either: the relay starts the check itself and sends it straight to the phone, so nothing on the publishing side is exercised. Only a real publish covers those, and `POST /v1/test` (§3.3) is one. A client must not present an answered check as proof that alarms work.
 
-**Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account holds the `pro` pack (§4.2). `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
+**Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account's tier is `hosted` (§4.2). `free` does not get the check. Neither does `relay`: it has the same caps as `hosted`, but it is not the Hosted plan. No pack is needed and no pack is enough: an account on `free` that holds `pro` gets no check. `PUT` with `"enabled":true` on any tier but `hosted` answers `403 {"error":"tier","tier":"hosted"}` and changes nothing, including for a device that is already enrolled. A client decides whether to offer the check from `tier` and never from `packs`. `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
+
+**When the tier changes.** The relay reads the account's tier each time a push of a round comes due, and once more just before it sends. From the moment the account is not `hosted`, no check push is sent to its devices. The device stays enrolled: `GET .../check` answers `"enabled":true` with `state` `off` and `reason` `"tier"`, and `misses`, `last_sent_at` and `last_received_at` keep their values. A round that was open is not closed at that moment, and a receipt for it still counts. If the round has a push left to send, the relay closes it as `skipped` with `reason` `"tier"` when that push comes due. If it has none left, it closes as it would have anyway. While the account stays off `hosted`, each round that comes due is written as `skipped` with `reason` `"tier"` and nothing is sent. When the account is `hosted` again the device needs no new `PUT`: its rounds go on from the next one due, on the schedule it already had. The tier is the one §4.3 last wrote. A store read that fails lowers no tier, and a payment that is being retried is not an expiry, so neither stops a check.
+
+**A phone on a self-hosted server gets no weekly check.** The check goes by the tier of the phone's account on the relay, `hosted` is the only tier that gets it, and no plan is sold for a self-hosted server (§4.2). Holding the `pro` pack changes nothing. The relay cannot see which server a phone is connected to, so the app keeps its half of the rule: while it is connected to a self-hosted server it does not offer the check and does not send `"enabled":true`.
 
 **A round.** A round opens when the relay reaches the device, and at that moment the relay fixes the round's close time: 24 hours later, by the relay's clock. It is returned as `closes_at` and never changes. A round is up to three pushes: one when it opens, one 6 hours later and one 18 hours later. They carry the same `check_id` and an `attempt` of 1, 2 or 3. The first counted receipt ends the round and no further push is sent. After its first round each device has a fixed moment in the week, which the relay derives from the `device_id` to spread its load, and rounds are 7 days apart. The second round opens at the device's first fixed moment that is at least 3 days after the first round opened, so the gap between the first two rounds is 3 to 10 days. Two devices may have the same moment. `next_due_at` is when the next round is due.
 
@@ -896,7 +903,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | `received` | a receipt reached the relay while the round was open |
 | `missed` | APNs or FCM accepted at least one push of the round, and it closed with no receipt |
 | `refused` | APNs or FCM refused the device's push token. No receipt was possible |
-| `skipped` | the round ended without an answer being owed: `reason` is `"pack"`, `"no_token"`, `"disabled"`, `"held"` or `"unsent"`. With the first three, the pack, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. `"unsent"` means the relay could not hand any push of the round to APNs or FCM, because the provider was failing or the relay was not running. Not counted as a miss |
+| `skipped` | the round ended without an answer being owed: `reason` is `"tier"`, `"no_token"`, `"disabled"`, `"held"` or `"unsent"`. With the first three, the `hosted` tier, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. `"unsent"` means the relay could not hand any push of the round to APNs or FCM, because the provider was failing or the relay was not running. Not counted as a miss. A round that a relay closed before 1.19.0 may carry `"pack"`, and it stays as written |
 
 **`state`.** It reports what happened to the last rounds and makes no claim about the phone.
 
@@ -908,9 +915,11 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | `missed_repeatedly` | the last two or more closed rounds were `missed` or `refused` |
 | `token_refused` | the last closed round was `refused`, and the one before it was not |
 | `no_token` | the relay holds no push token for the device |
-| `off` | not enrolled (`reason` `"disabled"`), or the account no longer holds the pack (`reason` `"pack"`) |
+| `off` | not enrolled (`reason` `"disabled"`), or enrolled on an account whose tier is not `hosted` (`reason` `"tier"`) |
 
 `misses` is how many closed rounds in a row were `missed` or `refused`. `skipped` rounds change nothing.
+
+**A `reason` a client does not know is no reason.** `off` is still off and `skipped` is still skipped, and the client shows nothing more for it. 1.18.0 sent `"pack"` where this version sends `"tier"`.
 
 **Fields with nothing to report are `null`.** `last_sent_at` and `last_received_at` are `null` until there is one. `next_due_at` and `notice_after` are `null` while `state` is `off`. When `misses` is already 2 or more, `notice_after` is the second at which the run of misses reached two, which is in the past.
 
@@ -924,7 +933,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 **Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after APNs or FCM accepted an `open`, `repeat` or `reopen` for that device. An alarm push the provider refused or that failed holds nothing. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together. The 30 minutes apply to every push of a round, not only the first. A push still held when the round closes is never sent. A round in which every push was held ends as `skipped` with `reason` `"held"`: alarms were reaching the device the whole time, which says more than a check would.
 
-`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
+`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whatever the account's tier is today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
 
 ---
 
