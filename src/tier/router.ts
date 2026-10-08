@@ -8,7 +8,7 @@ import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from
 import { applyRevenueCatEvent, parseRevenueCatEvent, resolveAccount } from "./revenuecat.js";
 import { bearerSecretMatches } from "../bearer.js";
 import { RollingLimit } from "./account-limit.js";
-import { packsCheckedAt, packsFor } from "./packs.js";
+import { packsCheckedAt, packsFor, type PackRules } from "./packs.js";
 import { namedCustomers, parseReadTrigger, queueReadsForEvent } from "./revenuecat-trigger.js";
 import type { Tier, TierDependencies } from "./types.js";
 
@@ -62,7 +62,10 @@ async function readStoreForAccount(deps: TierDependencies, accountId: string): P
 
 export function createTierRouter(deps: TierDependencies): Hono {
   const router = new Hono();
-  const packs = (accountId: string) => packsFor(deps.db, deps.clock, accountId, deps.packIncludes);
+  // A store pack is kept past its saved end date only where a read can remove
+  // it, which is reading switched on (tier/packs.ts).
+  const packRules: PackRules = { ...(deps.packIncludes === undefined ? {} : { includes: deps.packIncludes }), storeReads: deps.storeReads?.mode === "on" };
+  const packs = (accountId: string) => packsFor(deps.db, deps.clock, accountId, packRules);
   // api.md §4.2: 6 requests per 60 seconds per account.
   const refreshLimit = new RollingLimit(deps.clock, 6, 60);
 

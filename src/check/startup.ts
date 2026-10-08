@@ -7,6 +7,7 @@ import type { PushFetch, PushSender } from "../push/types.js";
 import type { ApnsProviderToken } from "../push/apns-token.js";
 import { AlarmNotes, alarmNoteWriter, notingAlarmPushes } from "./device-hooks.js";
 import { CheckScheduler, startCheckScheduler, type CheckSenders } from "./scheduler.js";
+import { readsMode } from "../tier/billing-startup.js";
 import { CheckStore } from "./store.js";
 
 // api.md §4.5. Whether this process sends weekly checks, and the pieces it
@@ -47,7 +48,9 @@ export function createChecks(config: Config, deps: ChecksDependencies): Checks {
     ...(apns === undefined ? {} : { ios: apns }),
     ...(config.fcm === undefined ? {} : { android: new FcmCheckSender({ ...config.fcm, clock: deps.clock, fetch: deps.fetch }) }),
   };
-  const store = new CheckStore(deps.db, deps.clock, undefined, config.packIncludes ?? {});
+  // readsMode is what createBilling switches on, so the scan and the routes
+  // agree on whether a store pack is kept past its saved end date.
+  const store = new CheckStore(deps.db, deps.clock, undefined, { includes: config.packIncludes ?? {}, storeReads: readsMode(config) === "on" });
   const notes = new AlarmNotes(alarmNoteWriter(deps.db));
   const scheduler = new CheckScheduler(store, senders, { notes });
   return {

@@ -38,7 +38,7 @@ export class ShadowReads {
         console.log(JSON.stringify({ event: "billing_shadow", app_user_id: appUserId, trigger, status: answer.status, reason: answer.reason, entitlement_ids: [], unknown_ids: [], read_tier: null, read_packs: [], stored_tier: storedTier, agrees: null }));
         return;
       }
-      const view = viewEntitlements(answer.items, this.deps.api, this.deps.clock.now());
+      const view = viewEntitlements(answer.items, this.deps.api);
       // What the read path would write: a list carrying an identifier neither
       // map names may raise the tier and may not lower it.
       const readTier = view.unknownIds.length > 0 && isHigherTier(storedTier, view.tier) ? storedTier : view.tier;
