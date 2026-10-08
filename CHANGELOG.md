@@ -3,6 +3,50 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.19.0 - 2026-10-09
+
+### Added
+
+- `{"error":"tier","tier":"..."}` with `403` (§1.8). A route that needs a
+  tier the account is not on answers it, and `tier` names the tier needed.
+- `"tier"` as a `reason` on `GET .../check` and on a round (§4.5).
+- §4.5 says what happens when the tier changes. The device stays enrolled,
+  nothing is sent while the account is off `hosted`, each round that comes
+  due is written as `skipped`, and rounds go on with no new `PUT` when the
+  account is `hosted` again. A failed store read lowers no tier (§4.3), so
+  it stops no check.
+
+### Changed
+
+- The weekly check goes by the tier, not by the `pro` pack (§4.5). A device
+  is sent checks only while its account's tier is `hosted`. `free` and
+  `relay` do not get them. Holding `pro` no longer gets a device a check,
+  and a Hosted account needs no pack for one.
+- `PUT /relay/v1/devices/{device_id}/check` with `"enabled":true` on a tier
+  other than `hosted` answers `403 {"error":"tier","tier":"hosted"}`. It
+  answered `403 {"error":"pack","pack":"pro"}` in 1.18.0.
+- `reason` beside `"state":"off"`, and `reason` on a `skipped` round, say
+  `"tier"` where 1.18.0 said `"pack"`. A round closed before 1.19.0 keeps
+  `"pack"`. A client treats a `reason` it does not know as no reason.
+- A phone on a self-hosted server cannot get the weekly check (§4.5). No
+  plan is sold there, and the app does not offer the check or enrol while it
+  is connected to one.
+- The `pack` error stays in §1.8 for packs in general. No route answers it
+  in this version.
+- Compatibility with 1.18.0 clients. No route, field or push payload was
+  added or removed, and packs, the receipt route, the round list and the
+  check push (§5.4) are unchanged. An app built for 1.18.0 that enrols on a
+  `free` account holding `pro` gets a `403` with no `pack` field, reads it
+  as a switch that failed and changes nothing. It reads `"reason":"tier"` as
+  no reason, shows the check as switched off, and raises no notice about
+  missed checks, because `state` is `off`. That app offers the check only to
+  an account holding `pro`, so a Hosted account without `pro` is not offered
+  it until the app is built for 1.19.0.
+
+### Removed
+
+- `"pack"` as a `reason` the relay writes (§4.5).
+
 ## 1.18.0 - 2026-10-07
 
 ### Added
