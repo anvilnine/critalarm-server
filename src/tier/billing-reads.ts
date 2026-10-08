@@ -248,7 +248,8 @@ export class BillingReads {
   }
 
   // Only the queue moves. The tier, the packs, checked_at and the fence stay
-  // exactly as they were.
+  // exactly as they were. A pack whose saved end date passes while reads fail
+  // is still held, because packsFor does not end a store pack on its date.
   private failed(appUserId: string): void {
     this.deps.db.transaction(() => {
       const row = this.deps.db.prepare("SELECT attempts, dirty FROM billing_reads WHERE app_user_id = ?").get(appUserId) as { attempts: number; dirty: number } | undefined;
@@ -271,7 +272,7 @@ export class BillingReads {
     const { db, clock } = this.deps;
     db.transaction(() => {
       const now = clock.now();
-      const view = viewEntitlements(items, this.deps.api, now);
+      const view = viewEntitlements(items, this.deps.api);
       let row = db.prepare("SELECT account_id, entitled_tier, applied_seq FROM account_billing_ids WHERE app_user_id = ?").get(appUserId) as BillingRow | undefined;
       if (row !== undefined && seq <= row.applied_seq) {
         report({ event: "billing_read_stale", app_user_id: appUserId, trigger, seq, applied_seq: row.applied_seq });
