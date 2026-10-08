@@ -44,15 +44,14 @@ function indexesOn(db: ReturnType<typeof openDatabase>, table: string) {
 }
 
 describe("migration 15", () => {
-  // Version 16, the topic token names, and version 17, the per-device APNs
-  // environment, both landed after this one, so the list is two longer than it
-  // was.
-  it("the list is twenty long", () => {
-    expect(migrationCount).toBe(20);
+  // Later versions landed after this one. The newest is 21, which lets a
+  // check round carry the reason 'tier'.
+  it("the list is twenty-one long", () => {
+    expect(migrationCount).toBe(21);
     const db = openDatabase(":memory:");
     databases.push(db);
     migrate(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 20 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 21 });
   });
 
   it("carries every row across the rebuild with the same user_id and account_id", () => {
@@ -140,6 +139,6 @@ describe("migration 15", () => {
     migrate(db, 14);
     migrate(db);
     expect(identityRows(db)).toEqual([]);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 20 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 21 });
   });
 });
