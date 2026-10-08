@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
 import type { ApnsEnvironment } from "../push/types.js";
 import { Counters, LOCAL_KEY } from "../stats/counters.js";
-import { holdsPack, type PackId, type PackIncludes } from "../tier/packs.js";
+import { holdsPack, type PackId, type PackRules } from "../tier/packs.js";
 import { ALARM_HOLD_S, ATTEMPT_OFFSETS_S, MAX_ATTEMPTS, MIN_ROUND_GAP_S, ROUND_LENGTH_S, roundAfter, slotAtOrAfter, slotFor } from "./schedule.js";
 
 // api.md §4.5. Everything the weekly check keeps, and every change to it. The
@@ -97,7 +97,7 @@ export class CheckStore {
     private readonly db: Database.Database,
     private readonly clock: Clock,
     private readonly counters: Counters = new Counters(db, clock),
-    private readonly packIncludes: PackIncludes = {},
+    private readonly packRules: PackRules = {},
   ) {}
 
   // PUT with "enabled":true. The caller has already checked the pack. A device
@@ -214,7 +214,7 @@ export class CheckStore {
       }
       // The pack is asked for at every attempt, so one that lapses between two
       // pushes of a round stops the second.
-      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packIncludes)) return this.skip(state, round, "pack", now);
+      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packRules)) return this.skip(state, round, "pack", now);
       if (device.push_token === "") return this.skip(state, round, "no_token", now);
       // The round opens when the scan reaches the device, held or not, and its
       // close time is fixed then.
@@ -277,7 +277,7 @@ export class CheckStore {
         this.expire(round);
         return false;
       }
-      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packIncludes)) {
+      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packRules)) {
         this.close(round, "skipped", "pack", now);
         return false;
       }
@@ -319,7 +319,7 @@ export class CheckStore {
       last_received_at: state?.last_received_at ?? null,
     };
     if (state === undefined || state.enabled !== 1) return { enabled: false, state: "off", reason: "disabled", ...base, next_due_at: null, notice_after: null };
-    if (!holdsPack(this.db, this.clock, accountId, CHECK_PACK, this.packIncludes)) return { enabled: true, state: "off", reason: "pack", ...base, next_due_at: null, notice_after: null };
+    if (!holdsPack(this.db, this.clock, accountId, CHECK_PACK, this.packRules)) return { enabled: true, state: "off", reason: "pack", ...base, next_due_at: null, notice_after: null };
     const times = { next_due_at: state.next_due_at, notice_after: this.noticeAfter(state) };
     const device = this.device(deviceId);
     if (device === undefined || device.push_token === "") return { enabled: true, state: "no_token", reason: null, ...base, ...times };

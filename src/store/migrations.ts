@@ -342,9 +342,10 @@ const migrations: Migration[] = [
   // on read.
   //
   // billing_packs is what one billing id holds. expires_at is epoch seconds, or
-  // NULL for no end date. It is the end the store last reported and it ends
-  // nothing by itself: the row goes when a store read succeeds and no longer
-  // lists the entitlement (tier/packs.ts). The rows hang off the
+  // NULL for no end date. It is the end the store last reported. On a relay
+  // that reads the store it ends nothing by itself: the row goes when a read
+  // succeeds and no longer lists the entitlement. On a relay that does not,
+  // the date is compared against the clock (tier/packs.ts). The rows hang off the
   // billing id, so a merge that repoints a billing id carries them along and
   // an account delete takes them by cascade.
   //
