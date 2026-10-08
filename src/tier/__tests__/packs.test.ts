@@ -45,12 +45,26 @@ describe("packsFor", () => {
     expect(packsFor(db, clock, "acc_1")).toEqual([{ id: "pro", expires_at: null }]);
   });
 
-  it("reports a pack whose end is in the future, and drops it once the clock reaches the end", () => {
+  // api.md §4.3: a failed read never removes a pack. The saved end date is
+  // what the store last said, and only a successful read that no longer lists
+  // the entitlement ends a store pack, by deleting its row.
+  it("keeps a store pack past its saved end date, with the date the store last gave", () => {
     const db = setup();
     link(db, "rc_1");
     billingPack(db, "rc_1", NOW + 10);
-    expect(packsFor(db, clock, "acc_1")).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
-    expect(packsFor(db, { now: () => NOW + 10 }, "acc_1")).toEqual([]);
+    const held = [{ id: "pro", expires_at: NOW + 10 }];
+    expect(packsFor(db, clock, "acc_1")).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 10 }, "acc_1")).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 11 }, "acc_1")).toEqual(held);
+    expect(packsFor(db, { now: () => NOW + 400 * 86_400 }, "acc_1")).toEqual(held);
+    expect(holdsPack(db, { now: () => NOW + 11 }, "acc_1", "pro")).toBe(true);
+  });
+
+  it("drops a store pack when its row goes, which is what a successful read that no longer lists it does", () => {
+    const db = setup();
+    link(db, "rc_1");
+    billingPack(db, "rc_1", NOW + 10);
+    db.prepare("DELETE FROM billing_packs WHERE app_user_id = 'rc_1'").run();
     expect(packsFor(db, { now: () => NOW + 11 }, "acc_1")).toEqual([]);
   });
 
@@ -73,6 +87,25 @@ describe("packsFor", () => {
     const db = setup();
     grant(db, "acc_1", NOW - 1);
     expect(packsFor(db, clock, "acc_1")).toEqual([]);
+  });
+
+  it("ends an operator grant on its date with no read and no write, on an account that has a billing id too", () => {
+    const db = setup();
+    link(db, "rc_1");
+    grant(db, "acc_1", NOW + 10);
+    expect(packsFor(db, { now: () => NOW + 9 }, "acc_1")).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
+    expect(packsFor(db, { now: () => NOW + 10 }, "acc_1")).toEqual([]);
+    expect(holdsPack(db, { now: () => NOW + 10 }, "acc_1", "pro")).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM account_pack_grants").get()).toEqual({ n: 1 });
+  });
+
+  it("a grant that has ended adds nothing to a store pack that is kept past its date", () => {
+    const db = setup();
+    link(db, "rc_1");
+    billingPack(db, "rc_1", NOW + 10);
+    grant(db, "acc_1", NOW + 50);
+    expect(packsFor(db, { now: () => NOW + 20 }, "acc_1")).toEqual([{ id: "pro", expires_at: NOW + 50 }]);
+    expect(packsFor(db, { now: () => NOW + 60 }, "acc_1")).toEqual([{ id: "pro", expires_at: NOW + 10 }]);
   });
 
   it("reports one entry per pack when several sources hold it, with the latest end", () => {
