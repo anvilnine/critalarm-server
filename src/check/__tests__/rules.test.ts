@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteAccount } from "../../v1/accounts.js";
 import { pruneCheckRounds } from "../../retention/prune.js";
 import { roundAfter, slotAtOrAfter, slotFor } from "../schedule.js";
-import { DAY, HOUR, T0, WEEK, type Harness, addAccount, addDevice, enrolled, grantPack, lastCheckId, removePack, setup } from "./fakes.js";
+import { DAY, HOUR, T0, WEEK, type Harness, addAccount, addDevice, enrolled, grantPack, lastCheckId, setTier, setup } from "./fakes.js";
 
 // One test per rule of api.md §4.5, named for the rule. The describe blocks
 // follow the paragraphs of the section in order.
@@ -75,19 +75,25 @@ describe("all four routes take the device's own dv_", () => {
 });
 
 describe("enrolling", () => {
-  it("enabling without the pack answers 403 and names the pack", async () => {
-    const harness = setup();
-    addAccount(harness.db, "acc_1", { pack: false });
-    addDevice(harness.db, "dev_a", "acc_1");
-    const response = await harness.api.enable("dev_a");
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "pack", pack: "pro" });
-    expect((await harness.api.check("dev_a")).enabled).toBe(false);
-    await harness.scanAt(T0 + WEEK);
-    expect(harness.sender.sent).toEqual([]);
+  it("enabling on free or on relay answers 403 and names the hosted tier, with or without the pro pack", async () => {
+    for (const tier of ["free", "relay"] as const) {
+      for (const pack of [false, true]) {
+        const harness = setup();
+        addAccount(harness.db, "acc_1", { tier, pack });
+        addDevice(harness.db, "dev_a", "acc_1");
+        const response = await harness.api.enable("dev_a");
+        expect(response.status).toBe(403);
+        expect(await response.json()).toEqual({ error: "tier", tier: "hosted" });
+        // Nothing changed: no enrolment was written.
+        expect((await harness.api.check("dev_a")).enabled).toBe(false);
+        expect(harness.db.prepare("SELECT COUNT(*) AS n FROM device_checks").get()).toEqual({ n: 0 });
+        await harness.scanAt(T0 + WEEK);
+        expect(harness.sender.sent).toEqual([]);
+      }
+    }
   });
 
-  it("enabling with the pack answers 200 with the check", async () => {
+  it("enabling on hosted answers 200 with the check, and needs no pack", async () => {
     const harness = setup();
     addAccount(harness.db, "acc_1");
     addDevice(harness.db, "dev_a", "acc_1");
@@ -98,15 +104,17 @@ describe("enrolling", () => {
 
   it("enabled:false stops the checks and always answers 200", async () => {
     const harness = setup();
-    addAccount(harness.db, "acc_1", { pack: false });
+    addAccount(harness.db, "acc_1", { tier: "free" });
     addDevice(harness.db, "dev_a", "acc_1");
-    // Never enrolled, and no pack.
+    // Never enrolled, and not on hosted.
     const never = await harness.api.disable("dev_a");
     expect(never.status).toBe(200);
     expect(await never.json()).toMatchObject({ enabled: false, state: "off", reason: "disabled" });
 
-    grantPack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "hosted");
     await harness.api.enable("dev_a");
+    // Switching off is never refused, whatever the tier has become.
+    setTier(harness.db, "acc_1", "free");
     const off = await harness.api.disable("dev_a");
     expect(off.status).toBe(200);
     expect(await off.json()).toMatchObject({ enabled: false, state: "off", reason: "disabled" });
@@ -131,29 +139,29 @@ describe("enrolling", () => {
     expect(harness.db.prepare("SELECT COUNT(*) AS n FROM check_rounds WHERE device_id = 'dev_b'").get()).toEqual({ n: 0 });
   });
 
-  it("a device is sent checks only while its account holds the pack", async () => {
-    const harness = await enrolled();
-    removePack(harness.db, "acc_1");
-    await harness.scanAt(T0);
-    expect(harness.sender.sent).toEqual([]);
-    expect(await harness.api.check("dev_a")).toMatchObject({ enabled: true, state: "off", reason: "pack" });
-    // The pack comes back and the checks resume at the next round.
-    grantPack(harness.db, "acc_1");
-    await harness.scanAt(N1);
-    expect(harness.sender.sent).toHaveLength(1);
+  it("a device is sent checks only while its account's tier is hosted", async () => {
+    for (const tier of ["free", "relay"] as const) {
+      const harness = await enrolled();
+      setTier(harness.db, "acc_1", tier);
+      await harness.scanAt(T0);
+      expect(harness.sender.sent).toEqual([]);
+      expect(await harness.api.check("dev_a")).toMatchObject({ enabled: true, state: "off", reason: "tier" });
+      // The account is hosted again and the checks go on at the next round.
+      setTier(harness.db, "acc_1", "hosted");
+      await harness.scanAt(N1);
+      expect(harness.sender.sent).toHaveLength(1);
+    }
   });
 
-  it("no check goes out when the pack lapses between two attempts of a round", async () => {
+  it("no pack is enough: a free account that holds pro gets no check", async () => {
     const harness = await enrolled();
-    grantPack(harness.db, "acc_1", T0 + 2 * HOUR);
+    setTier(harness.db, "acc_1", "free");
+    grantPack(harness.db, "acc_1");
     await harness.scanAt(T0);
-    expect(harness.sender.sent).toHaveLength(1);
-    await harness.scanAt(T0 + 6 * HOUR);
-    await harness.scanAt(T0 + 18 * HOUR);
-    await harness.scanAt(T0 + DAY);
-    expect(harness.sender.sent).toHaveLength(1);
-    expect(await harness.api.rounds("dev_a")).toMatchObject([{ attempts: 1, result: "skipped", reason: "pack", closed_at: T0 + 6 * HOUR }]);
-    expect((await harness.api.check("dev_a")).misses).toBe(0);
+    await harness.scanAt(N1);
+    expect(harness.sender.sent).toEqual([]);
+    expect(await harness.api.check("dev_a")).toMatchObject({ enabled: true, state: "off", reason: "tier" });
+    expect(await harness.api.rounds("dev_a")).toMatchObject([{ result: "skipped", reason: "tier" }, { result: "skipped", reason: "tier" }]);
   });
 
   it("the first round opens within 24 hours of enrolling", async () => {
@@ -539,14 +547,14 @@ describe("result of a round", () => {
     expect((await harness.api.check("dev_a")).last_sent_at).toBeNull();
   });
 
-  it("skipped with reason pack: nothing was sent, and it is not counted as a miss", async () => {
+  it("skipped with reason tier: nothing was sent, and it is not counted as a miss", async () => {
     const harness = await enrolled();
-    removePack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "free");
     await harness.scanAt(T0);
     await harness.scanAt(N1);
-    grantPack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "hosted");
     expect(harness.sender.sent).toEqual([]);
-    expect(await harness.api.rounds("dev_a")).toMatchObject([{ attempts: 0, result: "skipped", reason: "pack", opened_at: N1 }, { attempts: 0, result: "skipped", reason: "pack", opened_at: T0 }]);
+    expect(await harness.api.rounds("dev_a")).toMatchObject([{ attempts: 0, result: "skipped", reason: "tier", opened_at: N1 }, { attempts: 0, result: "skipped", reason: "tier", opened_at: T0 }]);
     expect(await harness.api.check("dev_a")).toMatchObject({ state: "waiting", misses: 0 });
   });
 
@@ -647,12 +655,12 @@ describe("state", () => {
     expect(await harness.api.check("dev_a")).toEqual({ enabled: false, state: "off", reason: "disabled", misses: 0, last_sent_at: null, last_received_at: null, next_due_at: null, notice_after: null });
   });
 
-  it("off with reason pack: the account no longer holds the pack", async () => {
+  it("off with reason tier: enrolled on an account whose tier is not hosted", async () => {
     const harness = await enrolled();
     await harness.scanAt(T0);
     await harness.api.receipt("dev_a", lastCheckId(harness.sender));
-    removePack(harness.db, "acc_1");
-    expect(await harness.api.check("dev_a")).toEqual({ enabled: true, state: "off", reason: "pack", misses: 0, last_sent_at: T0, last_received_at: T0, next_due_at: null, notice_after: null });
+    setTier(harness.db, "acc_1", "relay");
+    expect(await harness.api.check("dev_a")).toEqual({ enabled: true, state: "off", reason: "tier", misses: 0, last_sent_at: T0, last_received_at: T0, next_due_at: null, notice_after: null });
   });
 });
 
@@ -663,9 +671,9 @@ describe("misses", () => {
     await missRound(harness, T0);
     expect(await misses()).toBe(1);
     // A skipped round between two misses neither adds to the run nor ends it.
-    removePack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "free");
     await harness.scanAt(N1);
-    grantPack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "hosted");
     expect(await harness.api.check("dev_a")).toMatchObject({ misses: 1, state: "missed_once" });
     harness.sender.reply = () => ({ outcome: "refused", status: 410 });
     await harness.scanAt(N1 + WEEK);
@@ -814,9 +822,10 @@ describe("the list of rounds", () => {
   it("the relay keeps a round for 90 days, whatever the tier", async () => {
     for (const tier of ["free", "relay", "hosted"] as const) {
       const harness = setup();
-      addAccount(harness.db, "acc_1", { tier });
+      addAccount(harness.db, "acc_1");
       addDevice(harness.db, "dev_a", "acc_1");
       await harness.api.enable("dev_a");
+      setTier(harness.db, "acc_1", tier);
       const insert = harness.db.prepare("INSERT INTO check_rounds (id, device_id, nonce_hash, opened_at, closes_at, closed_at, attempts, result) VALUES (?, 'dev_a', ?, ?, ?, ?, 1, ?)");
       insert.run("rnd_old", "h1", T0 - 90 * DAY - 1, T0 - 89 * DAY - 1, T0 - 90 * DAY, "missed");
       insert.run("rnd_edge", "h2", T0 - 90 * DAY, T0 - 89 * DAY, T0 - 90 * DAY + 5, "received");
@@ -831,11 +840,11 @@ describe("the list of rounds", () => {
     }
   });
 
-  it("answers whether or not the account holds the pack today", async () => {
+  it("answers whatever the account's tier is today", async () => {
     const harness = await enrolled();
     await harness.scanAt(T0);
     await harness.api.receipt("dev_a", lastCheckId(harness.sender));
-    removePack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "free");
     const response = await harness.api.call("GET", "/relay/v1/devices/dev_a/checks", "dv_a");
     expect(response.status).toBe(200);
     expect(await response.json()).toHaveLength(1);
@@ -861,12 +870,12 @@ describe("where the check routes are served", () => {
     }
   });
 
-  it("the pack can come from the relay's own configuration", async () => {
-    const harness = setup({ config: { packIncludes: { hosted: ["pro"] } } });
-    addAccount(harness.db, "acc_1", { pack: false, tier: "hosted" });
+  it("a pack the relay's own configuration attaches to a tier gets that tier no check", async () => {
+    const harness = setup({ config: { packIncludes: { free: ["pro"], relay: ["pro"] } } });
+    addAccount(harness.db, "acc_1", { tier: "relay" });
     addDevice(harness.db, "dev_a", "acc_1");
-    expect((await harness.api.enable("dev_a")).status).toBe(200);
-    await harness.scanAt(T0);
-    expect(harness.sender.sent).toHaveLength(1);
+    const response = await harness.api.enable("dev_a");
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "tier", tier: "hosted" });
   });
 });

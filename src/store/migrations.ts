@@ -479,6 +479,7 @@ const migrations: Migration[] = [
       PRIMARY KEY (round_id, attempt)
     );
   `,
+  { foreignKeysOff: true, up: rebuildCheckRoundsWithTierReason },
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
@@ -620,6 +621,70 @@ function rebuildAccountIdentitiesWithoutUniqueAccount(db: Database.Database): vo
   if (violations.length > 0) {
     throw new Error(`account_identities rebuild broke foreign keys: ${JSON.stringify(violations)}`);
   }
+}
+
+// api.md §4.5, contract 1.19.0. A round skipped because the account is not on
+// `hosted` is written with reason 'tier'. The reason column carries a CHECK
+// that lists the allowed values, 'tier' is not one of them, and SQLite cannot
+// change a constraint in place. So the table is rebuilt with one more value in
+// the list. 'pack' stays in it: a round closed before 1.19.0 keeps the reason
+// it was written with, and no row is changed here.
+//
+// check_rounds is a parent. check_attempts names it with ON DELETE CASCADE, so
+// this entry carries foreignKeysOff, for the reason migration 3 gives: with
+// enforcement on, DROP TABLE would delete every attempt first.
+//
+//   1. Create check_rounds_s42_new, the same columns in the same order.
+//   2. Copy every row across, column by column.
+//   3. Drop check_rounds. Enforcement is off, so nothing cascades. Its two
+//      indexes go with it.
+//   4. Rename the new table into place. Nothing names check_rounds_s42_new in
+//      a REFERENCES clause, so no clause moves, and the clause on
+//      check_attempts still reads check_rounds and resolves to the new table.
+//   5. Recreate the two indexes.
+//   6. Check it. Every round and every attempt has to still be there, the
+//      tables that referenced check_rounds before have to reference it again,
+//      and PRAGMA foreign_key_check has to come back empty. Any of them
+//      failing throws, and the transaction rolls all of it back.
+function rebuildCheckRoundsWithTierReason(db: Database.Database): void {
+  const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+  const referencing = referencingTables(db, "check_rounds");
+  const rounds = count("check_rounds");
+  const attempts = count("check_attempts");
+  db.exec(`
+    CREATE TABLE check_rounds_s42_new (
+      id TEXT PRIMARY KEY,
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      nonce_hash TEXT NOT NULL UNIQUE,
+      opened_at INTEGER NOT NULL,
+      closes_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      result TEXT CHECK (result IN ('received', 'missed', 'refused', 'skipped')),
+      reason TEXT CHECK (reason IN ('tier', 'pack', 'no_token', 'disabled', 'held', 'unsent')),
+      held_until INTEGER,
+      attempt_received INTEGER,
+      receipt_at INTEGER,
+      device_received_at INTEGER,
+      late_receipt_at INTEGER
+    );
+
+    INSERT INTO check_rounds_s42_new (id, device_id, nonce_hash, opened_at, closes_at, closed_at, attempts, result, reason, held_until, attempt_received, receipt_at, device_received_at, late_receipt_at)
+      SELECT id, device_id, nonce_hash, opened_at, closes_at, closed_at, attempts, result, reason, held_until, attempt_received, receipt_at, device_received_at, late_receipt_at FROM check_rounds;
+
+    DROP TABLE check_rounds;
+    ALTER TABLE check_rounds_s42_new RENAME TO check_rounds;
+
+    CREATE INDEX check_rounds_device ON check_rounds(device_id, opened_at);
+    CREATE INDEX check_rounds_opened ON check_rounds(opened_at);
+  `);
+
+  if (count("check_rounds") !== rounds) throw new Error(`check_rounds rebuild carried ${count("check_rounds")} of ${rounds} rounds`);
+  if (count("check_attempts") !== attempts) throw new Error(`check_rounds rebuild left ${count("check_attempts")} of ${attempts} attempts`);
+  const lost = referencing.filter((name) => !referencingTables(db, "check_rounds").includes(name));
+  if (lost.length > 0) throw new Error(`check_rounds rebuild left ${lost.join(", ")} pointing at something else`);
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length > 0) throw new Error(`check_rounds rebuild broke foreign keys: ${JSON.stringify(violations)}`);
 }
 
 export const migrationCount = migrations.length;

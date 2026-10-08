@@ -14,7 +14,6 @@ import type { AuthHandler } from "./auth/better-auth.js";
 import type { IdentityResolver } from "./auth/identity.js";
 import type { TokenRevoker } from "./auth/revoke.js";
 import type { StoreReads } from "./tier/types.js";
-import type { PackRules } from "./tier/packs.js";
 import { createCheckRouter } from "./check/router.js";
 import { CheckStore } from "./check/store.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
@@ -56,11 +55,9 @@ export function createApp(deps: AppDependencies): Hono {
     return result;
   };
   // api.md §4.5. The weekly check routes sit beside the other device routes,
-  // so a self-hosted server does not carry them either. A store pack is kept
-  // past its saved end date only with reading switched on, the same test the
-  // tier router makes from the same `storeReads`.
-  const packRules: PackRules = { includes: deps.config.packIncludes ?? {}, storeReads: deps.storeReads?.mode === "on" };
-  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, clock: deps.clock, store: new CheckStore(deps.db, deps.clock, counters, packRules), packRules }));
+  // so a self-hosted server does not carry them either. The check goes
+  // by the account's tier, which the store reads from the database itself.
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
     app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));

@@ -168,6 +168,75 @@ describe("a store pack whose saved end date has passed", () => {
   });
 });
 
+// The pack bought on its own, by an account that pays for no tier. This is
+// what the weekly check tests used to set up when the check went by the pack.
+// The check goes by the tier now (api.md §4.5), and what is left to prove is
+// about the pack alone: it is kept the same way with no paid tier beside it,
+// and keeping it never raises the tier.
+describe("a store pack on an account that stays on free", () => {
+  async function packOnly() {
+    const db = database();
+    const clock = new FakeClock();
+    let answer: Answer | Error = listing(entitlement("ent_pack", END * 1_000));
+    const store = scriptedFetch(() => answer);
+    const reads = new BillingReads({ db, clock, fetch: store.fetch, api, requestGapMs: 0 });
+    const on = relay(db, clock, { mode: "on", reads });
+    expect((await on.app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(DEVICE) })).status).toBe(201);
+    expect(await reads.read("acc_1", "webhook")).toEqual({ ok: true });
+    expect(tierOf(db, "acc_1")).toBe("free");
+    return { db, clock, reads, storeAnswers: (next: Answer | Error) => { answer = next; }, ...on };
+  }
+
+  it("is kept past its saved end date through a failed read, its four retries and the daily read", async () => {
+    const { db, clock, reads, storeAnswers, register, packs } = await packOnly();
+    storeAnswers({ status: 503 });
+    clock.value = END + 1;
+    reads.enqueue("acc_1");
+    await reads.scan();
+    for (const wait of [60, 300, 900, 3_600]) {
+      clock.value += wait;
+      await reads.scan();
+      expect(await packs()).toEqual({ packs: HELD, checked_at: NOW });
+    }
+    expect(queue(db)).toEqual([]);
+    clock.value += 86_400;
+    expect(await reads.read("acc_1", "sweep")).toEqual({ ok: false });
+
+    expect(await packs()).toEqual({ packs: HELD, checked_at: NOW });
+    expect(await register()).toMatchObject({ tier: "free", packs: HELD });
+    expect(tierOf(db, "acc_1")).toBe("free");
+  });
+
+  it("is gone once a read succeeds and the store no longer lists it", async () => {
+    const { db, clock, reads, storeAnswers, register, packs } = await packOnly();
+    storeAnswers({ status: 503 });
+    clock.value = END + 1;
+    expect(await reads.read("acc_1", "webhook")).toEqual({ ok: false });
+    expect(await packs()).toEqual({ packs: HELD, checked_at: NOW });
+
+    storeAnswers(listing());
+    clock.value = END + 3_600;
+    expect(await reads.read("acc_1", "retry")).toEqual({ ok: true });
+
+    expect(await packs()).toEqual({ packs: [], checked_at: END + 3_600 });
+    expect(await register()).toMatchObject({ tier: "free", packs: [] });
+    expect(storedPacks(db)).toEqual([]);
+  });
+
+  it("ends on its saved end date on a relay that does not write what the store lists", async () => {
+    const { db, clock, store } = await paying();
+    db.prepare("UPDATE accounts SET tier = 'free'").run();
+    for (const storeReads of [undefined, { mode: "shadow", shadow: new ShadowReads({ db, clock, fetch: store.fetch, api }) } as const]) {
+      const off = relay(db, clock, storeReads);
+      clock.value = END - 1;
+      expect(await off.packs()).toEqual({ packs: HELD, checked_at: NOW });
+      clock.value = END;
+      expect(await off.packs()).toEqual({ packs: [], checked_at: NOW });
+      expect(await off.register()).toMatchObject({ tier: "free", packs: [] });
+    }
+  });
+});
+
 describe("an operator grant", () => {
   it("ends on its date on every surface, with no read of the store", async () => {
     const { db, clock, store, reads, storeAnswers, register, patch, packs } = await paying();
