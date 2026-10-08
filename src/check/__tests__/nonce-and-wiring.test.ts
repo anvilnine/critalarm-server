@@ -8,7 +8,7 @@ import { loggedPath } from "../../request-log.js";
 import { LOCAL_KEY, type Stats } from "../../stats/counters.js";
 import { DAY_S, WEEK_S, roundAfter, slotAtOrAfter, slotFor } from "../schedule.js";
 import { checksEnabled, createChecks } from "../startup.js";
-import { DAY, HOUR, T0, WEEK, addAccount, addDevice, config, database, enrolled, grantPack, lastCheckId, removePack, setup, FakeClock } from "./fakes.js";
+import { DAY, HOUR, T0, WEEK, addAccount, addDevice, config, database, enrolled, grantPack, lastCheckId, setTier, setup, FakeClock } from "./fakes.js";
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
@@ -74,10 +74,10 @@ describe("the check_id never leaves the push", () => {
     await harness.scanAt(roundAfter("dev_a", T0) + WEEK);
     await harness.scanAt(roundAfter("dev_b", T0) + WEEK);
     collect();
-    removePack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "free");
     await harness.scanAt(T0 + 5 * WEEK);
     await call("PUT", "/relay/v1/devices/dev_a/check", "dv_a", { enabled: true });
-    grantPack(harness.db, "acc_1");
+    setTier(harness.db, "acc_1", "hosted");
     await call("PUT", "/relay/v1/devices/dev_a/check", "dv_a", { enabled: false });
     await call("DELETE", "/relay/v1/devices/dev_b", "dv_b");
     await everyRead();
@@ -292,28 +292,31 @@ describe("where the scan runs, and the setting that switches it off", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  // The scan's own store is built from the configuration, not from the app's
-  // dependencies, so this is the one place the read mode comes from readsMode.
-  it("keeps a store pack past its saved end date in the scan only when the configuration switches reading on", async () => {
+  // The scan's own store is built here, apart from the one the routes use. It
+  // goes by the account's tier whatever the configuration says about reading
+  // the store, and a pack gets a device nothing.
+  it("the scan sends to a hosted account and to no other, whatever the read mode and whatever packs are held", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const key = { revenueCatApi: { secretApiKey: "sk-fake-not-a-real-key", projectId: "proj_fake", entitlements: {} } };
-    const cases: [Partial<Config>, number][] = [
-      [{ ...key, revenueCatReads: "on" }, 1],
-      [{ ...key, revenueCatReads: "shadow" }, 0],
-      [{ ...key, revenueCatReads: "off" }, 0],
-      [key, 0],
-      // The setting without the API key reads nothing.
-      [{ revenueCatReads: "on" }, 0],
+    const modes: Partial<Config>[] = [
+      { ...key, revenueCatReads: "on" },
+      { ...key, revenueCatReads: "shadow" },
+      { ...key, revenueCatReads: "off" },
+      key,
+      { revenueCatReads: "on" },
+      { packIncludes: { free: ["pro"], relay: ["pro"] } },
     ];
-    for (const [extra, expected] of cases) {
+    const cases = modes.flatMap((extra) => (["hosted", "relay", "free"] as const).map((tier) => [extra, tier, tier === "hosted" ? 1 : 0] as const));
+    for (const [extra, tier, expected] of cases) {
       const db = database();
       const clock = new FakeClock();
       const sent: string[] = [];
       const checks = createChecks({ ...withApns, ...extra }, { db, clock, fetch: async () => new Response(null), apnsTransport: () => ({ send: async (_path, _headers, body) => { sent.push(body); return { status: 200, headers: {}, body: "" }; }, close: () => {} }) });
-      addAccount(db, "acc_1", { pack: false });
+      // Every account here holds pro twice over: a grant, and a store pack.
+      addAccount(db, "acc_1", { tier, pack: true });
       addDevice(db, "dev_a", "acc_1");
-      db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('acc_1', 'acc_1', 1, NULL, 'free')").run();
-      db.prepare("INSERT INTO billing_packs (app_user_id, pack, expires_at) VALUES ('acc_1', 'pro', ?)").run(T0 - 60);
+      db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('acc_1', 'acc_1', 1, NULL, ?)").run(tier);
+      db.prepare("INSERT INTO billing_packs (app_user_id, pack, expires_at) VALUES ('acc_1', 'pro', NULL)").run();
       db.prepare("INSERT INTO device_checks (device_id, enabled, enrolled_at, next_attempt_at, next_due_at) VALUES ('dev_a', 1, ?, ?, ?)").run(T0, T0, T0);
 
       await checks.scheduler?.scan();
@@ -352,10 +355,10 @@ describe("where the scan runs, and the setting that switches it off", () => {
 });
 
 describe("a device that never enrolled", () => {
-  it("is sent nothing however long the scan runs, even on an account that holds the pack", async () => {
+  it("is sent nothing however long the scan runs, even on a hosted account", async () => {
     const harness = setup();
     addAccount(harness.db, "acc_1");
-    addAccount(harness.db, "acc_2", { pack: false });
+    addAccount(harness.db, "acc_2", { tier: "free", pack: true });
     addDevice(harness.db, "dev_a", "acc_1");
     addDevice(harness.db, "dev_b", "acc_2");
     for (let time = T0; time < T0 + 8 * WEEK; time += 6 * HOUR) await harness.scanAt(time);

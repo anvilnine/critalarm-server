@@ -342,7 +342,7 @@ describe("no check is started within 30 minutes after an open, a repeat or a reo
   });
 
   it("state and notice_after after a held round are what they are after any skipped round", async () => {
-    const outcome = async (how: "held" | "pack") => {
+    const outcome = async (how: "held" | "tier") => {
       const harness = alarmSetup({ noting: true, enrol: true });
       await harness.api.enable("dev_a");
       // One answered round first, so there is a state to keep.
@@ -352,19 +352,19 @@ describe("no check is started within 30 minutes after an open, a repeat or a reo
       if (how === "held") {
         await repeatThrough(harness, next, next + 86_400);
       } else {
-        harness.db.prepare("DELETE FROM account_pack_grants").run();
+        harness.db.prepare("UPDATE accounts SET tier = 'free' WHERE id = 'acc_1'").run();
         await harness.scanAt(next);
-        harness.db.prepare("INSERT INTO account_pack_grants (account_id, pack, expires_at, reason, granted_at) VALUES ('acc_1', 'pro', NULL, 'test', 1)").run();
+        harness.db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
       }
       harness.clock.value = next + 86_400 + 60;
       const round = (await harness.api.rounds("dev_a"))[0];
       return { round, check: await harness.api.check("dev_a"), next };
     };
     const held = await outcome("held");
-    const pack = await outcome("pack");
+    const tier = await outcome("tier");
     expect(held.round).toMatchObject({ result: "skipped", reason: "held" });
-    expect(pack.round).toMatchObject({ result: "skipped", reason: "pack" });
-    expect(held.check).toEqual(pack.check);
+    expect(tier.round).toMatchObject({ result: "skipped", reason: "tier" });
+    expect(held.check).toEqual(tier.check);
     expect(held.check).toMatchObject({ state: "received", misses: 0, next_due_at: held.next + 7 * 86_400, notice_after: held.next + 14 * 86_400 + 86_400 });
   });
 

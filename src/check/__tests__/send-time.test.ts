@@ -6,7 +6,7 @@ import { AlarmNotes, alarmNoteWriter, notingAlarmPushes } from "../device-hooks.
 import { roundAfter } from "../schedule.js";
 import { CheckScheduler } from "../scheduler.js";
 import { CheckStore } from "../store.js";
-import { DAY, HOUR, T0, addAccount, addDevice, enrolled, grantPack, lastCheckId, removePack, setup, type Harness } from "./fakes.js";
+import { DAY, HOUR, T0, addAccount, addDevice, enrolled, lastCheckId, setTier, setup, type Harness } from "./fakes.js";
 
 // What happens between the moment an attempt is put on record and the moment
 // its bytes leave, and what a round that closes with no receipt is called.
@@ -143,14 +143,14 @@ describe("a device must still qualify when the bytes leave", () => {
     expect(harness.db.prepare("SELECT outcome FROM check_attempts").all()).toEqual([{ outcome: "accepted" }]);
   });
 
-  it("pack removed during token acquisition: nothing is sent and the round ends as skipped, reason pack", async () => {
-    const { harness, scheduler, messages, tokenRequests } = fcmHarness((h) => removePack(h.db, "acc_1"));
+  it("tier no longer hosted during token acquisition: nothing is sent and the round ends as skipped, reason tier", async () => {
+    const { harness, scheduler, messages, tokenRequests } = fcmHarness((h) => setTier(h.db, "acc_1", "free"));
     await harness.api.enable("dev_a");
     await scheduler.scan();
     expect(tokenRequests()).toBe(1);
     expect(messages).toEqual([]);
-    grantPack(harness.db, "acc_1");
-    expect(await harness.api.rounds("dev_a")).toMatchObject([{ attempts: 1, result: "skipped", reason: "pack", closed_at: T0 }]);
+    setTier(harness.db, "acc_1", "hosted");
+    expect(await harness.api.rounds("dev_a")).toMatchObject([{ attempts: 1, result: "skipped", reason: "tier", closed_at: T0 }]);
     expect(harness.db.prepare("SELECT outcome FROM check_attempts").all()).toEqual([{ outcome: "cancelled" }]);
     expect(harness.counters.read().totals.checks_sent).toBe(0);
   });
@@ -191,11 +191,11 @@ describe("a device must still qualify when the bytes leave", () => {
 
   it("the same holds for the fake sender every other test uses, so APNs gets the same check through the scheduler", async () => {
     const harness = await enrolled();
-    harness.sender.before = () => removePack(harness.db, "acc_1");
+    harness.sender.before = () => setTier(harness.db, "acc_1", "relay");
     await harness.scanAt(T0);
     expect(harness.sender.sent).toEqual([]);
-    grantPack(harness.db, "acc_1");
-    expect(await harness.api.rounds("dev_a")).toMatchObject([{ result: "skipped", reason: "pack" }]);
+    setTier(harness.db, "acc_1", "hosted");
+    expect(await harness.api.rounds("dev_a")).toMatchObject([{ result: "skipped", reason: "tier" }]);
   });
 });
 

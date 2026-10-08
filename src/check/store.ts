@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
 import type { ApnsEnvironment } from "../push/types.js";
 import { Counters, LOCAL_KEY } from "../stats/counters.js";
-import { holdsPack, type PackId, type PackRules } from "../tier/packs.js";
+import type { Tier } from "../tier/types.js";
 import { ALARM_HOLD_S, ATTEMPT_OFFSETS_S, MAX_ATTEMPTS, MIN_ROUND_GAP_S, ROUND_LENGTH_S, roundAfter, slotAtOrAfter, slotFor } from "./schedule.js";
 
 // api.md §4.5. Everything the weekly check keeps, and every change to it. The
@@ -12,18 +12,23 @@ import { ALARM_HOLD_S, ATTEMPT_OFFSETS_S, MAX_ATTEMPTS, MIN_ROUND_GAP_S, ROUND_L
 //
 // Nothing here is read by the alarm path, and nothing here sends a push.
 
-// The pack a device's account must hold to be sent checks.
-export const CHECK_PACK: PackId = "pro";
+// The tier a device's account must be on to be sent checks. No pack is asked
+// about anywhere in this folder: a pack is neither needed nor enough.
+export const CHECK_TIER: Tier = "hosted";
 
 export type RoundResult = "received" | "missed" | "refused" | "skipped";
-export type SkipReason = "pack" | "no_token" | "disabled" | "held" | "unsent";
+// What this relay writes on a skipped round.
+export type SkipReason = "tier" | "no_token" | "disabled" | "held" | "unsent";
+// What a round can read back with. A round closed before 1.19.0 may carry
+// "pack". It is never written now and it stays as it was written.
+export type StoredSkipReason = SkipReason | "pack";
 export type CheckState = "waiting" | "received" | "missed_once" | "missed_repeatedly" | "token_refused" | "no_token" | "off";
 export type AttemptOutcome = "accepted" | "refused" | "failed" | "cancelled";
 
 export interface CheckView {
   enabled: boolean;
   state: CheckState;
-  reason: null | "pack" | "disabled";
+  reason: null | "tier" | "disabled";
   misses: number;
   last_sent_at: number | null;
   last_received_at: number | null;
@@ -42,7 +47,7 @@ export interface RoundView {
   receipt_at: number | null;
   device_received_at: number | null;
   late_receipt_at: number | null;
-  reason: SkipReason | null;
+  reason: StoredSkipReason | null;
 }
 
 export interface ReceiptAnswer {
@@ -97,10 +102,19 @@ export class CheckStore {
     private readonly db: Database.Database,
     private readonly clock: Clock,
     private readonly counters: Counters = new Counters(db, clock),
-    private readonly packRules: PackRules = {},
   ) {}
 
-  // PUT with "enabled":true. The caller has already checked the pack. A device
+  // Whether this account's devices are sent checks now. It is one read of the
+  // tier api.md §4.3 last wrote, made on every call and kept nowhere, so a
+  // change of tier is seen by the next push that comes due. A failed store
+  // read and a payment being retried write no lower tier, so neither is seen
+  // here at all.
+  getsChecks(accountId: string): boolean {
+    const account = this.db.prepare("SELECT tier FROM accounts WHERE id = ?").get(accountId) as { tier: Tier } | undefined;
+    return account?.tier === CHECK_TIER;
+  }
+
+  // PUT with "enabled":true. The caller has already checked the tier. A device
   // that enrols for the first time is due at once. One that switches back on
   // keeps the schedule it had, so switching off and on again cannot be used to
   // ask for a push.
@@ -212,9 +226,12 @@ export class CheckStore {
         this.expire(round);
         return null;
       }
-      // The pack is asked for at every attempt, so one that lapses between two
-      // pushes of a round stops the second.
-      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packRules)) return this.skip(state, round, "pack", now);
+      // The tier is read each time a push comes due. This is the only place
+      // a change of tier closes a round: an open round with a push left ends
+      // here as skipped when that push comes due, and a round with none left
+      // was closed above, at its own close time, as it would have been anyway.
+      // With no round open, the round that was due is written as skipped.
+      if (!this.getsChecks(device.account_id)) return this.skip(state, round, "tier", now);
       if (device.push_token === "") return this.skip(state, round, "no_token", now);
       // The round opens when the scan reaches the device, held or not, and its
       // close time is fixed then.
@@ -255,7 +272,7 @@ export class CheckStore {
   }
 
   // Asked immediately before the bytes of a planned push leave, after any
-  // provider token has been fetched. The pack, the enrolment, the device and
+  // provider token has been fetched. The tier, the enrolment, the device and
   // its token were checked when the attempt was planned, and time has passed
   // since. False means send nothing. Where the contract names a result for
   // the reason, the round is closed with it here.
@@ -277,8 +294,10 @@ export class CheckStore {
         this.expire(round);
         return false;
       }
-      if (!holdsPack(this.db, this.clock, device.account_id, CHECK_PACK, this.packRules)) {
-        this.close(round, "skipped", "pack", now);
+      // The second read of the tier, just before the send. This push came
+      // due and was the round's push left to send, so the round closes here.
+      if (!this.getsChecks(device.account_id)) {
+        this.close(round, "skipped", "tier", now);
         return false;
       }
       if (device.push_token === "") {
@@ -319,7 +338,8 @@ export class CheckStore {
       last_received_at: state?.last_received_at ?? null,
     };
     if (state === undefined || state.enabled !== 1) return { enabled: false, state: "off", reason: "disabled", ...base, next_due_at: null, notice_after: null };
-    if (!holdsPack(this.db, this.clock, accountId, CHECK_PACK, this.packRules)) return { enabled: true, state: "off", reason: "pack", ...base, next_due_at: null, notice_after: null };
+    // Still enrolled. The counts and the times above keep their values.
+    if (!this.getsChecks(accountId)) return { enabled: true, state: "off", reason: "tier", ...base, next_due_at: null, notice_after: null };
     const times = { next_due_at: state.next_due_at, notice_after: this.noticeAfter(state) };
     const device = this.device(deviceId);
     if (device === undefined || device.push_token === "") return { enabled: true, state: "no_token", reason: null, ...base, ...times };
