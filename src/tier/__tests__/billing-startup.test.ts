@@ -194,6 +194,65 @@ describe("createBilling", () => {
     expect(vi.getTimerCount()).toBe(before);
   });
 
+  // A store pack ends by a read, not by its saved end date (tier/packs.ts), so
+  // a read has to come after that date with nobody asking for one. The daily
+  // read is that read: it asks about every linked customer, pack or no pack.
+  it("on: with no event and no refresh, the daily read after a pack's end date removes a pack the store no longer lists", async () => {
+    vi.useFakeTimers();
+    const { db, clock, listed, made, store } = billing("on");
+    const end = NOW + 3_600;
+    listed.set("acc_1", listing(entitlement("ent_hosted"), entitlement("ent_pack", end * 1_000)));
+
+    const stop = made.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(storedPacks(db)).toEqual([{ app_user_id: "acc_1", pack: "pro", expires_at: end }]);
+    expect(queue(db)).toEqual([]);
+
+    // The pack is not renewed. No webhook arrives and the app never asks.
+    listed.set("acc_1", listing(entitlement("ent_hosted")));
+    clock.value = end + 1;
+    const before = store.customers.length;
+    // Up to the daily read nothing asks the store, and the pack is kept.
+    vi.advanceTimersByTime(24 * 60 * 60 * 1_000 - 2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.customers.length).toBe(before);
+    expect(storedPacks(db)).toEqual([{ app_user_id: "acc_1", pack: "pro", expires_at: end }]);
+
+    clock.value = NOW + 86_400;
+    await vi.advanceTimersByTimeAsync(2);
+
+    expect(store.customers.length).toBe(before + 1);
+    expect(storedPacks(db)).toEqual([]);
+    expect(tierOf(db, "acc_1")).toBe("hosted");
+    stop();
+  });
+
+  it("on: a daily read that fails after a pack's end date keeps the pack, and the queued retry is run by the scan", async () => {
+    vi.useFakeTimers();
+    const { db, clock, listed, made, store } = billing("on");
+    const end = NOW + 3_600;
+    db.prepare("INSERT INTO billing_packs (app_user_id, pack, expires_at) VALUES ('acc_1', 'pro', ?)").run(end);
+    clock.value = end + 1;
+    listed.set("acc_1", { status: 503 });
+
+    const stop = made.start();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(store.customers).toEqual(["acc_1"]);
+    expect(storedPacks(db)).toEqual([{ app_user_id: "acc_1", pack: "pro", expires_at: end }]);
+    expect(queue(db)).toEqual([{ app_user_id: "acc_1", due_at: end + 1 + 60, attempts: 1, dirty: 0 }]);
+
+    // The store answers again and lists the tier only. The retry is a row in
+    // the database, and the scan that looks at the queue runs it when due.
+    listed.set("acc_1", listing(entitlement("ent_hosted")));
+    clock.value = end + 1 + 60;
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(store.customers).toEqual(["acc_1", "acc_1"]);
+    expect(storedPacks(db)).toEqual([]);
+    expect(queue(db)).toEqual([]);
+    stop();
+  });
+
   it("after a merge, reads the surviving account's customers on the path that is switched on", async () => {
     for (const setting of ["off", "shadow", "on"] as const) {
       const { db, listed, made, store } = billing(setting);
