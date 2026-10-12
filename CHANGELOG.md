@@ -13,7 +13,8 @@ binary's. The binary's version is in `package.json`.
 - `GET /v1/relay-challenge/{challenge}` on the server (§3.8), no auth. It
   answers `200` for the value of the registration in flight and `404` for
   anything else. The answer names the relay the value was made for, and a
-  relay issues a key only when that is the host it was called on.
+  relay issues a key only when that is one of its own configured host
+  names.
 - `topic` on `POST /relay/v1/push` (§4.1), the topic's name. The relay
   checks it against `topic_hash` and the key's `base_url`, then drops it.
 - Errors `invalid base_url` (`400`), `challenge failed` (`422`),
