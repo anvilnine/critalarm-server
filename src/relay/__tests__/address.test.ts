@@ -18,6 +18,13 @@ const refused: [string, string][] = [
   ["2001:db8::1", "2001:db8::/32"],
   ["::ffff:127.0.0.1", "mapped loopback"], ["::ffff:10.1.2.3", "mapped private"], ["::ffff:7f00:1", "mapped loopback, hex form"],
   ["64:ff9b::a00:1", "NAT64 of 10.0.0.1"], ["64:ff9b::192.168.0.1", "NAT64 of private, dotted form"],
+  ["192.88.99.1", "192.88.99.0/24"], ["192.88.99.255", "192.88.99.0/24"],
+  ["64:ff9b:1::1", "64:ff9b:1::/48, outside 2000::/3"], ["fec0::1", "fec0::/10, outside 2000::/3"], ["100::1", "100::/64, outside 2000::/3"],
+  ["0:0:0:0:ffff:0:0:0", "::ffff:0:0:0/96, outside 2000::/3"], ["::8.8.8.8", "IPv4-compatible form, outside 2000::/3"],
+  ["4000::1", "outside 2000::/3"], ["1fff:ffff::1", "just below 2000::/3"], ["e000::1", "outside 2000::/3"],
+  ["2001::1", "Teredo 2001::/32"], ["2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo address"], ["2001:1ff:ffff::1", "end of 2001::/23"],
+  ["2001:db8:1234::1", "2001:db8::/32"],
+  ["2002::1", "6to4 2002::/16"], ["2002:808:808::1", "6to4 of 8.8.8.8"], ["2002:a00:1::1", "6to4 of 10.0.0.1"],
   ["not an address", "garbage"], ["", "empty"], ["999.1.1.1", "bad octet"],
 ];
 
@@ -31,6 +38,9 @@ const accepted: [string, string][] = [
   ["2606:4700:4700::1111", "public v6"], ["2001:4860:4860::8888", "public v6"],
   ["::ffff:8.8.8.8", "mapped public"], ["64:ff9b::808:808", "NAT64 of 8.8.8.8"],
   ["2001:db9::1", "next to 2001:db8::/32"],
+  ["192.88.98.1", "just below 192.88.99/24"], ["192.88.100.1", "just above 192.88.99/24"],
+  ["2000::1", "first of 2000::/3"], ["3fff:ffff::1", "last of 2000::/3"],
+  ["2001:200::1", "just above 2001::/23"], ["2003::1", "just above 2002::/16"], ["2001:4860::1", "public inside 2001::/16"],
 ];
 
 describe("isPublicAddress", () => {
