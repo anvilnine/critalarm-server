@@ -60,7 +60,7 @@ export function createApp(deps: AppDependencies): Hono {
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
-    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));
+    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy }));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;

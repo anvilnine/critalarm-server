@@ -29,7 +29,7 @@ function seed() {
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_ios','acc_1','h1','ios','ios-token',1)").run();
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_and','acc_1','h2','android','android-token',1)").run();
   for (const id of ["dev_ios", "dev_and"]) db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES (?,?)").run(id, remoteHash);
-  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES ('rly_1','https://alerts.example.com','1',?,1)").run(relayKeyHash("rk_test"));
+  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('rly_1','https://alerts.example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
   return db;
 }
 
