@@ -12,14 +12,15 @@ binary's. The binary's version is in `package.json`.
   the server answers with the same value.
 - `GET /v1/relay-challenge/{challenge}` on the server (§3.8), no auth. It
   answers `200` for the value of the registration in flight and `404` for
-  anything else.
+  anything else. The answer names the relay the value was made for, and a
+  relay issues a key only when that is the host it was called on.
 - `topic` on `POST /relay/v1/push` (§4.1), the topic's name. The relay
   checks it against `topic_hash` and the key's `base_url`, then drops it.
 - Errors `invalid base_url` (`400`), `challenge failed` (`422`),
   `registration closed` (`403`) and `topic mismatch` (`403`) (§1.8, §4.1).
-- Rules for `base_url` at registration: `https`, a host name, public
-  addresses only, no credentials, query, fragment or trailing `/`, at most
-  200 characters (§4.1).
+- Rules for `base_url` at registration: `https`, a host name of two labels
+  or more, public addresses only, port 443 or 8443, no credentials, query,
+  fragment or trailing `/`, at most 200 characters (§4.1).
 
 ### Changed
 
@@ -36,7 +37,7 @@ binary's. The binary's version is in `package.json`.
   only. The relay does not store, log or forward the name.
 - Compatibility. The app sends and receives nothing new. A key issued
   before 1.20.0 keeps working without `topic`. A 1.19.0 server that asks
-  for a new key gets `400`, because it sends no `challenge`. A 1.20.0
+  for a new key without the operator's secret gets `400`, because it sends no `challenge`. A 1.20.0
   server that pushes to a 1.19.0 relay is accepted: that relay ignores the
   two new fields.
 
