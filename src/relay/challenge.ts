@@ -6,9 +6,9 @@ import { parseBaseUrl } from "./base-url.js";
 
 // api.md §4.1. Confirms that the server at base_url made this challenge.
 // Resolves to true only for a 200 whose JSON body carries the same challenge
-// and names this relay: `relay` must equal relayHost, the host the registration
-// request was called on. Every other outcome is false and never an exception.
-export type ChallengeConfirmer = (baseUrl: string, challenge: string, relayHost: string) => Promise<boolean>;
+// and names this relay: `relay` must be one of relayHosts, the relay's own public
+// host names from configuration. An empty list fails every challenge. Every other outcome is false and never an exception.
+export type ChallengeConfirmer = (baseUrl: string, challenge: string, relayHosts: readonly string[]) => Promise<boolean>;
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 1024;
@@ -49,9 +49,9 @@ export interface ConfirmerOptions { isPublic?: (address: string) => boolean; ca?
 export function createChallengeConfirmer(resolve: Resolver = resolveAll, options: ConfirmerOptions = {}): ChallengeConfirmer {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const isPublic = options.isPublic ?? isPublicAddress;
-  return async (baseUrl, challenge, relayHost) => {
+  return async (baseUrl, challenge, relayHosts) => {
     const parsed = parseBaseUrl(baseUrl);
-    if (parsed === undefined) return false;
+    if (parsed === undefined || relayHosts.length === 0) return false;
     // One deadline for DNS, connect, TLS, headers and body together. When it
     // fires the request is aborted, which destroys its socket. The idle
     // `timeout` option alone would let a peer that sends a byte every few
@@ -60,7 +60,7 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
     const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
     const deadline = new Promise<false>((done) => { controller.signal.addEventListener("abort", () => { done(false); }, { once: true }); });
     try {
-      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, controller.signal, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge, relayHost)]);
+      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, controller.signal, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge, relayHosts)]);
     } catch {
       return false;
     } finally {
@@ -71,7 +71,7 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
   };
 }
 
-async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, signal: AbortSignal, host: string, port: number, path: string, challenge: string, relayHost: string): Promise<boolean> {
+async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, signal: AbortSignal, host: string, port: number, path: string, challenge: string, relayHosts: readonly string[]): Promise<boolean> {
   const addresses = await resolve(host);
   if (signal.aborted) return false;
   if (addresses.length === 0 || !addresses.every((entry) => isPublic(entry.address))) return false;
@@ -97,7 +97,7 @@ async function attempt(resolve: Resolver, isPublic: (address: string) => boolean
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
           const answer = body as { challenge?: unknown; relay?: unknown } | null;
-          done(typeof answer === "object" && answer !== null && answer.challenge === challenge && answer.relay === relayHost);
+          done(typeof answer === "object" && answer !== null && answer.challenge === challenge && typeof answer.relay === "string" && relayHosts.includes(answer.relay));
         } catch { done(false); }
       });
       res.on("error", () => done(false));

@@ -95,7 +95,7 @@ describe("a relay key pushes only its own server's topics", () => {
     } finally { db.close(); }
   });
 
-  it("takes a push with the largest title and body and refuses a body over 16384 bytes", async () => {
+  it("takes a push with the largest title and body and refuses a body over 65536 bytes", async () => {
     const { db, sent, register, subscribe, push } = await setup();
     try {
       const keyA = await register(A);
@@ -104,20 +104,35 @@ describe("a relay key pushes only its own server's topics", () => {
       expect(biggest.status).toBe(202);
       expect(sent).toEqual(["dev_a"]);
 
-      const over = await push(keyA, { topic_hash: topicHash(A, "prod"), topic: "prod", title: "t".repeat(9000), body: "b".repeat(9000) });
+      const over = await push(keyA, { topic_hash: topicHash(A, "prod"), topic: "prod", title: "t".repeat(40_000), body: "b".repeat(40_000) });
       expect(over.status).toBe(400);
       expect(await over.json()).toEqual({ error: "invalid request" });
       expect(sent).toEqual(["dev_a"]);
     } finally { db.close(); }
   });
 
-  it("refuses a body over 16384 bytes that has no content-length, by its actual size", async () => {
+  it("takes a 4096-byte body of characters that escape to six bytes each, with a 1024-character title", async () => {
+    const { db, sent, register, subscribe, push } = await setup();
+    try {
+      const keyA = await register(A);
+      subscribe("dev_a", topicHash(A, "prod"));
+      // Each of these is "\u0001" on the wire, six bytes for one character.
+      const body = "\u0001".repeat(4096);
+      const title = "\u0001".repeat(1024);
+      const fields = { topic_hash: topicHash(A, "prod"), topic: "prod", title, body };
+      expect(JSON.stringify({ incident_id: "inc_1", message_id: "m_1", priority: 5, kind: "open", ...fields }).length).toBeGreaterThan(16384);
+      expect((await push(keyA, fields)).status).toBe(202);
+      expect(sent).toEqual(["dev_a"]);
+    } finally { db.close(); }
+  });
+
+  it("refuses a body over 65536 bytes that has no content-length, by its actual size", async () => {
     const { db, app, sent, register, subscribe } = await setup();
     try {
       const keyA = await register(A);
       subscribe("dev_a", topicHash(A, "prod"));
-      const text = JSON.stringify({ topic_hash: topicHash(A, "prod"), topic: "prod", incident_id: "inc_1", message_id: "m_1", priority: 5, kind: "open", pad: "p".repeat(20_000) });
-      const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(text.slice(0, 10_000))); controller.enqueue(new TextEncoder().encode(text.slice(10_000))); controller.close(); } });
+      const text = JSON.stringify({ topic_hash: topicHash(A, "prod"), topic: "prod", incident_id: "inc_1", message_id: "m_1", priority: 5, kind: "open", pad: "p".repeat(70_000) });
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(text.slice(0, 30_000))); controller.enqueue(new TextEncoder().encode(text.slice(30_000))); controller.close(); } });
       const response = await app.request(new Request("https://relay.example.com/relay/v1/push", { method: "POST", headers: { authorization: `Bearer ${keyA}`, "content-type": "application/json" }, body: stream, duplex: "half" } as RequestInit));
       expect(response.status).toBe(400);
       expect(sent).toEqual([]);

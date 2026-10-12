@@ -12,23 +12,23 @@ const RELAY = "relay.critalarm.app";
 describe("the challenge confirmer", () => {
   it("makes no request when a name resolves to a private address", async () => {
     const resolve = vi.fn(async () => [{ address: "10.0.0.5", family: 4 }]);
-    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, [RELAY])).toBe(false);
     expect(resolve).toHaveBeenCalledWith("alerts.example.com");
   });
 
   it("refuses when any one of several answers is not public", async () => {
     const resolve = async () => [{ address: "8.8.8.8", family: 4 }, { address: "127.0.0.1", family: 4 }];
-    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, [RELAY])).toBe(false);
   });
 
   it("refuses when the name does not resolve", async () => {
     const resolve = async (): Promise<{ address: string; family: number }[]> => { throw new Error("ENOTFOUND"); };
-    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve)("https://alerts.example.com", challenge, [RELAY])).toBe(false);
   });
 
   it("refuses a base_url that breaks the rules without resolving it", async () => {
     const resolve = vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]);
-    expect(await createChallengeConfirmer(resolve)("http://alerts.example.com", challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve)("http://alerts.example.com", challenge, [RELAY])).toBe(false);
     expect(resolve).not.toHaveBeenCalled();
   });
 });
@@ -56,7 +56,7 @@ describe("the public resolver", () => {
       { resolve4: async () => ["93.184.216.34"], resolve6: async () => ["fd00::1"] },
       { resolve4: async () => ["10.0.0.5"], resolve6: async () => ["2606:2800:220:1::1"] },
     ]) {
-      expect(await createChallengeConfirmer(createPublicResolver(client))("https://alerts.example.com", challenge, RELAY)).toBe(false);
+      expect(await createChallengeConfirmer(createPublicResolver(client))("https://alerts.example.com", challenge, [RELAY])).toBe(false);
     }
   });
 });
@@ -92,7 +92,7 @@ describe("the challenge confirmer over HTTPS", () => {
 
   it("confirms a 200 with the same challenge, connecting to the vetted address with the right Host and SNI", async () => {
     respond = json({ challenge, relay: RELAY });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(true);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(true);
     expect(seen.path).toBe(`/crit/v1/relay-challenge/${challenge}`);
     expect(seen.host).toBe(`${HOST}:${port}`);
     expect(seen.sni).toBe(HOST);
@@ -100,44 +100,53 @@ describe("the challenge confirmer over HTTPS", () => {
 
   it("fails on a redirect and does not follow it", async () => {
     respond = (_req, res) => { res.writeHead(302, { location: "https://alerts.example.com/elsewhere" }); res.end(); };
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
     expect(seen.hits).toBe(1);
   });
 
   it("fails on a body over 1024 bytes", async () => {
     respond = json({ challenge, relay: RELAY, padding: "x".repeat(2000) });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
   });
 
   it("fails when the answer carries another challenge value", async () => {
     respond = json({ challenge: "d".repeat(40), relay: RELAY });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
   });
 
   it("fails when the answer names another relay, or none", async () => {
     respond = json({ challenge, relay: "other-relay.example.com" });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
     respond = json({ challenge });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
     respond = json({ challenge, relay: 7 });
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
+  });
+
+  it("accepts any host of the list and fails an empty list without a request", async () => {
+    respond = json({ challenge, relay: "second.example.com" });
+    expect(await confirmer()(url(), challenge, [RELAY, "second.example.com"])).toBe(true);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
+    seen.hits = 0;
+    expect(await confirmer()(url(), challenge, [])).toBe(false);
+    expect(seen.hits).toBe(0);
   });
 
   it("compares the relay value with the host it is given, port included", async () => {
     respond = json({ challenge, relay: "relay.example.com:8443" });
-    expect(await confirmer()(url(), challenge, "relay.example.com:8443")).toBe(true);
-    expect(await confirmer()(url(), challenge, "relay.example.com")).toBe(false);
+    expect(await confirmer()(url(), challenge, ["relay.example.com:8443"])).toBe(true);
+    expect(await confirmer()(url(), challenge, ["relay.example.com"])).toBe(false);
   });
 
   it("fails on a status other than 200", async () => {
     respond = (_req, res) => { res.writeHead(404); res.end(JSON.stringify({ error: "not found" })); };
-    expect(await confirmer()(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer()(url(), challenge, [RELAY])).toBe(false);
   });
 
   it("fails when the server answers too slowly", async () => {
     respond = () => {};
     const started = Date.now();
-    expect(await confirmer(200)(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer(200)(url(), challenge, [RELAY])).toBe(false);
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
@@ -153,7 +162,7 @@ describe("the challenge confirmer over HTTPS", () => {
       };
     });
     const started = Date.now();
-    expect(await confirmer(400)(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer(400)(url(), challenge, [RELAY])).toBe(false);
     expect(Date.now() - started).toBeLessThan(1500);
     // The server side saw the socket close, and soon after the deadline.
     expect(await closed).toBeLessThan(1500);
@@ -163,18 +172,18 @@ describe("the challenge confirmer over HTTPS", () => {
     const closed = new Promise<void>((done) => {
       respond = (req) => { req.socket.on("close", () => done()); };
     });
-    expect(await confirmer(300)(url(), challenge, RELAY)).toBe(false);
+    expect(await confirmer(300)(url(), challenge, [RELAY])).toBe(false);
     await closed;
   });
 
   it("fails when the certificate is not trusted", async () => {
     respond = json({ challenge, relay: RELAY });
-    expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000, port })(url(), challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000, port })(url(), challenge, [RELAY])).toBe(false);
   });
 
   it("refuses the loopback address in its default configuration", async () => {
     respond = json({ challenge, relay: RELAY });
-    expect(await createChallengeConfirmer(resolve, { ca: cert, port })(url(), challenge, RELAY)).toBe(false);
+    expect(await createChallengeConfirmer(resolve, { ca: cert, port })(url(), challenge, [RELAY])).toBe(false);
     expect(seen.hits).toBe(0);
   });
 });
