@@ -45,6 +45,7 @@ credential, which lives in the app. Source and docs:
 | `mode` | `MODE` | inferred | `selfhosted`, `relay` or `hosted`. Unset means the server infers it from the push credentials and `relay-url`; set it to `selfhosted` if you bring your own APNs or FCM key |
 | `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; with push credentials and no `mode`, an explicit value means hosted mode |
 | `relay-content` | `RELAY_CONTENT` | `none` | `none` keeps body on server; `full` includes title/body in push |
+| - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller without `RELAY_REGISTRATION_SECRET` |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
 ## Run it
