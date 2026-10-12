@@ -95,10 +95,13 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     if (typeof body.challenge !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(body.challenge)) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
     const parsed = parseBaseUrl(body.base_url);
     if (parsed === undefined) { logRegistration("invalid base_url"); return c.json({ error: "invalid base_url" }, 400); }
+    // The host this request was called on. The server's answer must name it.
+    const host = c.req.header("host")?.trim().toLowerCase();
+    if (host === undefined || host === "") { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
     if (inFlight >= MAX_CONFIRMATIONS_IN_FLIGHT || !withinLimits(clientIp(c, options.behindProxy ?? false))) { logRegistration("rate limited", parsed.host); return c.json(RATE_LIMITED, 429); }
     inFlight += 1;
     let confirmed: boolean;
-    try { confirmed = await confirm(body.base_url, body.challenge); } finally { inFlight -= 1; }
+    try { confirmed = await confirm(body.base_url, body.challenge, host); } finally { inFlight -= 1; }
     if (!confirmed) { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
     const key = issueKey(body.base_url, body.version);
     logRegistration("issued", parsed.host);

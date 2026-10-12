@@ -75,7 +75,17 @@ export class RelayClient {
   }
 
   private push(key: string, payload: RelayPayload): Promise<Response> {
-    return (this.options.fetch ?? fetch)(new Request(`${this.relayBase()}/relay/v1/push`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(payload) }));
+    return this.call(new Request(`${this.relayBase()}/relay/v1/push`, { method: "POST", redirect: "error", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(payload) }));
+  }
+
+  // A relay URL that redirects would carry the body, the secret or the key to
+  // another address. Requests are made with redirect "error", and a push that
+  // meets one fails with a message that says why.
+  private async call(request: Request): Promise<Response> {
+    try { return await (this.options.fetch ?? fetch)(request); } catch (error: unknown) {
+      if (isRedirectError(error)) throw new Error("relay push failed: the relay answered with a redirect, and the server does not follow it. Set RELAY_URL to the final address.");
+      throw error;
+    }
   }
 
   private async key(): Promise<string> {
@@ -94,7 +104,7 @@ export class RelayClient {
     const challenge = randomBytes(32).toString("base64url");
     this.challenge = { value: challenge, expiresAt: this.now() + CHALLENGE_WINDOW_MS };
     try {
-      const response = await (this.options.fetch ?? fetch)(new Request(`${this.relayBase()}/relay/v1/servers`, { method: "POST", signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS), headers: { "content-type": "application/json", ...(secret === undefined ? {} : { authorization: `Bearer ${secret}` }) }, body: JSON.stringify({ base_url: this.options.baseUrl, version, challenge }) }));
+      const response = await (this.options.fetch ?? fetch)(new Request(`${this.relayBase()}/relay/v1/servers`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS), headers: { "content-type": "application/json", ...(secret === undefined ? {} : { authorization: `Bearer ${secret}` }) }, body: JSON.stringify({ base_url: this.options.baseUrl, version, challenge }) }));
       if (!response.ok) return this.fail(await this.reasonFor(response));
       const body = await response.json().catch(() => undefined) as unknown;
       if (typeof body !== "object" || body === null || typeof (body as { relay_key?: unknown }).relay_key !== "string") return this.fail({ reason: "bad_answer", status: response.status, say: "The relay answered without a relay key. Check that RELAY_URL points at a Crit Alarm relay." });
@@ -105,6 +115,7 @@ export class RelayClient {
       return key;
     } catch (error: unknown) {
       if (error instanceof RelayKeyError) throw error;
+      if (isRedirectError(error)) return this.fail({ reason: "redirect", say: "The relay answered with a redirect, and the server does not follow redirects. Set RELAY_URL to the relay's final address." });
       return this.fail({ reason: "network", say: `The relay could not be reached (${error instanceof Error ? error.name : "error"}). Check RELAY_URL and the server's outbound network.` });
     } finally {
       this.challenge = undefined;
@@ -146,6 +157,14 @@ export class RelayClient {
   private relayBase(): string { return this.options.relayUrl.replace(/\/$/, ""); }
   private now(): number { return (this.options.now ?? Date.now)(); }
   private log(line: Record<string, unknown>): void { (this.options.log ?? ((value) => console.error(JSON.stringify(value))))(line); }
+}
+
+// undici reports redirect: "error" as a TypeError whose cause names the redirect.
+function isRedirectError(error: unknown): boolean {
+  for (let current: unknown = error, depth = 0; current instanceof Error && depth < 4; current = current.cause, depth += 1) {
+    if (/redirect/i.test(current.message)) return true;
+  }
+  return false;
 }
 
 async function errorText(response: Response): Promise<string | undefined> {

@@ -29,7 +29,7 @@ async function setup() {
   const app = createRelayRouter(db, async (event) => dispatcher.dispatch([event]), new Counters(db, { now: () => 1 }), { behindProxy: true, confirmChallenge: async () => true, clock: { now: () => clock } });
   async function register(baseUrl: string): Promise<string> {
     clock += 61;
-    const response = await app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1" }, body: JSON.stringify({ base_url: baseUrl, version: "1", challenge: CHALLENGE }) });
+    const response = await app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1", host: "relay.example.com" }, body: JSON.stringify({ base_url: baseUrl, version: "1", challenge: CHALLENGE }) });
     return (await response.json() as { relay_key: string }).relay_key;
   }
   for (const [account, device] of [["acc_a", "dev_a"], ["acc_b", "dev_b"], ["acc_h", "dev_h"]] as const) {

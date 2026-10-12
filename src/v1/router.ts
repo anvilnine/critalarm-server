@@ -14,6 +14,7 @@ import { sessionIdentityResolver, type IdentityResolver } from "../auth/identity
 import { providerTokenRevoker, type TokenRevoker } from "../auth/revoke.js";
 import { addToken, createTopic, deleteToken, deleteTopic, listTokens, listTopics, ownedTopic, patchTopic, renameToken, view } from "./topics.js";
 import { version } from "../version.js";
+import { relayHost } from "../relay/host.js";
 type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>;identities?:IdentityResolver;revoke?:TokenRevoker;reconcileAccount?:(accountId:string)=>void;relayChallenge?:(value:string)=>boolean};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,updated_at:i.updatedAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS, relay_content AS relayContent FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
@@ -21,7 +22,9 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
   // api.md §3.8. No auth: the relay holds no credential for this server yet.
   // It is registered before every other route and outside the auth prefixes. It
   // answers for a selfhosted server only; in relay and hosted mode it is 404.
-  r.get("/v1/relay-challenge/:challenge",c=>{const value=c.req.param("challenge");return (deps.config.mode ?? "hosted")==="selfhosted"&&deps.relayChallenge?.(value)===true?c.json({challenge:value}):c.json({error:"not found"},404)});
+  // It names the relay it was made for, so a relay that is handed a challenge
+  // cannot spend it at another relay.
+  r.get("/v1/relay-challenge/:challenge",c=>{const value=c.req.param("challenge");const relay=relayHost(deps.config.relayUrl);return (deps.config.mode ?? "hosted")==="selfhosted"&&relay!==undefined&&deps.relayChallenge?.(value)===true?c.json({challenge:value,relay}):c.json({error:"not found"},404)});
   r.use("/v1/topics*",auth);r.use("/v1/incidents*",auth);r.use("/v1/test",auth);
   // api.md §3.7. These live in the v1 router, which is mounted in every mode,
   // because selfhosted has to answer 501 rather than the 404 an unmounted

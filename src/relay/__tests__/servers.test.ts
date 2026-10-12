@@ -9,6 +9,8 @@ import { migrate } from "../../store/migrations.js";
 
 const CHALLENGE = "k".repeat(43);
 const BASE = "https://alerts.example.com";
+// The host the registration request is called on.
+const HOST = "relay.critalarm.app";
 let log: ReturnType<typeof vi.spyOn>;
 beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => {}); });
 afterEach(() => log.mockRestore());
@@ -24,7 +26,7 @@ function setup(options: RelayRouterOptions = {}, db = openDatabase(":memory:")) 
 type Fields = { base_url?: unknown; version?: unknown; challenge?: unknown };
 function register(app: ReturnType<typeof createRelayRouter>, fields: Fields = {}, headers: Record<string, string> = {}) {
   const body = { base_url: BASE, version: "0.1.0", challenge: CHALLENGE, ...fields };
-  return app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1", ...headers }, body: JSON.stringify(body) });
+  return app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1", host: HOST, ...headers }, body: JSON.stringify(body) });
 }
 const rows = (db: ReturnType<typeof openDatabase>) => (db.prepare("SELECT count(*) AS rows FROM relay_servers").get() as { rows: number }).rows;
 
@@ -35,8 +37,27 @@ describe("relay server registration without a secret", () => {
       const response = await register(app);
       expect(response.status).toBe(201);
       expect(await response.json()).toEqual({ relay_key: expect.stringMatching(/^rk_[0-9a-f]{32}$/) });
-      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE);
+      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, HOST);
       expect(db.prepare("SELECT base_url, version, legacy FROM relay_servers").all()).toEqual([{ base_url: BASE, version: "0.1.0", legacy: 0 }]);
+    } finally { db.close(); }
+  });
+
+  it("passes the Host of the request, in lower case, to the confirmer", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      expect((await register(app, {}, { host: "Relay.CritAlarm.App:8443" })).status).toBe(201);
+      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, "relay.critalarm.app:8443");
+    } finally { db.close(); }
+  });
+
+  it("answers 422 and calls nobody when the request has no Host header", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      const response = await app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1" }, body: JSON.stringify({ base_url: BASE, version: "0.1.0", challenge: CHALLENGE }) });
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: "challenge failed" });
+      expect(confirm).not.toHaveBeenCalled();
+      expect(rows(db)).toBe(0);
     } finally { db.close(); }
   });
 
