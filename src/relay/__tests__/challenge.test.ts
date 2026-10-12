@@ -125,6 +125,32 @@ describe("the challenge confirmer over HTTPS", () => {
     expect(Date.now() - started).toBeLessThan(1500);
   });
 
+  // The idle timeout equals the deadline here and the peer sends a byte well
+  // inside it, forever. Only the total deadline can end this call.
+  it("closes the socket at the deadline when the peer drips bytes forever", async () => {
+    const closed = new Promise<number>((done) => {
+      const startedAt = Date.now();
+      respond = (req, res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        const drip = setInterval(() => { res.write(" "); }, 50);
+        req.socket.on("close", () => { clearInterval(drip); done(Date.now() - startedAt); });
+      };
+    });
+    const started = Date.now();
+    expect(await confirmer(400)(url(), challenge)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1500);
+    // The server side saw the socket close, and soon after the deadline.
+    expect(await closed).toBeLessThan(1500);
+  });
+
+  it("closes the socket at the deadline when the peer never answers at all", async () => {
+    const closed = new Promise<void>((done) => {
+      respond = (req) => { req.socket.on("close", () => done()); };
+    });
+    expect(await confirmer(300)(url(), challenge)).toBe(false);
+    await closed;
+  });
+
   it("fails when the certificate is not trusted", async () => {
     respond = json({ challenge });
     expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000, port })(url(), challenge)).toBe(false);
