@@ -235,6 +235,74 @@ describe("relay registration limits", () => {
   });
 });
 
+describe("who counts as one client", () => {
+  const from = (ip: string) => ({ "cf-connecting-ip": ip });
+
+  it("counts every address of one IPv6 /64 as one client, and another /64 as another", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      for (let i = 1; i <= 5; i += 1) expect((await register(app, {}, from(`2606:4700:1:2::${i}`))).status).toBe(201);
+      const sixth = await register(app, {}, from("2606:4700:1:2:aaaa:bbbb:cccc:dddd"));
+      expect(sixth.status).toBe(429);
+      expect(confirm).toHaveBeenCalledTimes(5);
+      expect((await register(app, {}, from("2606:4700:1:3::1"))).status).toBe(201);
+    } finally { db.close(); }
+  });
+
+  it("counts an IPv4-mapped IPv6 address as its IPv4 address", async () => {
+    const { db, app } = setup();
+    try {
+      for (const ip of ["203.0.114.7", "::ffff:203.0.114.7", "::ffff:cb00:7207", "203.0.114.7", "::ffff:203.0.114.7"]) expect((await register(app, {}, from(ip))).status).toBe(201);
+      expect((await register(app, {}, from("203.0.114.7"))).status).toBe(429);
+    } finally { db.close(); }
+  });
+
+  it("counts the daily cap on the /64 too", async () => {
+    const { db, app, clock } = setup();
+    try {
+      for (let i = 1; i <= 20; i += 1) { expect((await register(app, {}, from(`2606:4700:9:9::${i}`))).status).toBe(201); clock.t += 61; }
+      expect((await register(app, {}, from("2606:4700:9:9:1:2:3:4"))).status).toBe(429);
+      expect((await register(app, {}, from("2606:4700:9:a::1"))).status).toBe(201);
+    } finally { db.close(); }
+  });
+
+  it("keeps the stored client key short whatever the header holds", async () => {
+    const { db, app } = setup();
+    try {
+      expect((await register(app, {}, from("z".repeat(8000)))).status).toBe(201);
+      const keys = db.prepare("SELECT client FROM relay_registration_attempts").all() as { client: string }[];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]!.client.length).toBeLessThanOrEqual(64);
+    } finally { db.close(); }
+  });
+});
+
+describe("the global limit on confirmations", () => {
+  it("answers 429 after 60 confirmations started in 60 seconds across all clients, and recovers after the window", async () => {
+    const { db, app, confirm, clock } = setup();
+    try {
+      for (let i = 0; i < 60; i += 1) expect((await register(app, {}, { "cf-connecting-ip": `198.51.${Math.floor(i / 200)}.${(i % 200) + 1}` })).status).toBe(201);
+      const over = await register(app, {}, { "cf-connecting-ip": "192.0.9.1" });
+      expect(over.status).toBe(429);
+      expect(await over.json()).toEqual({ code: 42901, http: 429, error: "rate limited" });
+      expect(confirm).toHaveBeenCalledTimes(60);
+      clock.t += 61;
+      expect((await register(app, {}, { "cf-connecting-ip": "192.0.9.1" })).status).toBe(201);
+    } finally { db.close(); }
+  });
+
+  it("does not charge a client for a call the global limit turned away", async () => {
+    const { db, app, clock } = setup();
+    try {
+      for (let i = 0; i < 60; i += 1) await register(app, {}, { "cf-connecting-ip": `198.51.100.${i + 1}` });
+      for (let i = 0; i < 10; i += 1) expect((await register(app, {}, { "cf-connecting-ip": "192.0.9.1" })).status).toBe(429);
+      clock.t += 61;
+      expect((await register(app, {}, { "cf-connecting-ip": "192.0.9.1" })).status).toBe(201);
+      expect(db.prepare("SELECT count FROM relay_registration_attempts WHERE client = '192.0.9.1'").get()).toEqual({ count: 1 });
+    } finally { db.close(); }
+  });
+});
+
 describe("confirmations in flight", () => {
   it("answers 429 above 4 confirmations at once and makes no outbound request for the fifth", async () => {
     const { db, app, confirm } = setup();
@@ -327,6 +395,30 @@ describe("registration with the operator's secret", () => {
       expect(await response.json()).toEqual({ error: "unauthorized" });
       expect(confirm).not.toHaveBeenCalled();
       expect(rows(db)).toBe(0);
+    } finally { db.close(); }
+  });
+
+  it("answers 429 to the sixth wrong secret in 60 seconds from one client, even with the right secret after it", async () => {
+    const { db, app, clock } = setup({ registrationSecret: "operator-secret" });
+    try {
+      const guess = (secret: string, ip = "203.0.114.1") => register(app, {}, { Authorization: `Bearer ${secret}`, "cf-connecting-ip": ip });
+      for (let i = 0; i < 5; i += 1) expect((await guess(`wrong-${i}`)).status).toBe(401);
+      const sixth = await guess("wrong-5");
+      expect(sixth.status).toBe(429);
+      expect(await sixth.json()).toEqual({ code: 42901, http: 429, error: "rate limited" });
+      expect((await guess("operator-secret")).status).toBe(429);
+      expect(rows(db)).toBe(0);
+      // Another client is not affected, and the first one recovers after the window.
+      expect((await guess("operator-secret", "203.0.114.2")).status).toBe(201);
+      clock.t += 61;
+      expect((await guess("operator-secret")).status).toBe(201);
+    } finally { db.close(); }
+  });
+
+  it("does not count right secrets against the limit", async () => {
+    const { db, app } = setup({ registrationSecret: "operator-secret" });
+    try {
+      for (let i = 0; i < 12; i += 1) expect((await register(app, {}, { Authorization: "Bearer operator-secret" })).status).toBe(201);
     } finally { db.close(); }
   });
 
