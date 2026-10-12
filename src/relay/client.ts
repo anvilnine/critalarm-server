@@ -13,6 +13,9 @@ const CHALLENGE_WINDOW_MS = 60_000;
 // api.md §4.1. Registration retries with growing gaps: 30 s, doubling, 1 h cap.
 const BACKOFF_FIRST_MS = 30_000;
 const BACKOFF_CAP_MS = 3_600_000;
+// The relay answering 429 may be a stranger holding its global limits, so that
+// reason waits at most 5 minutes.
+const BACKOFF_CAP_RATE_LIMITED_MS = 300_000;
 const REGISTER_TIMEOUT_MS = 15_000;
 
 export class RelayClient {
@@ -173,7 +176,8 @@ export class RelayClient {
   // Records the failure, starts or extends the backoff, and logs once per
   // reason: the first failure, and again when the reason changes.
   private fail(failure: { reason: string; status?: number; say: string }): never {
-    this.backoffMs = this.backoffMs === 0 ? BACKOFF_FIRST_MS : Math.min(this.backoffMs * 2, BACKOFF_CAP_MS);
+    const cap = failure.reason === "rate_limited" ? BACKOFF_CAP_RATE_LIMITED_MS : BACKOFF_CAP_MS;
+    this.backoffMs = Math.min(this.backoffMs === 0 ? BACKOFF_FIRST_MS : this.backoffMs * 2, cap);
     this.nextAttemptAt = this.now() + this.backoffMs;
     if (failure.reason !== this.lastReason) {
       this.lastReason = failure.reason;
