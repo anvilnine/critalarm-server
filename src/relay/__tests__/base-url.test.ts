@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseBaseUrl } from "../base-url.js";
 
-const good = ["https://alerts.example.com", "https://alerts.example.com/crit", "https://a.b.example.com:8443/x/y", "https://Alerts.Example.com"];
+const good = ["https://alerts.example.com", "https://alerts.example.com/crit", "https://a.b.example.com:8443/x/y", "https://alerts.example.com:443", "https://alerts.example.com:8443", "https://alerts.example.com/a..b/.hidden/v1.2", "https://Alerts.Example.com"];
 const bad: [string, string][] = [
   ["http://alerts.example.com", "not https"],
   ["alerts.example.com", "no scheme"],
@@ -25,6 +25,15 @@ const bad: [string, string][] = [
   ["https://alerts.example.com/crit/", "trailing slash on a path"],
   ["https://alerts.example.com:0", "port 0"],
   ["https://alerts.example.com:99999", "port too large"],
+  ["https://alerts.example.com:80", "port 80"],
+  ["https://alerts.example.com:8080", "port 8080"],
+  ["https://alerts.example.com:4430", "port that starts with 443"],
+  ["https://alerts.example.com:84433", "port that starts with 8443"],
+  ["https://alerts.example.com:", "empty port"],
+  ["https://alerts.example.com/.", "dot segment"],
+  ["https://alerts.example.com/..", "dot-dot segment"],
+  ["https://alerts.example.com/crit/../admin", "dot-dot segment inside a path"],
+  ["https://alerts.example.com/./crit", "dot segment at the start"],
   ["https://alerts..example.com", "empty label"],
   ["https://alerts.example.com.", "trailing dot"],
   ["https://-a.example.com", "label starts with a dash"],
