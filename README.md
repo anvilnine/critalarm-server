@@ -64,9 +64,12 @@ own:
 3. The relay issues a key, and the server stores it.
 
 For step 2 to work, `BASE_URL` must be a public `https` address with a host
-name (not an IP address) that the internet can reach, and your reverse proxy
-must pass `/v1/` through to the server. An address that only works on a home
-network or a private overlay will not register.
+name (not an IP address) that the internet can reach, on port 443 or 8443 (443
+is the default), and your reverse proxy must pass `/v1/` through to the server.
+The challenge answer names the relay it was made for, taken from `RELAY_URL`.
+The relay accepts it only when that is the host it was called on, so
+`RELAY_URL` must be the relay's final address and must not redirect. An address
+that only works on a home network or a private overlay will not register.
 
 If registration fails, the server writes one JSON line to its log with the
 event `relay_registration_failed`, the reason and what to check. It writes the
@@ -74,9 +77,18 @@ line again only when the reason changes. After a failure it waits 30 seconds
 before the next attempt, doubling the wait up to one hour, so a wrong
 `BASE_URL` does not hammer the relay. A success is logged as `relay_registered`.
 If the relay replaces or forgets the key, the server registers again by itself.
+While registration waits, the server counts the alarms it could not forward.
+The next registration line (`relay_registered`, or `relay_registration_failed`
+with a new reason) carries them as `skipped_forwards`.
+
 If you change `BASE_URL`, the relay answers `topic mismatch` to the old key.
-The server logs `relay_topic_mismatch`, deletes the key and registers again
-with the new address on the next alarm.
+The server works out the hash of the topic from the new `BASE_URL`. When it
+matches, the key is the old one: the server drops it, registers again and
+retries that push once, and logs `relay_key_replaced`. When it differs, the
+topic was created under the old `BASE_URL`. The key stays, and the server logs
+`relay_topic_other_base_url` once for that topic. Phones subscribed to such a
+topic do not ring through the relay. Delete the topic, create it again and add
+it to the phone again.
 
 Each push to the relay carries the topic name. The relay uses it to check that
 the topic hash belongs to your server, then drops it. With `RELAY_CONTENT=none`
