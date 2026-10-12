@@ -98,8 +98,8 @@ export class RelayClient {
 
   private async register(): Promise<string> {
     if (this.now() < this.nextAttemptAt) throw new RelayKeyError("relay registration is backing off");
-    // A relay that gates registration hands its operator's secret to the people
-    // it wants forwarding to it, and refuses a caller without it.
+    // Only for a relay the operator runs. The secret skips the challenge, so
+    // its holder can register any base_url and it is never handed to a stranger.
     const secret = this.options.registrationSecret;
     const challenge = randomBytes(32).toString("base64url");
     this.challenge = { value: challenge, expiresAt: this.now() + CHALLENGE_WINDOW_MS };
@@ -127,7 +127,7 @@ export class RelayClient {
     const error = await errorText(response);
     if (status === 400 && error === "invalid base_url") return { reason: "invalid_base_url", status, say: `The relay only accepts a public https address with a host name, no IP address, no trailing slash. BASE_URL is set to ${this.options.baseUrl}. Check it.` };
     if (status === 422 && error === "challenge failed") return { reason: "challenge_failed", status, say: `The relay could not reach ${this.options.baseUrl}/v1/relay-challenge/... from the internet. Check that the address is reachable from outside your network and that the reverse proxy passes /v1/ through to this server.` };
-    if (status === 403 && error === "registration closed") return { reason: "registration_closed", status, say: "The relay's operator has closed registration. Check RELAY_URL, or ask the operator for a registration secret." };
+    if (status === 403 && error === "registration closed") return { reason: "registration_closed", status, say: "The relay's operator has closed registration. Check RELAY_URL. A relay you run yourself accepts this server with RELAY_REGISTRATION_SECRET." };
     if (status === 429) return { reason: "rate_limited", status, say: "The relay rate-limited this registration. The server tries again later." };
     return { reason: `status_${status}`, status, say: `The relay refused registration with status ${status}.` };
   }
