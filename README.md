@@ -45,7 +45,8 @@ credential, which lives in the app. Source and docs:
 | `mode` | `MODE` | inferred | `selfhosted`, `relay` or `hosted`. Unset means the server infers it from the push credentials and `relay-url`; set it to `selfhosted` if you bring your own APNs or FCM key |
 | `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; with push credentials and no `mode`, an explicit value means hosted mode |
 | `relay-content` | `RELAY_CONTENT` | `none` | `none` keeps body on server; `full` includes title/body in push |
-| - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller without `RELAY_REGISTRATION_SECRET` |
+| - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller that sends no registration secret |
+| - | `RELAY_REGISTRATION_SECRET` | unset | A relay with this set also accepts a caller that sends it, with no challenge. A self-hosted server sends it when it is set. Only for a server the relay's operator runs on a private network |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
 ## Self-hosting and the relay
@@ -54,8 +55,9 @@ A self-hosted server forwards each alarm to a relay (`RELAY_URL`), which passes
 it on to the phone. The server needs a relay key for that, and gets one on its
 own:
 
-1. At startup, once the server is listening, it asks the relay for a key and
-   sends `BASE_URL` with a random challenge.
+1. At startup, once the server is listening and holds no key, it asks the relay
+   for one and sends `BASE_URL` with a random challenge. A server that already
+   holds a key does nothing until a push is refused.
 2. The relay calls back `BASE_URL/v1/relay-challenge/<challenge>` and checks
    that the server answers with the same value.
 3. The relay issues a key, and the server stores it.
