@@ -8,7 +8,7 @@ import type { RelayPayload } from "./types.js";
 import type { Clock, DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
-import { clientIp } from "../rate-limit.js";
+import { clientIp, clientKey } from "../rate-limit.js";
 import { parseBaseUrl } from "./base-url.js";
 import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
 import { topicHash } from "./hash.js";
@@ -26,6 +26,8 @@ const REGISTRATION_DAILY_CAP = 20;
 // Challenge confirmations running at once. Each one holds a DNS query and a
 // connection to a host the caller picked, so the count stays small.
 const MAX_CONFIRMATIONS_IN_FLIGHT = 4;
+// Confirmations started per window, across all clients.
+const GLOBAL_STARTS = { limit: 60, windowS: 60 };
 const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
 
 export interface RelayRouterOptions {
@@ -42,27 +44,46 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   const confirm = options.confirmChallenge ?? confirmChallenge;
   const clock: Clock = options.clock ?? { now: () => Math.floor(Date.now() / 1000) };
   const secret = options.registrationSecret === undefined || options.registrationSecret === "" ? undefined : options.registrationSecret;
-  const recent = new Map<string, number[]>();
   let inFlight = 0;
 
-  // True when this client may make another registration call. The rolling
-  // window lives in memory. The daily count lives in SQLite so a restart does
-  // not reset it. Only a call that gets through is counted against the day.
-  function withinLimits(client: string): boolean {
-    const now = clock.now();
-    for (const [key, times] of recent) {
-      const live = times.filter((time) => time > now - REGISTRATION_RATE.windowS);
-      if (live.length === 0) recent.delete(key); else recent.set(key, live);
-    }
-    const times = recent.get(client) ?? [];
-    if (times.length >= REGISTRATION_RATE.limit) return false;
-    const day = Math.floor(now / 86400) * 86400;
+  // A rolling window kept in memory. `allowed` only looks, and `record` counts,
+  // so a call that another limit turns away is not charged to this one.
+  function slidingWindow(limit: number, windowS: number) {
+    const hits = new Map<string, number[]>();
+    let sweptAt = 0;
+    const live = (key: string, now: number): number[] => (hits.get(key) ?? []).filter((time) => time > now - windowS);
+    return {
+      allowed(key: string): boolean {
+        const now = clock.now();
+        // Drop idle keys once per window so the table follows the traffic.
+        if (now - sweptAt >= windowS) { sweptAt = now; for (const [other, times] of hits) if (!times.some((time) => time > now - windowS)) hits.delete(other); }
+        return live(key, now).length < limit;
+      },
+      record(key: string): void {
+        const now = clock.now();
+        hits.set(key, [...live(key, now), now]);
+      },
+    };
+  }
+  const clientWindow = slidingWindow(REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
+  // Wrong operator secrets, counted per client on their own, so a guess at the
+  // secret is limited at any speed and a right guess is not charged.
+  const secretWindow = slidingWindow(REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
+  // Confirmations started, across all clients.
+  const startedWindow = slidingWindow(GLOBAL_STARTS.limit, GLOBAL_STARTS.windowS);
+  const GLOBAL = "all";
+
+  function dailyAllowed(client: string): boolean {
+    const day = Math.floor(clock.now() / 86400) * 86400;
     const row = db.prepare("SELECT count FROM relay_registration_attempts WHERE client = ? AND day_start = ?").get(client, day) as { count: number } | undefined;
-    if ((row?.count ?? 0) >= REGISTRATION_DAILY_CAP) return false;
+    return (row?.count ?? 0) < REGISTRATION_DAILY_CAP;
+  }
+  // The daily count lives in SQLite so a restart does not reset it. Only a call
+  // that gets through is counted against the day.
+  function recordDaily(client: string): void {
+    const day = Math.floor(clock.now() / 86400) * 86400;
     db.prepare("INSERT INTO relay_registration_attempts(client,day_start,count) VALUES(?,?,1) ON CONFLICT(client,day_start) DO UPDATE SET count=count+1").run(client, day);
     db.prepare("DELETE FROM relay_registration_attempts WHERE day_start < ?").run(day);
-    recent.set(client, [...times, now]);
-    return true;
   }
 
   function issueKey(baseUrl: string, version: string): string {
@@ -82,7 +103,13 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   router.post("/relay/v1/servers", async (c) => {
     const authorization = c.req.header("authorization");
     const hasSecret = secret !== undefined && authorization !== undefined && /^Bearer /.test(authorization);
-    if (hasSecret && !bearerSecretMatches(authorization, secret ?? "")) { logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
+    if (hasSecret) {
+      // More than 5 wrong secrets in 60 seconds from one client is 429, so the
+      // secret cannot be guessed at any speed.
+      const guesser = clientKey(clientIp(c, options.behindProxy ?? false));
+      if (!secretWindow.allowed(guesser)) { logRegistration("rate limited"); return c.json(RATE_LIMITED, 429); }
+      if (!bearerSecretMatches(authorization, secret ?? "")) { secretWindow.record(guesser); logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
+    }
     if (!hasSecret && options.registration === "closed") { logRegistration("closed"); return c.json({ error: "registration closed" }, 403); }
     const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown; challenge?: unknown } | null;
     if (body === null || typeof body !== "object" || typeof body.base_url !== "string" || typeof body.version !== "string" || body.base_url === "" || body.version.length > 200) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
@@ -98,7 +125,10 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     // The host this request was called on. The server's answer must name it.
     const host = c.req.header("host")?.trim().toLowerCase();
     if (host === undefined || host === "") { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
-    if (inFlight >= MAX_CONFIRMATIONS_IN_FLIGHT || !withinLimits(clientIp(c, options.behindProxy ?? false))) { logRegistration("rate limited", parsed.host); return c.json(RATE_LIMITED, 429); }
+    // IPv6 clients count by /64, and a typed header cannot grow the key.
+    const client = clientKey(clientIp(c, options.behindProxy ?? false));
+    if (inFlight >= MAX_CONFIRMATIONS_IN_FLIGHT || !startedWindow.allowed(GLOBAL) || !clientWindow.allowed(client) || !dailyAllowed(client)) { logRegistration("rate limited", parsed.host); return c.json(RATE_LIMITED, 429); }
+    clientWindow.record(client); recordDaily(client); startedWindow.record(GLOBAL);
     inFlight += 1;
     let confirmed: boolean;
     try { confirmed = await confirm(body.base_url, body.challenge, host); } finally { inFlight -= 1; }

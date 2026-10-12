@@ -28,7 +28,7 @@ function publicIpv4(octets: readonly number[]): boolean {
 }
 
 // Eight 16-bit groups, or undefined when the text is not a valid IPv6 address.
-function ipv6Groups(text: string): number[] | undefined {
+export function ipv6Groups(text: string): number[] | undefined {
   let rest = text;
   const zone = rest.indexOf("%");
   if (zone >= 0) rest = rest.slice(0, zone);
@@ -54,7 +54,7 @@ function ipv6Groups(text: string): number[] | undefined {
   return [...head, ...new Array<number>(8 - head.length - back.length).fill(0), ...back];
 }
 
-function embeddedIpv4(groups: readonly number[]): number[] {
+export function embeddedIpv4(groups: readonly number[]): number[] {
   const [g6, g7] = [groups[6] ?? 0, groups[7] ?? 0];
   return [g6 >> 8, g6 & 255, g7 >> 8, g7 & 255];
 }
