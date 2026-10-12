@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { RelayClient, RelayKeyError } from "../client.js";
 import { createApp } from "../../index.js";
-import { loadConfig } from "../../config.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import type { DeliveryEvent } from "../../incident/types.js";
@@ -35,7 +34,7 @@ const failing = (status: number, error: string): Handler => (request) => request
 
 function appFor(mode: "selfhosted" | "relay" | "hosted", client?: RelayClient) {
   const db = openDatabase(":memory:"); migrate(db);
-  const config = loadConfig({ BASE_URL: "https://a.test", DATA_DIR: "/tmp", MODE: mode });
+  const config = { baseUrl: "https://a.test", relayUrl: "https://relay.test", relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false, mode };
   return createApp({ config, db, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {}, ...(client === undefined ? {} : { relayChallenge: (value: string) => client.isRelayChallenge(value) }) });
 }
 

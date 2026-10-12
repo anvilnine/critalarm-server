@@ -323,6 +323,7 @@ describe("topic name on delivery events", () => {
     const acked = service.acknowledge("acc_1", opened.incident.id);
     clock.value = 1_040;
     const reopened = service.scanDue();
+    service.acknowledge("acc_1", opened.incident.id);
     const closed = service.close("acc_1", opened.incident.id);
     const expireSetup = setup();
     expireSetup.service.publishCritical(publication());
