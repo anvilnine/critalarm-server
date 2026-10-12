@@ -355,12 +355,20 @@ operator nothing at all to go on.
 
 - No public topics. Every topic has a token from creation.
 - The topic hash on the relay is `sha256(base_url + "/" + topic)`, ntfy's
-  scheme. Knowing the hash lets you receive pokes for a topic, not send them.
-  Sending needs the topic token on the user's server.
-- The relay server key comes from `POST /relay/v1/servers`. Today that route
-  only mounts when `RELAY_REGISTRATION_SECRET` is set and then demands it, and
-  nothing rate-limits it. The contract still says anonymous; that gap is an
-  open item in `planning/decisions.md`.
+  scheme. Knowing the hash lets you subscribe a phone to a topic and learn when
+  it fires, and read title and body if that server runs `relay-content: full`.
+  It does not let you send. Sending needs the topic token on the user's server,
+  and a push to the relay needs a relay key for the same `base_url`.
+- The relay server key comes from `POST /relay/v1/servers`. The route is always
+  mounted on a relay. A server gets a key by answering a challenge at its
+  `base_url` (`GET /v1/relay-challenge/{challenge}`), or by sending the
+  operator's `RELAY_REGISTRATION_SECRET`. The relay keeps the `base_url` with
+  the key and checks every push: `sha256(base_url + "/" + topic)` must equal
+  `topic_hash`, or the answer is `403 topic mismatch`. Registration is limited
+  to 5 calls per minute and 20 per day per client address, and
+  `RELAY_REGISTRATION=closed` shuts it. A per-server salt in the hash would
+  close the subscribe gap above and needs an app change. Design note:
+  `docs/specs/relay-registration.md`.
 - Device routes need the device token issued at registration. Registration
   itself is the only unauthenticated relay route.
 - A device token reaches only rows owned by its account. Another account's topic
