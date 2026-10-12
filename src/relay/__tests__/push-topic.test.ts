@@ -159,7 +159,7 @@ describe("a relay key pushes only its own server's topics", () => {
       subscribe("dev_a", topicHash(A, "very-private-name"));
       await push(keyA, { topic_hash: topicHash(A, "very-private-name"), topic: "very-private-name" });
       await push(keyA, { topic_hash: topicHash(B, "very-private-name"), topic: "very-private-name" });
-      expect(log.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("very-private-name");
+      expect((log.mock.calls as unknown[][]).map((call) => String(call[0])).join("\n")).not.toContain("very-private-name");
       const dump = JSON.stringify(db.prepare("SELECT * FROM relay_servers").all()) + JSON.stringify(db.prepare("SELECT * FROM subscriptions").all());
       expect(dump).not.toContain("very-private-name");
     } finally { db.close(); }

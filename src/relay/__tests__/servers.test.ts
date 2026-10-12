@@ -152,7 +152,7 @@ describe("relay server registration without a secret", () => {
     try {
       const key = (await (await register(app)).json() as { relay_key: string }).relay_key;
       await register(app, {}, { Authorization: "Bearer operator-secret" });
-      const logged = log.mock.calls.map((call) => String(call[0])).join("\n");
+      const logged = (log.mock.calls as unknown[][]).map((call) => String(call[0])).join("\n");
       expect(logged).toContain("alerts.example.com");
       for (const secret of [key, CHALLENGE, "operator-secret"]) expect(logged).not.toContain(secret);
     } finally { db.close(); }

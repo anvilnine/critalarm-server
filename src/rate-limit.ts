@@ -14,12 +14,12 @@ type Ctx = { Bindings: Bindings; Variables: Variables };
 // through it. With no such header, fall back to the forwarded hops, so a
 // self-hoster behind a plain nginx still gets per-client limiting.
 export interface ClientIpSource {
-  env?: { incoming?: { socket?: { remoteAddress?: string } } };
+  env?: unknown;
   req: { header(name: string): string | undefined };
 }
 
 export function clientIp(c: ClientIpSource, behindProxy: boolean): string {
-  if (!behindProxy) return c.env?.incoming?.socket?.remoteAddress ?? "anonymous";
+  if (!behindProxy) return (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "anonymous";
   const cloudflare = c.req.header("cf-connecting-ip")?.trim();
   if (cloudflare) return cloudflare;
   const xff = c.req.header("x-forwarded-for");
