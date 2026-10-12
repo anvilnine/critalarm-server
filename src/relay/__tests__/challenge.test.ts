@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { createSecureContext } from "node:tls";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { selfSignedCertificate } from "./selfsigned.js";
-import { createChallengeConfirmer } from "../challenge.js";
+import { createChallengeConfirmer, createPublicResolver } from "../challenge.js";
 
 const challenge = "c".repeat(40);
 
@@ -29,6 +29,34 @@ describe("the challenge confirmer", () => {
     const resolve = vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]);
     expect(await createChallengeConfirmer(resolve)("http://alerts.example.com", challenge)).toBe(false);
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe("the public resolver", () => {
+  const fail = (code: string) => async (): Promise<string[]> => { throw Object.assign(new Error(code), { code }); };
+
+  it("returns the A and the AAAA answers together", async () => {
+    const resolver = createPublicResolver({ resolve4: async () => ["93.184.216.34"], resolve6: async () => ["2606:2800:220:1::1"] });
+    expect(await resolver("alerts.example.com")).toEqual([{ address: "93.184.216.34", family: 4 }, { address: "2606:2800:220:1::1", family: 6 }]);
+  });
+
+  it("uses the one family that answers", async () => {
+    expect(await createPublicResolver({ resolve4: async () => ["93.184.216.34"], resolve6: fail("ENODATA") })("a.example.com")).toEqual([{ address: "93.184.216.34", family: 4 }]);
+    expect(await createPublicResolver({ resolve4: fail("ENODATA"), resolve6: async () => ["2606:2800:220:1::1"] })("a.example.com")).toEqual([{ address: "2606:2800:220:1::1", family: 6 }]);
+  });
+
+  it("fails a host with no A and no AAAA record", async () => {
+    await expect(createPublicResolver({ resolve4: fail("ENODATA"), resolve6: fail("ENODATA") })("a.example.com")).rejects.toThrow();
+    await expect(createPublicResolver({ resolve4: async () => [], resolve6: async () => [] })("a.example.com")).rejects.toThrow();
+  });
+
+  it("makes the confirmer refuse a host with one private answer in either family, and make no request", async () => {
+    for (const client of [
+      { resolve4: async () => ["93.184.216.34"], resolve6: async () => ["fd00::1"] },
+      { resolve4: async () => ["10.0.0.5"], resolve6: async () => ["2606:2800:220:1::1"] },
+    ]) {
+      expect(await createChallengeConfirmer(createPublicResolver(client))("https://alerts.example.com", challenge)).toBe(false);
+    }
   });
 });
 

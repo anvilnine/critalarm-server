@@ -214,6 +214,38 @@ describe("relay registration limits", () => {
   });
 });
 
+describe("confirmations in flight", () => {
+  it("answers 429 above 4 confirmations at once and makes no outbound request for the fifth", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      const release: (() => void)[] = [];
+      confirm.mockImplementation(() => new Promise<boolean>((done) => { release.push(() => done(true)); }));
+      const ip = (n: number) => ({ "cf-connecting-ip": `203.0.114.${n}` });
+      const pending = [1, 2, 3, 4].map((n) => register(app, {}, ip(n)));
+      await vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(4));
+      const fifth = await register(app, {}, ip(5));
+      expect(fifth.status).toBe(429);
+      expect(await fifth.json()).toEqual({ code: 42901, http: 429, error: "rate limited" });
+      expect(confirm).toHaveBeenCalledTimes(4);
+      for (const done of release) done();
+      expect((await Promise.all(pending)).map((response) => response.status)).toEqual([201, 201, 201, 201]);
+      // A slot is free again once they finish.
+      confirm.mockResolvedValue(true);
+      expect((await register(app, {}, ip(6))).status).toBe(201);
+    } finally { db.close(); }
+  });
+
+  it("frees the slot when the confirmer throws", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      confirm.mockRejectedValue(new Error("boom"));
+      for (let n = 1; n <= 6; n += 1) await Promise.resolve(register(app, {}, { "cf-connecting-ip": `203.0.114.${n}` })).catch(() => undefined);
+      confirm.mockResolvedValue(true);
+      expect((await register(app, {}, { "cf-connecting-ip": "203.0.114.9" })).status).toBe(201);
+    } finally { db.close(); }
+  });
+});
+
 describe("the registration switch", () => {
   it("answers 403 registration closed and makes no outbound request", async () => {
     const { db, app, confirm } = setup({ registration: "closed" });
