@@ -63,6 +63,7 @@ export interface Config {
   allowNoopPush?: boolean;
   statsKey?: string;
   relayRegistrationSecret?: string;
+  relayRegistration?: "open" | "closed";
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -280,6 +281,12 @@ function weeklyChecksValue(value: string | undefined): boolean {
   return false;
 }
 
+function relayRegistrationValue(value: string | undefined): "open" | "closed" {
+  if (value === undefined || value === "" || value === "open") return "open";
+  if (value !== "closed") throw configError("RELAY_REGISTRATION");
+  return "closed";
+}
+
 function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
@@ -425,9 +432,10 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
     allowNoopPush,
     ...(env.STATS_KEY === undefined || env.STATS_KEY === "" ? {} : { statsKey: env.STATS_KEY }),
-    // The secret POST /relay/v1/servers demands. Unset means the route is not
-    // mounted on a relay, and a self-hosted server registers without one.
+    // The secret that lets a caller of POST /relay/v1/servers skip the
+    // challenge (api.md §4.1). Unset means every caller proves its base_url.
     ...(env.RELAY_REGISTRATION_SECRET === undefined || env.RELAY_REGISTRATION_SECRET === "" ? {} : { relayRegistrationSecret: env.RELAY_REGISTRATION_SECRET }),
+    relayRegistration: relayRegistrationValue(env.RELAY_REGISTRATION),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: revenueCatEntitlements } }),

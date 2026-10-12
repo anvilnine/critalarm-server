@@ -10,7 +10,7 @@ export interface RelayPayload {
   // api.md §4.1. opened_at + max_ring_s on the pushing server, so the relay can
   // pass the ring window on. Null on p4, on a p5 with no incident, and on the state kinds.
   ring_until: number | null;
-  title?: string; body?: string;
+  title?: string; body?: string; topic?: string;
 }
 export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string; fetch?: (request: Request) => Promise<Response>; }
 export interface RelayIngressDependencies { db: Database.Database; dispatch(event: DeliveryEvent): Promise<void>; }

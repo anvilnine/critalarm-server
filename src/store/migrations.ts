@@ -480,6 +480,20 @@ const migrations: Migration[] = [
     );
   `,
   { foreignKeysOff: true, up: rebuildCheckRoundsWithTierReason },
+  // api.md §4.1, 1.20.0. A key issued before this version has no proven
+  // base_url behind it, so it is marked legacy and may push without `topic`.
+  // Old rows can share a base_url, so the one-live-key rule is a partial index
+  // over the new keys only. relay_registration_attempts counts registration
+  // calls per client address per UTC day, so a restart does not reset the cap.
+  `
+    ALTER TABLE relay_servers ADD COLUMN legacy INTEGER NOT NULL DEFAULT 0;
+    UPDATE relay_servers SET legacy = 1;
+    CREATE UNIQUE INDEX relay_servers_live_base_url ON relay_servers(base_url) WHERE legacy = 0;
+    CREATE TABLE relay_registration_attempts (
+      client TEXT NOT NULL, day_start INTEGER NOT NULL, count INTEGER NOT NULL,
+      PRIMARY KEY (client, day_start)
+    );
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the

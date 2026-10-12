@@ -55,7 +55,7 @@ describe("the RevenueCat secret API key", () => {
 });
 
 describe("the relay registration secret", () => {
-  it("is absent when unset or empty, so POST /relay/v1/servers is not mounted", () => {
+  it("is absent when unset or empty, so every registration proves its base_url", () => {
     expect(loadConfig(env()).relayRegistrationSecret).toBeUndefined();
     expect(loadConfig(env({ RELAY_REGISTRATION_SECRET: "" })).relayRegistrationSecret).toBeUndefined();
   });
@@ -185,5 +185,21 @@ describe("Google client IDs", () => {
       AUTH_GOOGLE_CLIENT_ID: ",",
       AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
     }))).toThrow("invalid configuration: AUTH_GOOGLE sign-in credentials");
+  });
+});
+
+describe("RELAY_REGISTRATION", () => {
+  it("is open when unset or empty", () => {
+    expect(loadConfig(env()).relayRegistration).toBe("open");
+    expect(loadConfig(env({ RELAY_REGISTRATION: "" })).relayRegistration).toBe("open");
+  });
+
+  it("is read when it is open or closed", () => {
+    expect(loadConfig(env({ RELAY_REGISTRATION: "open" })).relayRegistration).toBe("open");
+    expect(loadConfig(env({ RELAY_REGISTRATION: "closed" })).relayRegistration).toBe("closed");
+  });
+
+  it("stops startup on any other value", () => {
+    expect(() => loadConfig(env({ RELAY_REGISTRATION: "off" }))).toThrow("invalid configuration: RELAY_REGISTRATION");
   });
 });
