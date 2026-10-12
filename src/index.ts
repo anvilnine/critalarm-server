@@ -31,7 +31,9 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads;
+  // api.md §3.8. True for the relay challenge in flight. Only a selfhosted server with a relay client supplies it.
+  relayChallenge?: (value: string) => boolean; }
 export function createApp(deps: AppDependencies): Hono {
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
