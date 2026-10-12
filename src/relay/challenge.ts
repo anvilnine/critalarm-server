@@ -51,20 +51,28 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
   return async (baseUrl, challenge) => {
     const parsed = parseBaseUrl(baseUrl);
     if (parsed === undefined) return false;
-    let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<false>((done) => { timer = setTimeout(() => done(false), timeoutMs); });
+    // One deadline for DNS, connect, TLS, headers and body together. When it
+    // fires the request is aborted, which destroys its socket. The idle
+    // `timeout` option alone would let a peer that sends a byte every few
+    // seconds hold the socket for hours.
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
+    const deadline = new Promise<false>((done) => { controller.signal.addEventListener("abort", () => { done(false); }, { once: true }); });
     try {
-      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
+      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, controller.signal, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
     } catch {
       return false;
     } finally {
       clearTimeout(timer);
+      // Closes the request on every other exit too, so nothing outlives the call.
+      controller.abort();
     }
   };
 }
 
-async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, host: string, port: number, path: string, challenge: string): Promise<boolean> {
+async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, signal: AbortSignal, host: string, port: number, path: string, challenge: string): Promise<boolean> {
   const addresses = await resolve(host);
+  if (signal.aborted) return false;
   if (addresses.length === 0 || !addresses.every((entry) => isPublic(entry.address))) return false;
   const target = addresses[0] as ResolvedAddress;
   // The connection goes to the address vetted above. A second DNS answer cannot
@@ -74,7 +82,7 @@ async function attempt(resolve: Resolver, isPublic: (address: string) => boolean
     else (callback as (error: null, address: string, family: number) => void)(null, target.address, target.family);
   };
   return new Promise<boolean>((done) => {
-    const req = request({ host, port, path, method: "GET", lookup: pinned, servername: host, headers: { accept: "application/json" }, timeout: timeoutMs, ...(ca === undefined ? {} : { ca }) }, (res) => {
+    const req = request({ host, port, path, method: "GET", lookup: pinned, servername: host, headers: { accept: "application/json" }, timeout: timeoutMs, signal, ...(ca === undefined ? {} : { ca }) }, (res) => {
       // A redirect is a failure and is never followed.
       if (res.statusCode !== 200) { res.destroy(); req.destroy(); done(false); return; }
       const chunks: Buffer[] = [];
@@ -91,6 +99,7 @@ async function attempt(resolve: Resolver, isPublic: (address: string) => boolean
         } catch { done(false); }
       });
       res.on("error", () => done(false));
+      res.on("aborted", () => done(false));
     });
     req.on("timeout", () => { req.destroy(); done(false); });
     req.on("error", () => done(false));
