@@ -15,6 +15,7 @@ import { FcmSender } from "./push/fcm.js";
 import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
 import { RelayClient, RelayKeyError } from "./relay/client.js";
+import { runAfterListen } from "./relay/startup.js";
 import { createAuthHandler } from "./auth/better-auth.js";
 import { createBilling } from "./tier/billing-startup.js";
 import { createChecks } from "./check/startup.js";
@@ -96,12 +97,9 @@ const handler: typeof app.fetch = logRequests
       return response;
     }
   : app.fetch;
-// The relay calls back to BASE_URL while it registers this server, so the
-// listener has to be up first. The call never throws and never blocks startup.
-serve({ fetch: handler, port: config.port }, () => { void relay?.registerAtStartup(); });
-// Catch up on timers that came due while the server was down. This runs after
-// listen, because a forward may register with the relay, and the relay calls back.
-await dispatch(incidents.scanDue());
+// See runAfterListen: listen first, then register with the relay, then catch up
+// on timers that came due while the server was down.
+await runAfterListen((onListening) => { serve({ fetch: handler, port: config.port }, onListening); }, { ...(relay === undefined ? {} : { register: () => relay.registerAtStartup() }), scanDue: async () => { await dispatch(incidents.scanDue()); } });
 const shutdown = () => { stop(); stopPrune(); stopChecks(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
