@@ -22,6 +22,9 @@ export class RelayClient {
   private nextAttemptAt = 0;
   private lastReason: string | undefined;
   private readonly warnedTopics = new Set<string>();
+  // Forwards dropped because there was no key and registration failed or was
+  // backing off, since the last registration log line. The next line reports it.
+  private skipped = 0;
 
   constructor(private readonly options: RelayClientOptions) {}
 
@@ -117,7 +120,18 @@ export class RelayClient {
     if (stored !== undefined) return stored;
     // Two forwards at once share one registration.
     this.registration ??= this.register().finally(() => { this.registration = undefined; });
-    return this.registration;
+    try { return await this.registration; } catch (error: unknown) {
+      if (error instanceof RelayKeyError) this.skipped += 1;
+      throw error;
+    }
+  }
+
+  // The count for the log line about to be written, then back to zero. Left
+  // out of the line when nothing was skipped.
+  private takeSkipped(): { skipped_forwards?: number } {
+    const count = this.skipped;
+    this.skipped = 0;
+    return count === 0 ? {} : { skipped_forwards: count };
   }
 
   private async register(): Promise<string> {
@@ -135,7 +149,7 @@ export class RelayClient {
       const key = (body as { relay_key: string }).relay_key;
       this.options.db.prepare("INSERT INTO relay_client_credentials (relay_url, relay_key, created_at) VALUES (?, ?, ?) ON CONFLICT(relay_url) DO UPDATE SET relay_key=excluded.relay_key").run(this.options.relayUrl, key, Math.floor(this.now() / 1000));
       this.backoffMs = 0; this.nextAttemptAt = 0; this.lastReason = undefined;
-      this.log({ event: "relay_registered", relay_url: this.options.relayUrl, base_url: this.options.baseUrl });
+      this.log({ event: "relay_registered", relay_url: this.options.relayUrl, base_url: this.options.baseUrl, ...this.takeSkipped() });
       return key;
     } catch (error: unknown) {
       if (error instanceof RelayKeyError) throw error;
@@ -163,7 +177,7 @@ export class RelayClient {
     this.nextAttemptAt = this.now() + this.backoffMs;
     if (failure.reason !== this.lastReason) {
       this.lastReason = failure.reason;
-      this.log({ event: "relay_registration_failed", reason: failure.reason, ...(failure.status === undefined ? {} : { status: failure.status }), relay_url: this.options.relayUrl, message: failure.say });
+      this.log({ event: "relay_registration_failed", reason: failure.reason, ...(failure.status === undefined ? {} : { status: failure.status }), relay_url: this.options.relayUrl, message: failure.say, ...this.takeSkipped() });
     }
     throw new RelayKeyError(`relay registration failed: ${failure.reason}`);
   }

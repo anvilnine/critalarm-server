@@ -324,6 +324,64 @@ describe("registration log", () => {
   });
 });
 
+describe("forwards skipped while registration waits", () => {
+  it("reports how many were dropped in the line that ends the wait, and counts nothing per event", async () => {
+    let ok = false;
+    const { client, logs, advance, db } = setup((request) => request.url.endsWith("/servers") ? (ok ? json(201, { relay_key: "rk_x" }) : json(429, { error: "rate limited" })) : new Response(null, { status: 202 }));
+    for (let i = 0; i < 6; i += 1) { await expect(client.forwardOne(baseEvent)).rejects.toBeInstanceOf(RelayKeyError); advance(1_000); }
+    // One failure line so far, and it has no count: nothing had been skipped yet.
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).not.toHaveProperty("skipped_forwards");
+    advance(30_000); ok = true;
+    await client.forwardOne(baseEvent);
+    expect(logs).toHaveLength(2);
+    expect(logs[1]).toMatchObject({ event: "relay_registered", skipped_forwards: 6 });
+    // The count starts again.
+    db.prepare("DELETE FROM relay_client_credentials").run();
+    await client.forwardOne(baseEvent);
+    expect(logs[2]).not.toHaveProperty("skipped_forwards");
+    db.close();
+  });
+
+  it("reports the count in the line that logs a changed reason, then starts again", async () => {
+    let answer: Handler = failing(422, "challenge failed");
+    const { client, logs, advance, db } = setup((request) => answer(request));
+    for (let i = 0; i < 3; i += 1) await client.forwardOne(baseEvent).catch(() => undefined);
+    expect(logs).toHaveLength(1);
+    answer = failing(400, "invalid base_url");
+    advance(31_000);
+    await client.forwardOne(baseEvent).catch(() => undefined);
+    expect(logs).toHaveLength(2);
+    expect(logs[1]).toMatchObject({ reason: "invalid_base_url", skipped_forwards: 3 });
+    advance(61_000);
+    await client.forwardOne(baseEvent).catch(() => undefined);
+    // Same reason: no new line, and the one lost forward waits for the next line.
+    expect(logs).toHaveLength(2);
+    db.close();
+  });
+
+  it("counts both forwards that share one failed registration", async () => {
+    let ok = false;
+    const { client, logs, advance, db } = setup((request) => request.url.endsWith("/servers") ? (ok ? json(201, { relay_key: "rk_x" }) : json(500, { error: "boom" })) : new Response(null, { status: 202 }));
+    await Promise.all([client.forwardOne(baseEvent).catch(() => undefined), client.forwardOne(baseEvent).catch(() => undefined)]);
+    advance(31_000); ok = true;
+    await client.forwardOne(baseEvent);
+    expect(logs[1]).toMatchObject({ event: "relay_registered", skipped_forwards: 2 });
+    db.close();
+  });
+
+  it("never puts the key, the secret, the challenge or a topic in the line", async () => {
+    let ok = false;
+    const { client, logs, registrations, advance, db } = setup((request) => request.url.endsWith("/servers") ? (ok ? json(201, { relay_key: "rk_hidden" }) : json(500, { error: "boom" })) : new Response(null, { status: 202 }), { secret: "s3cret-value" });
+    await client.forwardOne(baseEvent).catch(() => undefined);
+    advance(31_000); ok = true;
+    await client.forwardOne({ ...baseEvent, topic: "payroll-prod" });
+    const text = JSON.stringify(logs);
+    for (const hidden of ["rk_hidden", "s3cret-value", "payroll-prod", ...registrations().map((r) => (r.body as { challenge: string }).challenge)]) expect(text).not.toContain(hidden);
+    db.close();
+  });
+});
+
 describe("a key that stopped working", () => {
   it("drops the key on 401, registers once more and retries the push once", async () => {
     let pushes = 0; let registrations = 0;

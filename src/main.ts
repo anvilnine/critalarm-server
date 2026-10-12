@@ -51,7 +51,9 @@ const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, 
 const dispatch = async (events: readonly DeliveryEvent[]) => {
   if (relay !== undefined) {
     try { await relay.forward(events); } catch (error: unknown) {
-      // A key failure is already logged once by the client, which is backing off.
+      // A key failure is already logged once by the client, which is backing
+      // off. The client counts the forwards dropped here, and the line that ends
+      // the wait reports the count. There is no line per event.
       if (!(error instanceof RelayKeyError)) console.error("relay forward failed", error);
     }
     return;
