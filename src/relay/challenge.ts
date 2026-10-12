@@ -1,4 +1,4 @@
-import { lookup as dnsLookup } from "node:dns/promises";
+import { Resolver as DnsResolver } from "node:dns/promises";
 import { request } from "node:https";
 import type { LookupFunction } from "node:net";
 import { isPublicAddress } from "./address.js";
@@ -15,7 +15,29 @@ const MAX_BODY_BYTES = 1024;
 export interface ResolvedAddress { address: string; family: number; }
 export type Resolver = (host: string) => Promise<ResolvedAddress[]>;
 
-const resolveAll: Resolver = (host) => dnsLookup(host, { all: true });
+// The two calls of a dns.promises.Resolver the relay uses. Tests pass a fake.
+export interface DnsClient { resolve4(host: string): Promise<string[]>; resolve6(host: string): Promise<string[]>; }
+
+// Asks the name servers directly with resolve4 and resolve6. dns.lookup is
+// avoided on purpose: it runs on the libuv thread pool (4 threads), and a few
+// hosts whose name server never answers would queue every other lookup in the
+// process, the relay's own push connections included. It also reads
+// /etc/hosts and the search domains, which a registration must not.
+// A host with neither an A nor an AAAA record fails. When one family fails and
+// the other answers, the answers that came are used.
+export function createPublicResolver(client: DnsClient = new DnsResolver({ timeout: 2000, tries: 1 })): Resolver {
+  return async (host) => {
+    const [v4, v6] = await Promise.allSettled([client.resolve4(host), client.resolve6(host)]);
+    const addresses: ResolvedAddress[] = [
+      ...(v4.status === "fulfilled" ? v4.value.map((address) => ({ address, family: 4 })) : []),
+      ...(v6.status === "fulfilled" ? v6.value.map((address) => ({ address, family: 6 })) : []),
+    ];
+    if (addresses.length === 0) throw new Error("no A or AAAA record");
+    return addresses;
+  };
+}
+
+const resolveAll: Resolver = createPublicResolver();
 
 // Tests pass a different address check, trust anchor, timeout and port (the
 // local test server cannot listen on 443 or 8443). The server

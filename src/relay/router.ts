@@ -23,6 +23,10 @@ function isCritical(body: RelayPayload): boolean {
 
 const REGISTRATION_RATE = { limit: 5, windowS: 60 };
 const REGISTRATION_DAILY_CAP = 20;
+// Challenge confirmations running at once. Each one holds a DNS query and a
+// connection to a host the caller picked, so the count stays small.
+const MAX_CONFIRMATIONS_IN_FLIGHT = 4;
+const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
 
 export interface RelayRouterOptions {
   // Lets a caller of POST /relay/v1/servers skip the challenge (api.md §4.1).
@@ -39,6 +43,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   const clock: Clock = options.clock ?? { now: () => Math.floor(Date.now() / 1000) };
   const secret = options.registrationSecret === undefined || options.registrationSecret === "" ? undefined : options.registrationSecret;
   const recent = new Map<string, number[]>();
+  let inFlight = 0;
 
   // True when this client may make another registration call. The rolling
   // window lives in memory. The daily count lives in SQLite so a restart does
@@ -90,8 +95,11 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     if (typeof body.challenge !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(body.challenge)) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
     const parsed = parseBaseUrl(body.base_url);
     if (parsed === undefined) { logRegistration("invalid base_url"); return c.json({ error: "invalid base_url" }, 400); }
-    if (!withinLimits(clientIp(c, options.behindProxy ?? false))) { logRegistration("rate limited", parsed.host); return c.json({ code: 42901, http: 429, error: "rate limited" }, 429); }
-    if (!await confirm(body.base_url, body.challenge)) { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
+    if (inFlight >= MAX_CONFIRMATIONS_IN_FLIGHT || !withinLimits(clientIp(c, options.behindProxy ?? false))) { logRegistration("rate limited", parsed.host); return c.json(RATE_LIMITED, 429); }
+    inFlight += 1;
+    let confirmed: boolean;
+    try { confirmed = await confirm(body.base_url, body.challenge); } finally { inFlight -= 1; }
+    if (!confirmed) { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
     const key = issueKey(body.base_url, body.version);
     logRegistration("issued", parsed.host);
     return c.json({ relay_key: key }, 201);
