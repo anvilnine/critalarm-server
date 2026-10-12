@@ -26,12 +26,15 @@ Two checks.
 
 1. **Registration proves `base_url` and names the relay.** The caller sends a random `challenge`.
    The relay calls `GET {base_url}/v1/relay-challenge/{challenge}` and issues a key only for a `200`
-   whose body carries the same `challenge` and a `relay` equal to the host the registration request
-   was called on (its `Host` header, lower case, with the port when it has one). A request with no
-   `Host` header is `422`. A stranger who registers somebody else's URL fails, because that server
+   whose body carries the same `challenge` and a `relay` that is one of the relay's own public host
+   names. The relay builds that list from configuration: the hosts of its `BASE_URL` and `RELAY_URL`
+   plus `RELAY_PUBLIC_HOSTS`, each made with the same `relayHost` function the challenge route uses,
+   so the case and default-port rules match on both sides. It never reads the `Host` header, which
+   the caller chooses. An empty list fails every challenge. A stranger who registers somebody else's URL fails, because that server
    answers `404` to a value it did not make. A second relay that receives a registration and replays
    the same `base_url` and `challenge` to the first fails too, because the server answered with the
-   host of the relay it was talking to, and that is not the first relay's host. The server takes
+   host of the relay it was talking to, and that is not one of the first relay's hosts, whatever
+   `Host` the replay carries. The server takes
    `relay` from the host of its `RELAY_URL`, and its client sends registration and push requests with
    redirects turned off, so a `RELAY_URL` that redirects cannot carry the body, the secret or the key
    to another address. It fails as a network error, and the log line says why.
@@ -62,7 +65,9 @@ A topic's hash is stored when the topic is created and never worked out again, s
 
 ### Alarms lost while registration waits
 
-A failed registration backs off for 30 seconds, doubling to one hour. The client logs one line for
+A failed registration backs off for 30 seconds, doubling to one hour. When the relay answers `429`
+the cap is 5 minutes, so a stranger who holds the relay's global limits cannot keep a keyless
+server out for an hour. The client logs one line for
 the first failure and again when the reason changes. It counts the forwards it drops for lack of a
 key, and the next registration line (a success, or a changed reason) carries the count as
 `skipped_forwards`. There is no line per event. No line holds the key, the secret, the challenge or
@@ -99,11 +104,12 @@ Keys issued before this version are marked `legacy` by the migration. They may p
   limit per target host, because one would let a stranger lock a real server out of registering.
 - With `BEHIND_PROXY=true` the client address comes from a header, so the origin must accept
   connections from the proxy only.
-- A registration body over 4096 bytes and a push body over 16384 bytes (a title and a body of 4096
-  bytes each fit) answer `400 invalid request`, judged by `content-length` and by the bytes read.
+- A registration body over 4096 bytes and a push body over 65536 bytes (JSON escaping can turn a
+  4096-byte body into 24 KB, and a title and body of that size must fit) answer `400 invalid request`, judged by `content-length` and by the bytes read.
 - `RELAY_REGISTRATION=closed` answers `403` to every call without the operator's secret and makes no outbound request.
-- The operator's secret skips the challenge, the address rules and the per-client limits. It keeps
-  the shape checks, and the key it gets is tied to its `base_url` like any other. Whoever holds it
+- The operator's secret skips the challenge, the address rules and the per-client limits. It checks
+  only that `base_url` and `version` are strings, that `base_url` is not empty and at most 200
+  characters, and that `version` is at most 200 characters. It does not parse `base_url`. The key it gets is tied to its `base_url` like any other. Whoever holds it
   can register any `base_url`, so it is for the operator's own servers and is never handed to anyone
   else. More than 5 wrong secrets in 60 seconds from one client answer `429`, so it cannot be
   guessed at any speed.
@@ -134,6 +140,7 @@ No code deletes these rows.
   knows a server's URL and a topic name. Such a person can subscribe a phone of their own to that
   hash and learn when the topic fires. If that server runs `relay-content: full`, they also read
   the title and body. A key cannot push to the topic, and nothing stops anyone listening to it.
+- **Upgrading a server that holds a key from before 1.20.0 can silence old topics.** The 1.20.0 server sends `topic` on every push, so the relay now checks the hash. A topic created under an older `BASE_URL` stops ringing after the upgrade, and the log says so once per topic.
 - **A server on a private network cannot register without the operator's secret.** The relay will not call a private address.
 - **A registration by challenge costs the relay a DNS query and a connection to a host the caller picks.** The limits above bound how many at a time and per minute. They do not stop a determined caller who uses many /64 networks, which is why the global limits exist.
 

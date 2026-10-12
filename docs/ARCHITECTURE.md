@@ -372,15 +372,16 @@ operator nothing at all to go on.
   and deletes any row they cannot attribute with
   `DELETE FROM relay_servers WHERE id = '<id>';`. The server never deletes
   these rows itself. The challenge answer names the relay it was made for, and
-  the relay accepts it only when that is the `Host` of the registration request.
+  the relay accepts it only when that is one of its own public host names. It
+  takes them from configuration (the hosts of `BASE_URL` and `RELAY_URL`, plus
+  `RELAY_PUBLIC_HOSTS`) and never from the request.
   Registration by challenge is
   limited to 5 calls per minute and 20 per day per client, where an IPv6
   client is its /64 and an IPv4-mapped IPv6 address is its IPv4, and to 60
   confirmations started per minute and 4 running at once across all clients.
   `RELAY_REGISTRATION=closed` shuts it to callers without the secret. The
   secret skips the challenge and every check on the `base_url`, so it is for the
-  operator's own servers and is never handed to anyone else. A reverse proxy in
-  front of the relay must pass the `Host` header through. With
+  operator's own servers and is never handed to anyone else. With
   `BEHIND_PROXY=true` the client address comes from a header, so the origin must
   accept connections from the proxy only. A per-server salt in the hash would
   close the subscribe gap above and needs an app change. Design note:

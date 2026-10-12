@@ -48,6 +48,7 @@ credential, which lives in the app. Source and docs:
 | - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller that sends no registration secret |
 | - | `RELAY_REGISTRATION_SECRET` | unset | A relay with this set also accepts a caller that sends it, with no challenge and no check on the `base_url` it names. Its holder can register any `base_url`, so it is for the operator's own servers and is never given to anyone else. A self-hosted server sends it when it is set. More than 5 wrong secrets in 60 seconds from one client answers 429 |
 | `behind-proxy` | `BEHIND_PROXY` | `false` | Read the client address from `cf-connecting-ip`, `x-forwarded-for` or `x-real-ip` for rate limits. With `true`, the origin must accept connections from the proxy only, because the address then comes from a header any caller can type |
+| - | `RELAY_PUBLIC_HOSTS` | unset | Relay and hosted modes. Comma-separated host names this relay answers to, added to the hosts of `BASE_URL` and `RELAY_URL`. A challenge answer must name one of them, or registration fails with 422. Set it when servers reach the relay under a name that is neither of those |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
 ## Self-hosting and the relay
@@ -67,7 +68,7 @@ For step 2 to work, `BASE_URL` must be a public `https` address with a host
 name (not an IP address) that the internet can reach, on port 443 or 8443 (443
 is the default), and your reverse proxy must pass `/v1/` through to the server.
 The challenge answer names the relay it was made for, taken from `RELAY_URL`.
-The relay accepts it only when that is the host it was called on, so
+The relay accepts it only when that is one of its own public host names, so
 `RELAY_URL` must be the relay's final address and must not redirect. An address
 that only works on a home network or a private overlay will not register.
 
