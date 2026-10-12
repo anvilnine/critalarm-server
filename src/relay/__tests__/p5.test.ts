@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRelayRouter } from "../router.js";
+import { topicHash } from "../hash.js";
 import { RelayClient, relayKeyHash } from "../client.js";
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
@@ -129,11 +130,14 @@ describe("relay push kind p5", () => {
     migrate(clientDb);
     try {
       const events: DeliveryEvent[] = [];
+      // The client sends the topic name, and the relay checks it against the hash.
+      const hash = topicHash("https://alerts.example.com", "prod");
+      db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_ios',?)").run(hash);
       const app = createRelayRouter(db, async (event) => { events.push(event); }, new Counters(db, { now: () => 1 }));
       clientDb.prepare("INSERT INTO relay_client_credentials (relay_url, relay_key, created_at) VALUES ('https://relay.test','rk_test',1)").run();
       const client = new RelayClient({ db: clientDb, relayUrl: "https://relay.test", baseUrl: "https://alerts.example.com", relayContent: "none", fetch: async (request) => app.request(request) });
 
-      await client.forward([{ kind: "p5", topicHash: remoteHash, topic: "prod", incidentId: "inc_remote", messageId: "m_remote", priority: 5, maxRingS: 60, ringUntil: 1_060, server: "https://alerts.example.com", title: "T", body: "B", critical: true }]);
+      await client.forward([{ kind: "p5", topicHash: hash, topic: "prod", incidentId: "inc_remote", messageId: "m_remote", priority: 5, maxRingS: 60, ringUntil: 1_060, server: "https://alerts.example.com", title: "T", body: "B", critical: true }]);
 
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ kind: "p5", incidentId: "inc_remote", ringUntil: 1_060 });
