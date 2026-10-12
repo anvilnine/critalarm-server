@@ -30,7 +30,7 @@ function newDb(): Database.Database {
   return db;
 }
 
-interface SelfHosted { app: ReturnType<typeof createApp>; db: Database.Database; client: RelayClient; lines: Record<string, unknown>[]; errors: unknown[]; baseUrl: string; topic(name: string): Promise<string>; publish(name: string, token: string, priority?: string): Promise<Response>; }
+interface SelfHosted { app: ReturnType<typeof createApp>; db: Database.Database; client: RelayClient; lines: Record<string, unknown>[]; errors: unknown[]; baseUrl: string; topic(name: string): Promise<string>; publish(name: string, token: string, priority?: string): Response | Promise<Response>; }
 
 function world(options: { registration?: "open" | "closed" } = {}) {
   const relayDb = newDb();
