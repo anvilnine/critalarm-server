@@ -310,3 +310,27 @@ function expireOf({ clock, service }: { clock: { value: number }; service: Incid
   expect(events.map((event) => event.kind)).toEqual(["expire"]);
   return events[0]!.ringUntil;
 }
+
+// api.md §4.1. A self-hosted server sends the topic's name with every push, so
+// every event the incident machine emits has to carry it, from every source.
+describe("topic name on delivery events", () => {
+  it("is set on open, p5, repeat, reopen, ack, close and expire", () => {
+    const { clock, service } = setup();
+    const opened = service.publishCritical(publication());
+    const joined = service.publishCritical(publication("Cache", "cache01 is down"));
+    clock.value = 1_010;
+    const repeated = service.scanDue();
+    const acked = service.acknowledge("acc_1", opened.incident.id);
+    clock.value = 1_040;
+    const reopened = service.scanDue();
+    const closed = service.close("acc_1", opened.incident.id);
+    const expireSetup = setup();
+    expireSetup.service.publishCritical(publication());
+    expireSetup.clock.value = 1_060;
+    const expired = expireSetup.service.scanDue();
+
+    const events = [...opened.events, ...joined.events, ...repeated, ...acked.events, ...reopened, ...closed.events, ...expired];
+    expect(events.map((event) => event.kind)).toEqual(["open", "p5", "repeat", "ack", "reopen", "close", "expire"]);
+    expect(events.map((event) => event.topic)).toEqual(Array(7).fill("prod"));
+  });
+});
