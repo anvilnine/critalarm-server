@@ -3,6 +3,43 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.20.0 - 2026-10-13
+
+### Added
+
+- `challenge` on `POST /relay/v1/servers` (§4.1). The relay calls
+  `GET {base_url}/v1/relay-challenge/{challenge}` and issues a key only when
+  the server answers with the same value.
+- `GET /v1/relay-challenge/{challenge}` on the server (§3.8), no auth. It
+  answers `200` for the value of the registration in flight and `404` for
+  anything else.
+- `topic` on `POST /relay/v1/push` (§4.1), the topic's name. The relay
+  checks it against `topic_hash` and the key's `base_url`, then drops it.
+- Errors `invalid base_url` (`400`), `challenge failed` (`422`),
+  `registration closed` (`403`) and `topic mismatch` (`403`) (§1.8, §4.1).
+- Rules for `base_url` at registration: `https`, a host name, public
+  addresses only, no credentials, query, fragment or trailing `/`, at most
+  200 characters (§4.1).
+
+### Changed
+
+- A relay key is no longer issued to anyone who asks. It is issued to a
+  server that proves it answers at its `base_url`, with no secret from the
+  relay's operator. The relay's code had refused strangers since the relay
+  was hardened, so 1.19.0 said "anonymously" and no relay did it.
+- A relay key pushes only topics of the server it was registered for. A
+  push whose `topic_hash` is not `sha256(base_url + "/" + topic)` answers
+  `403 {"error":"topic mismatch"}`.
+- One key per `base_url`. A new registration that passes the challenge
+  replaces the old key, which then answers `401`.
+- The relay sees a topic's name on every push. 1.19.0 sent it the hash
+  only. The relay does not store, log or forward the name.
+- Compatibility. The app sends and receives nothing new. A key issued
+  before 1.20.0 keeps working without `topic`. A 1.19.0 server that asks
+  for a new key gets `400`, because it sends no `challenge`. A 1.20.0
+  server that pushes to a 1.19.0 relay is accepted: that relay ignores the
+  two new fields.
+
 ## 1.19.0 - 2026-10-09
 
 ### Added

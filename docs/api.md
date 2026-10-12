@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.19.0
+**Version:** 1.20.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.20.0** lets a self-hosted server get a relay key without a secret from the relay's operator, and ties every relay key to one server. Three changes, all in §4.1 and the new §3.8. First, registration carries a `challenge`. The relay calls the server back at its `base_url` and issues a key only when the server answers with the same value, so a key is proof that its holder answers at that `base_url`. Second, a push carries `topic`, the topic's name. The relay works out `sha256(base_url + "/" + topic)` from the `base_url` the key was registered with and refuses a push whose `topic_hash` is anything else, so a key can only ring subscribers of its own server's topics. Until now any key holder could push any hash it could compute, which is why registration was closed to strangers. Third, a server answers `GET /v1/relay-challenge/{challenge}` (§3.8). The relay now sees a topic's name while it checks a push. It does not store it, log it or send it on. The app is untouched: it sends and receives nothing new. A server built for 1.19.0 that holds a key from before this version keeps pushing as it did. A server built for 1.19.0 that asks for a new key is refused with `400`, because it sends no `challenge`.
 
 **1.19.0** moves the weekly check from the `pro` pack to the Hosted tier. A device is sent checks only while its account's tier is `hosted` (§4.5). `free` does not get them, and neither does `relay`, which has the same caps as `hosted` but is not the Hosted plan. Hosted and the `pro` pack are separate and neither includes the other, so holding `pro` no longer gets a device a check and a Hosted account needs no pack for one. `PUT .../check` with `"enabled":true` on any other tier answers `403 {"error":"tier","tier":"hosted"}`, a new error (§1.8), where 1.18.0 answered `{"error":"pack","pack":"pro"}`. The `reason` value `"pack"` becomes `"tier"` in both places it appeared: on `GET .../check` beside `"state":"off"`, and on a round that closed as `skipped`. A phone on a self-hosted server cannot get the weekly check, because no plan is sold there. Packs are untouched: `packs`, `GET /relay/v1/packs`, `POST /relay/v1/packs/refresh` and the `pack` error stay as they were, and no route in this version answers the `pack` error. This version changes what 1.18.0 said and adds no route and no field. An app built for 1.18.0 meets a `403` with no `pack` field and a `reason` it does not know. It reads the first as a switch that failed and the second as no reason, so it shows the check as off and never as working.
 
@@ -177,6 +179,10 @@ Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code.
 | `{"error":"cap","cap":"..."}` | `429` from a cap (§4.2) |
 | `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2). No route answers it in 1.19.0 |
 | `{"error":"tier","tier":"..."}` | `403` from a route that needs a tier the account is not on. `tier` names the tier the route needs (§4.5) |
+| `{"error":"invalid base_url"}` | `400` from relay registration when `base_url` breaks the rules in §4.1 |
+| `{"error":"challenge failed"}` | `422` from relay registration when the relay could not confirm the challenge at `base_url` (§4.1) |
+| `{"error":"registration closed"}` | `403` from relay registration when the relay's operator has closed it (§4.1) |
+| `{"error":"topic mismatch"}` | `403` from a relay push whose `topic_hash` is not the hash of `topic` under the key's `base_url` (§4.1) |
 
 ---
 
@@ -508,6 +514,18 @@ Doing it any other way bricks the handset. Clearing `dv_` while keeping `device_
 
 One constraint does go, on purpose. `account_identities.account_id` stops being unique, because an account holding two identities is the whole point of 1.14.0. `user_id` stays the primary key: one sign-in identity still points at exactly one account, and that is what makes `linked` and `already_linked` tell apart.
 
+### 3.8 Relay challenge
+
+```
+GET /v1/relay-challenge/{challenge}          // no auth
+→ 200 { "challenge":"<the same value>" }
+→ 404 {"error":"not found"}
+```
+
+The server's half of relay registration (§4.1). A server makes a random `challenge` just before it asks a relay for a key, and answers `200` for that value only, and only until the registration call returns or 60 seconds pass, whichever is first. Every other value answers `404`, including one the server made earlier. The route needs no auth because the relay holds no credential for the server yet, and it gives nothing away: a caller learns only whether a value it already knows is the one in flight.
+
+A server in `relay` or `hosted` mode never asks another relay for a key, so it answers `404` to everything here.
+
 ## 4. Relay API
 
 Only served when push credentials are configured (relay and hosted modes).
@@ -516,10 +534,11 @@ Only served when push credentials are configured (relay and hosted modes).
 
 ```
 POST /relay/v1/push
-Authorization: Bearer rk_...                 // relay key. issued anonymously on first call to POST /relay/v1/servers
+Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/servers below
 
 {
   "topic_hash": "sha256hex",                 // sha256(base_url + "/" + topic)
+  "topic": "prod",                           // the topic's name. checked against topic_hash, then dropped
   "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
   "message_id": "m_7f3k2p9q",
   "priority": 5,
@@ -530,14 +549,37 @@ Authorization: Bearer rk_...                 // relay key. issued anonymously on
   "body": "..."                              // only when relay_content: full
 }
 → 202
+→ 400 {"error":"invalid request"}            // includes a missing or malformed topic
+→ 401 {"error":"unauthorized"}               // no key, an unknown key, or a key that was replaced
+→ 403 {"error":"topic mismatch"}
 → 429 {"error":"cap", "cap":"critical_topics"|"devices"|"p4_daily"}
 ```
 
+**A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must be a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
+
+A key issued before 1.20.0 has no proven `base_url` behind it. The relay still accepts a push from one without `topic`, and checks `topic` when it is sent. Every key issued from 1.20.0 on needs `topic` on every push.
+
 ```
-POST /relay/v1/servers
-  { "base_url":"https://alerts.example.com", "version":"0.1.0" }
+POST /relay/v1/servers                       // no auth
+  { "base_url":"https://alerts.example.com", "version":"0.5.0",
+    "challenge":"<32 to 128 characters of [A-Za-z0-9_-]>" }
 → 201 { "relay_key":"rk_..." }
+→ 400 {"error":"invalid request"}            // a missing field, or a challenge of the wrong shape
+→ 400 {"error":"invalid base_url"}
+→ 403 {"error":"registration closed"}
+→ 422 {"error":"challenge failed"}
+→ 429 {"code":42901,"http":429,"error":"rate limited"}
 ```
+
+**Registration proves the server answers at `base_url`.** Before it answers, the relay sends `GET {base_url}/v1/relay-challenge/{challenge}` (§3.8) and issues a key only for `200 {"challenge":"<the same value>"}`. Anything else, a timeout, a redirect or a body that does not match is `422 {"error":"challenge failed"}`. A stranger who registers somebody else's `base_url` fails here, because that server answers `404` to a value it did not make. The server makes a fresh random `challenge` for every attempt, at least 32 characters from a cryptographic source.
+
+`base_url` rules. It is the server's own `base_url`, the same string `GET /v1/info` reports and the app hashes with. It must be `https`, name a host and not an IP address, carry no user name, password, query or fragment, not end in `/`, and be at most 200 characters. A path is allowed. The host must resolve to public addresses only: the relay does not call a loopback, private, link-local or otherwise reserved address, and does not follow redirects. A `base_url` that breaks a rule is `400 {"error":"invalid base_url"}`. So a server that only answers on a home network or a private overlay cannot get a key this way.
+
+**One key per `base_url`.** A registration that passes the challenge for a `base_url` that already has a key gets a new key, and the old one answers `401` from then on. This is how a server that lost its database gets back on the relay. A server that gets `401` on a push throws its key away and registers again.
+
+The relay limits how often one client address may call this route and answers `429` over the limit. Its operator can close registration, and then every call answers `403 {"error":"registration closed"}`. An operator can also give out a registration secret: a call that carries it as `Authorization: Bearer <secret>` skips the challenge and the address rules, for a server the operator runs on a private network. The key it gets is tied to its `base_url` like any other, and needs `topic` on every push.
+
+A server that cannot get a key retries with growing gaps between attempts, never on every forward, and writes to its log what failed and what to check.
 
 ### 4.2 App → relay
 
