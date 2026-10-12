@@ -75,7 +75,7 @@ describe("registration challenge", () => {
     });
     client = harness.client;
     const challenge = (await (async () => { await client.forwardOne(baseEvent); return harness.registrations()[0]!.body as { challenge: string }; })()).challenge;
-    expect(seen[0]).toEqual({ status: 200, body: { challenge } });
+    expect(seen[0]).toEqual({ status: 200, body: { challenge, relay: "relay.test" } });
     expect(seen[1]).toEqual({ status: 404, body: { error: "not found" } });
     expect(seen[2]).toEqual({ status: 404, body: { error: "not found" } });
     // The call has returned, so the same value no longer answers.
@@ -84,6 +84,25 @@ describe("registration challenge", () => {
     expect(after.status).toBe(404);
     expect(await after.json()).toEqual({ error: "not found" });
     harness.db.close();
+  });
+
+  it("names the host of the relay URL in lower case, with the port when the URL has one", async () => {
+    for (const [relayUrl, relay] of [["https://Relay.Example.COM", "relay.example.com"], ["https://relay.example.com:8443/", "relay.example.com:8443"], ["https://relay.example.com:443", "relay.example.com"]] as const) {
+      const db = openDatabase(":memory:"); migrate(db);
+      const appDb = openDatabase(":memory:"); migrate(appDb);
+      let seen: unknown;
+      const client: RelayClient = new RelayClient({ db, relayUrl, baseUrl: "https://a.test", relayContent: "none", fetch: async (request: Request) => {
+        if (!request.url.endsWith("/servers")) return new Response(null, { status: 202 });
+        const value = (JSON.parse(await request.clone().text()) as { challenge: string }).challenge;
+        const config = { baseUrl: "https://a.test", relayUrl, relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false, mode: "selfhosted" as const };
+        const app = createApp({ config, db: appDb, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {}, relayChallenge: (v: string) => client.isRelayChallenge(v) });
+        seen = await (await app.request(`/v1/relay-challenge/${value}`, {}, env)).json();
+        return json(201, { relay_key: "rk_x" });
+      } });
+      await client.forwardOne(baseEvent).catch(() => undefined);
+      expect(seen, relayUrl).toMatchObject({ relay });
+      db.close(); appDb.close();
+    }
   });
 
   it("stops answering after 60 seconds even while the call is still out", async () => {
@@ -155,6 +174,47 @@ describe("topic on the wire", () => {
     const { client, pushes, db } = setup(accepting, { relayContent: "full" });
     await client.forwardOne(baseEvent);
     expect(pushes()[0]!.body).toMatchObject({ topic: "prod", title: "T", body: "B" });
+    db.close();
+  });
+});
+
+describe("redirects", () => {
+  const redirect = () => new TypeError("fetch failed", { cause: new Error("unexpected redirect") });
+
+  it("sends the registration and the push with redirect set to error", async () => {
+    const modes: string[] = [];
+    const { client, db } = setup((request) => { modes.push(request.redirect); return accepting(request); }, { secret: "s3cret" });
+    await client.forwardOne(baseEvent);
+    expect(modes).toEqual(["error", "error"]);
+    db.close();
+  });
+
+  it("fails a registration that meets a redirect as a network failure with its own reason, once, and backs off", async () => {
+    const { client, logs, fetcher, advance, db } = setup(() => { throw redirect(); }, { secret: "s3cret-value" });
+    await expect(client.forwardOne(baseEvent)).rejects.toBeInstanceOf(RelayKeyError);
+    await expect(client.forwardOne(baseEvent)).rejects.toBeInstanceOf(RelayKeyError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ event: "relay_registration_failed", reason: "redirect" });
+    expect(String(logs[0]!.message)).toContain("RELAY_URL");
+    expect(JSON.stringify(logs)).not.toContain("s3cret-value");
+    advance(31_000);
+    await expect(client.forwardOne(baseEvent)).rejects.toBeInstanceOf(RelayKeyError);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(logs).toHaveLength(1);
+    db.close();
+  });
+
+  it("fails a push that meets a redirect with a message that says so, and keeps the key", async () => {
+    const { client, db } = setup((request) => { if (request.url.endsWith("/servers")) return json(201, { relay_key: "rk_x" }); throw redirect(); });
+    await expect(client.forwardOne(baseEvent)).rejects.toThrow(/redirect/);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM relay_client_credentials").get()).toEqual({ n: 1 });
+    db.close();
+  });
+
+  it("leaves other network errors alone", async () => {
+    const { client, db } = setup((request) => { if (request.url.endsWith("/servers")) return json(201, { relay_key: "rk_x" }); throw new TypeError("fetch failed", { cause: new Error("ECONNREFUSED") }); });
+    await expect(client.forwardOne(baseEvent)).rejects.toThrow("fetch failed");
     db.close();
   });
 });

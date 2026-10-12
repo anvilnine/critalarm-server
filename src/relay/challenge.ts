@@ -5,9 +5,10 @@ import { isPublicAddress } from "./address.js";
 import { parseBaseUrl } from "./base-url.js";
 
 // api.md §4.1. Confirms that the server at base_url made this challenge.
-// Resolves to true only for a 200 whose JSON body carries the same value.
-// Every other outcome is false and never an exception.
-export type ChallengeConfirmer = (baseUrl: string, challenge: string) => Promise<boolean>;
+// Resolves to true only for a 200 whose JSON body carries the same challenge
+// and names this relay: `relay` must equal relayHost, the host the registration
+// request was called on. Every other outcome is false and never an exception.
+export type ChallengeConfirmer = (baseUrl: string, challenge: string, relayHost: string) => Promise<boolean>;
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 1024;
@@ -48,7 +49,7 @@ export interface ConfirmerOptions { isPublic?: (address: string) => boolean; ca?
 export function createChallengeConfirmer(resolve: Resolver = resolveAll, options: ConfirmerOptions = {}): ChallengeConfirmer {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const isPublic = options.isPublic ?? isPublicAddress;
-  return async (baseUrl, challenge) => {
+  return async (baseUrl, challenge, relayHost) => {
     const parsed = parseBaseUrl(baseUrl);
     if (parsed === undefined) return false;
     // One deadline for DNS, connect, TLS, headers and body together. When it
@@ -59,7 +60,7 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
     const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
     const deadline = new Promise<false>((done) => { controller.signal.addEventListener("abort", () => { done(false); }, { once: true }); });
     try {
-      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, controller.signal, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
+      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, controller.signal, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge, relayHost)]);
     } catch {
       return false;
     } finally {
@@ -70,7 +71,7 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
   };
 }
 
-async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, signal: AbortSignal, host: string, port: number, path: string, challenge: string): Promise<boolean> {
+async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, signal: AbortSignal, host: string, port: number, path: string, challenge: string, relayHost: string): Promise<boolean> {
   const addresses = await resolve(host);
   if (signal.aborted) return false;
   if (addresses.length === 0 || !addresses.every((entry) => isPublic(entry.address))) return false;
@@ -95,7 +96,8 @@ async function attempt(resolve: Resolver, isPublic: (address: string) => boolean
       res.on("end", () => {
         try {
           const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-          done(typeof body === "object" && body !== null && (body as { challenge?: unknown }).challenge === challenge);
+          const answer = body as { challenge?: unknown; relay?: unknown } | null;
+          done(typeof answer === "object" && answer !== null && answer.challenge === challenge && answer.relay === relayHost);
         } catch { done(false); }
       });
       res.on("error", () => done(false));

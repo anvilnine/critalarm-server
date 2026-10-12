@@ -41,19 +41,26 @@ function world(options: { registration?: "open" | "closed" } = {}) {
   const relayCalls: string[] = [];
   const confirmed: boolean[] = [];
   // The real confirmer's accept rule: status 200 and a JSON body that carries
-  // the same challenge. The call goes to the self-hosted app that answers at
-  // that base_url, if any.
-  const confirmChallenge = async (baseUrl: string, challenge: string): Promise<boolean> => {
+  // the same challenge and names the host the registration was called on. The
+  // call goes to the self-hosted app that answers at that base_url, if any.
+  const confirmChallenge = async (baseUrl: string, challenge: string, relayHost: string): Promise<boolean> => {
     const target = servers.get(baseUrl);
     if (target === undefined) return false;
     const response = await target.app.request(`${baseUrl}/v1/relay-challenge/${challenge}`);
-    const body = await response.json().catch(() => undefined) as { challenge?: unknown } | undefined;
-    const ok = response.status === 200 && body?.challenge === challenge;
+    const body = await response.json().catch(() => undefined) as { challenge?: unknown; relay?: unknown } | undefined;
+    const ok = response.status === 200 && body?.challenge === challenge && body?.relay === relayHost;
     confirmed.push(ok);
     return ok;
   };
   const router = createRelayRouter(relayDb, async (event) => { await dispatcher.dispatch([event]); }, new Counters(relayDb, { now: () => 1 }), { confirmChallenge, ...(options.registration === undefined ? {} : { registration: options.registration }) });
-  const relayFetch = async (request: Request): Promise<Response> => { relayCalls.push(`${request.method} ${new URL(request.url).pathname}`); return router.request(request); };
+  // A real request carries a Host header, and the relay reads it. The test
+  // transport adds the one a client would send.
+  const toRouter = (request: Request): Promise<Response> | Response => {
+    const headers = new Headers(request.headers);
+    headers.set("host", new URL(request.url).host);
+    return router.request(new Request(request, { headers }));
+  };
+  const relayFetch = async (request: Request): Promise<Response> => { relayCalls.push(`${request.method} ${new URL(request.url).pathname}`); return toRouter(request); };
   let phones = 0;
   const phone = (hash: string, accountId = `acc_${++phones}`): string => {
     relayDb.prepare("INSERT OR IGNORE INTO accounts (id,tier,created_at) VALUES (?,'hosted',1)").run(accountId);
@@ -63,12 +70,12 @@ function world(options: { registration?: "open" | "closed" } = {}) {
     return id;
   };
   const clock = { ms: 1_700_000_000_000 };
-  function selfHosted(baseUrl: string, db: Database.Database = newDb(), register = true) {
+  function selfHosted(baseUrl: string, db: Database.Database = newDb(), register = true, via: { relayUrl: string; fetch: (request: Request) => Promise<Response> } = { relayUrl: RELAY_URL, fetch: relayFetch }) {
     const identity = ensureSelfHostedIdentity(db);
     const lines: Record<string, unknown>[] = [];
     const errors: unknown[] = [];
-    const client = new RelayClient({ db, relayUrl: RELAY_URL, baseUrl, relayContent: "none", fetch: relayFetch, now: () => clock.ms, log: (line) => { lines.push(line); } });
-    const config: Config = { mode: "selfhosted", baseUrl, relayUrl: RELAY_URL, relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false };
+    const client = new RelayClient({ db, relayUrl: via.relayUrl, baseUrl, relayContent: "none", fetch: via.fetch, now: () => clock.ms, log: (line) => { lines.push(line); } });
+    const config: Config = { mode: "selfhosted", baseUrl, relayUrl: via.relayUrl, relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false };
     const ids = { message: () => `m_${crypto.randomUUID()}`, incident: () => `inc_${crypto.randomUUID()}`, timer: () => `tm_${crypto.randomUUID()}` };
     // The wrapper in main.ts: a forward that throws is recorded, never raised.
     const dispatch = async (events: readonly DeliveryEvent[]) => { try { await client.forward(events); } catch (error: unknown) { errors.push(error); } };
@@ -87,7 +94,7 @@ function world(options: { registration?: "open" | "closed" } = {}) {
   }
   const rawPush = (key: string, body: Record<string, unknown>) => router.request("/relay/v1/push", { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ incident_id: "inc_x", message_id: "m_x", priority: 5, kind: "open", ring_until: 2_000_000_000, ...body }) });
   const keyOf = (server: SelfHosted): string => (server.db.prepare("SELECT relay_key FROM relay_client_credentials WHERE relay_url = ?").get(RELAY_URL) as { relay_key: string } | undefined)?.relay_key ?? "";
-  return { relayDb, router, sent, servers, relayCalls, confirmed, phone, selfHosted, rawPush, keyOf, clock };
+  return { relayDb, router, sent, servers, relayCalls, confirmed, phone, selfHosted, rawPush, keyOf, clock, toRouter };
 }
 
 const A = "https://a.example.com";
@@ -158,6 +165,38 @@ describe("a self-hosted server and the relay, joined", () => {
     await b.publish("prod", tokenB);
     expect(b.errors).toEqual([]);
     expect(w.sent.map((entry) => entry.device)).toEqual([phoneB, phoneB]);
+  });
+
+  it("refuses a registration that a second relay replays to the first, because the challenge names the second relay", async () => {
+    const w = world();
+    const replayed: { status: number; body: unknown }[] = [];
+    // A second relay that is not the one RELAY_URL names. It receives the
+    // server's registration and sends the same base_url and challenge on to the
+    // first relay, as a hostile operator would.
+    const secondRelay = async (request: Request): Promise<Response> => {
+      const text = await request.clone().text();
+      const response = await w.router.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", host: new URL(RELAY_URL).host }, body: text });
+      replayed.push({ status: response.status, body: await response.clone().json() });
+      return response;
+    };
+    const a = w.selfHosted(A, newDb(), true, { relayUrl: "https://second-relay.example.net", fetch: secondRelay });
+    const token = await a.topic("prod");
+    w.phone(topicHash(A, "prod"));
+
+    expect((await a.publish("prod", token)).status).toBe(200);
+
+    expect(replayed).toEqual([{ status: 422, body: { error: "challenge failed" } }]);
+    expect(w.confirmed).toEqual([false]);
+    expect(w.relayDb.prepare("SELECT COUNT(*) AS n FROM relay_servers").get()).toEqual({ n: 0 });
+    expect(a.lines.map((line) => line.reason)).toEqual(["challenge_failed"]);
+    expect(w.sent).toEqual([]);
+
+    // Called as itself, the same server gets its key from the same relay.
+    const own = w.selfHosted(B);
+    const tokenOwn = await own.topic("prod");
+    await own.publish("prod", tokenOwn);
+    expect(w.keyOf(own)).toMatch(/^rk_/);
+    expect(w.confirmed).toEqual([false, true]);
   });
 
   it("stops a key holder from ringing another server's phone", async () => {
