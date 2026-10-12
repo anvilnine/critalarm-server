@@ -17,10 +17,11 @@ export type Resolver = (host: string) => Promise<ResolvedAddress[]>;
 
 const resolveAll: Resolver = (host) => dnsLookup(host, { all: true });
 
-// Tests pass a different address check, trust anchor and timeout. The server
+// Tests pass a different address check, trust anchor, timeout and port (the
+// local test server cannot listen on 443 or 8443). The server
 // builds its confirmer with none of them, and nothing reads them from the
 // environment.
-export interface ConfirmerOptions { isPublic?: (address: string) => boolean; ca?: string | Buffer; timeoutMs?: number; }
+export interface ConfirmerOptions { isPublic?: (address: string) => boolean; ca?: string | Buffer; timeoutMs?: number; port?: number; }
 
 export function createChallengeConfirmer(resolve: Resolver = resolveAll, options: ConfirmerOptions = {}): ChallengeConfirmer {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -31,7 +32,7 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll, options
     let timer: NodeJS.Timeout | undefined;
     const deadline = new Promise<false>((done) => { timer = setTimeout(() => done(false), timeoutMs); });
     try {
-      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, parsed.host, parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
+      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, parsed.host, options.port ?? parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
     } catch {
       return false;
     } finally {

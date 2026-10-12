@@ -55,8 +55,10 @@ describe("the challenge confirmer over HTTPS", () => {
   beforeEach(() => { seen.hits = 0; seen.host = undefined; seen.sni = undefined; seen.path = undefined; });
 
   const resolve = async () => [{ address: "127.0.0.1", family: 4 }];
-  const confirmer = (timeoutMs = 2000) => createChallengeConfirmer(resolve, { isPublic: () => true, ca: cert, timeoutMs });
-  const url = () => `https://${HOST}:${port}/crit`;
+  const confirmer = (timeoutMs = 2000) => createChallengeConfirmer(resolve, { isPublic: () => true, ca: cert, timeoutMs, port });
+  // The base_url names the default port. The test server listens elsewhere, so
+  // the confirmer is told which port to connect to.
+  const url = () => `https://${HOST}/crit`;
   const json = (body: unknown) => (_req: IncomingMessage, res: ServerResponse) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
 
   it("confirms a 200 with the same challenge, connecting to the vetted address with the right Host and SNI", async () => {
@@ -97,12 +99,12 @@ describe("the challenge confirmer over HTTPS", () => {
 
   it("fails when the certificate is not trusted", async () => {
     respond = json({ challenge });
-    expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000 })(url(), challenge)).toBe(false);
+    expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000, port })(url(), challenge)).toBe(false);
   });
 
   it("refuses the loopback address in its default configuration", async () => {
     respond = json({ challenge });
-    expect(await createChallengeConfirmer(resolve, { ca: cert })(url(), challenge)).toBe(false);
+    expect(await createChallengeConfirmer(resolve, { ca: cert, port })(url(), challenge)).toBe(false);
     expect(seen.hits).toBe(0);
   });
 });
