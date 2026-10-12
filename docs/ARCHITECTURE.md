@@ -364,9 +364,10 @@ operator nothing at all to go on.
   `base_url` (`GET /v1/relay-challenge/{challenge}`), or by sending the
   operator's `RELAY_REGISTRATION_SECRET`. The relay keeps the `base_url` with
   the key and checks every push: `sha256(base_url + "/" + topic)` must equal
-  `topic_hash`, or the answer is `403 topic mismatch`. Registration is limited
-  to 5 calls per minute and 20 per day per client address, and
-  `RELAY_REGISTRATION=closed` shuts it. A per-server salt in the hash would
+  `topic_hash`, or the answer is `403 topic mismatch`. A key issued before
+  contract 1.20.0 may still push without `topic`. Registration by challenge is
+  limited to 5 calls per minute and 20 per day per client address, and
+  `RELAY_REGISTRATION=closed` shuts it to callers without the secret. A per-server salt in the hash would
   close the subscribe gap above and needs an app change. Design note:
   `docs/specs/relay-registration.md`.
 - Device routes need the device token issued at registration. Registration
