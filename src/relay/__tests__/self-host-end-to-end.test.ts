@@ -30,7 +30,7 @@ function newDb(): Database.Database {
   return db;
 }
 
-type SelfHosted = ReturnType<typeof selfHosted>;
+interface SelfHosted { app: ReturnType<typeof createApp>; db: Database.Database; client: RelayClient; lines: Record<string, unknown>[]; errors: unknown[]; baseUrl: string; topic(name: string): Promise<string>; publish(name: string, token: string, priority?: string): Promise<Response>; }
 
 function world(options: { registration?: "open" | "closed" } = {}) {
   const relayDb = newDb();
@@ -73,7 +73,7 @@ function world(options: { registration?: "open" | "closed" } = {}) {
     // The wrapper in main.ts: a forward that throws is recorded, never raised.
     const dispatch = async (events: readonly DeliveryEvent[]) => { try { await client.forward(events); } catch (error: unknown) { errors.push(error); } };
     const app = createApp({ config, db, clock: { now: () => Math.floor(clock.ms / 1000) }, ids, dispatch, relayChallenge: (value) => client.isRelayChallenge(value) });
-    const server = {
+    const server: SelfHosted = {
       app, db, client, lines, errors, baseUrl,
       async topic(name: string): Promise<string> {
         const made = await app.request("/v1/topics", { method: "POST", headers: { authorization: `Bearer ${identity.token}`, "content-type": "application/json" }, body: JSON.stringify({ name, critical: true }) });
