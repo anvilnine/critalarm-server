@@ -48,6 +48,37 @@ credential, which lives in the app. Source and docs:
 | - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller without `RELAY_REGISTRATION_SECRET` |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
+## Self-hosting and the relay
+
+A self-hosted server forwards each alarm to a relay (`RELAY_URL`), which passes
+it on to the phone. The server needs a relay key for that, and gets one on its
+own:
+
+1. At startup, once the server is listening, it asks the relay for a key and
+   sends `BASE_URL` with a random challenge.
+2. The relay calls back `BASE_URL/v1/relay-challenge/<challenge>` and checks
+   that the server answers with the same value.
+3. The relay issues a key, and the server stores it.
+
+For step 2 to work, `BASE_URL` must be a public `https` address with a host
+name (not an IP address) that the internet can reach, and your reverse proxy
+must pass `/v1/` through to the server. An address that only works on a home
+network or a private overlay will not register.
+
+If registration fails, the server writes one JSON line to its log with the
+event `relay_registration_failed`, the reason and what to check. It writes the
+line again only when the reason changes. After a failure it waits 30 seconds
+before the next attempt, doubling the wait up to one hour, so a wrong
+`BASE_URL` does not hammer the relay. A success is logged as `relay_registered`.
+If the relay replaces or forgets the key, the server registers again by itself.
+If you change `BASE_URL`, the relay answers `topic mismatch` to the old key.
+The server logs `relay_topic_mismatch`, deletes the key and registers again
+with the new address on the next alarm.
+
+Each push to the relay carries the topic name. The relay uses it to check that
+the topic hash belongs to your server, then drops it. With `RELAY_CONTENT=none`
+(the default) the relay never sees the title or body of an alert.
+
 ## Run it
 
 ```bash
