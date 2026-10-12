@@ -1,3 +1,4 @@
+import { relayHost } from "./relay/host.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -64,6 +65,8 @@ export interface Config {
   statsKey?: string;
   relayRegistrationSecret?: string;
   relayRegistration?: "open" | "closed";
+  // Extra public host names of this relay, beyond the hosts of base-url and relay-url.
+  relayPublicHosts?: string[];
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -281,6 +284,12 @@ function weeklyChecksValue(value: string | undefined): boolean {
   return false;
 }
 
+function relayPublicHosts(value: string | undefined): string[] {
+  const hosts = (value ?? "").split(",").map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== "");
+  for (const host of hosts) if (!/^[a-z0-9.-]+(:[0-9]{1,5})?$/.test(host) || relayHost(`https://${host}`) === undefined) throw configError("RELAY_PUBLIC_HOSTS");
+  return hosts.map((host) => relayHost(`https://${host}`) ?? host);
+}
+
 function relayRegistrationValue(value: string | undefined): "open" | "closed" {
   if (value === undefined || value === "" || value === "open") return "open";
   if (value !== "closed") throw configError("RELAY_REGISTRATION");
@@ -436,6 +445,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     // challenge (api.md §4.1). Unset means every caller proves its base_url.
     ...(env.RELAY_REGISTRATION_SECRET === undefined || env.RELAY_REGISTRATION_SECRET === "" ? {} : { relayRegistrationSecret: env.RELAY_REGISTRATION_SECRET }),
     relayRegistration: relayRegistrationValue(env.RELAY_REGISTRATION),
+    // api.md §4.1. Host names a challenge answer may name as this relay, beyond
+    // the hosts of BASE_URL and RELAY_URL. Comma-separated.
+    ...(relayPublicHosts(env.RELAY_PUBLIC_HOSTS).length === 0 ? {} : { relayPublicHosts: relayPublicHosts(env.RELAY_PUBLIC_HOSTS) }),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: revenueCatEntitlements } }),

@@ -19,7 +19,7 @@ function setup(options: RelayRouterOptions = {}, db = openDatabase(":memory:")) 
   migrate(db);
   const confirm = vi.fn(async () => true);
   const clock = { t: 1_800_000_000 };
-  const app = createRelayRouter(db, vi.fn(async () => {}), new Counters(db, { now: () => 1 }), { behindProxy: true, confirmChallenge: confirm, clock: { now: () => clock.t }, ...options });
+  const app = createRelayRouter(db, vi.fn(async () => {}), new Counters(db, { now: () => 1 }), { behindProxy: true, confirmChallenge: confirm, publicHosts: [HOST], clock: { now: () => clock.t }, ...options });
   return { db, app, confirm, clock };
 }
 
@@ -37,27 +37,25 @@ describe("relay server registration without a secret", () => {
       const response = await register(app);
       expect(response.status).toBe(201);
       expect(await response.json()).toEqual({ relay_key: expect.stringMatching(/^rk_[0-9a-f]{32}$/) });
-      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, HOST);
+      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, [HOST]);
       expect(db.prepare("SELECT base_url, version, legacy FROM relay_servers").all()).toEqual([{ base_url: BASE, version: "0.1.0", legacy: 0 }]);
     } finally { db.close(); }
   });
 
-  it("passes the Host of the request, in lower case, to the confirmer", async () => {
-    const { db, app, confirm } = setup();
+  it("passes the relay's configured host names to the confirmer, and ignores the Host of the request", async () => {
+    const { db, app, confirm } = setup({ publicHosts: ["relay.critalarm.app", "api.critalarm.app"] });
     try {
-      expect((await register(app, {}, { host: "Relay.CritAlarm.App:8443" })).status).toBe(201);
-      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, "relay.critalarm.app:8443");
+      expect((await register(app, {}, { host: "attacker.example.com" })).status).toBe(201);
+      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, ["relay.critalarm.app", "api.critalarm.app"]);
     } finally { db.close(); }
   });
 
-  it("answers 422 and calls nobody when the request has no Host header", async () => {
+  it("registers a request with no Host header, since the check does not read it", async () => {
     const { db, app, confirm } = setup();
     try {
       const response = await app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1" }, body: JSON.stringify({ base_url: BASE, version: "0.1.0", challenge: CHALLENGE }) });
-      expect(response.status).toBe(422);
-      expect(await response.json()).toEqual({ error: "challenge failed" });
-      expect(confirm).not.toHaveBeenCalled();
-      expect(rows(db)).toBe(0);
+      expect(response.status).toBe(201);
+      expect(confirm).toHaveBeenCalledWith(BASE, CHALLENGE, [HOST]);
     } finally { db.close(); }
   });
 
@@ -429,7 +427,7 @@ describe("registration with the operator's secret", () => {
     } finally { db.close(); }
   });
 
-  it("answers 429 to the sixth wrong secret in 60 seconds from one client, even with the right secret after it", async () => {
+  it("answers 429 to the sixth wrong secret in 60 seconds from one client, and the right secret still passes", async () => {
     const { db, app, clock } = setup({ registrationSecret: "operator-secret" });
     try {
       const guess = (secret: string, ip = "203.0.114.1") => register(app, {}, { Authorization: `Bearer ${secret}`, "cf-connecting-ip": ip });
@@ -437,12 +435,14 @@ describe("registration with the operator's secret", () => {
       const sixth = await guess("wrong-5");
       expect(sixth.status).toBe(429);
       expect(await sixth.json()).toEqual({ code: 42901, http: 429, error: "rate limited" });
-      expect((await guess("operator-secret")).status).toBe(429);
       expect(rows(db)).toBe(0);
-      // Another client is not affected, and the first one recovers after the window.
-      expect((await guess("operator-secret", "203.0.114.2")).status).toBe(201);
-      clock.t += 61;
+      // The operator, even from the same address, is never locked out.
       expect((await guess("operator-secret")).status).toBe(201);
+      expect((await guess("wrong-6")).status).toBe(429);
+      // Another client is not affected, and the first one recovers after the window.
+      expect((await guess("wrong-x", "203.0.114.2")).status).toBe(401);
+      clock.t += 61;
+      expect((await guess("wrong-7")).status).toBe(401);
     } finally { db.close(); }
   });
 

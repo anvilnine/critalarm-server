@@ -43,18 +43,18 @@ function world(options: { registration?: "open" | "closed" } = {}) {
   // The real confirmer's accept rule: status 200 and a JSON body that carries
   // the same challenge and names the host the registration was called on. The
   // call goes to the self-hosted app that answers at that base_url, if any.
-  const confirmChallenge = async (baseUrl: string, challenge: string, relayHost: string): Promise<boolean> => {
+  const confirmChallenge = async (baseUrl: string, challenge: string, relayHosts: readonly string[]): Promise<boolean> => {
     const target = servers.get(baseUrl);
     if (target === undefined) return false;
     const response = await target.app.request(`${baseUrl}/v1/relay-challenge/${challenge}`);
     const body = await response.json().catch(() => undefined) as { challenge?: unknown; relay?: unknown } | undefined;
-    const ok = response.status === 200 && body?.challenge === challenge && body?.relay === relayHost;
+    const ok = response.status === 200 && body?.challenge === challenge && typeof body?.relay === "string" && relayHosts.includes(body.relay);
     confirmed.push(ok);
     return ok;
   };
-  const router = createRelayRouter(relayDb, async (event) => { await dispatcher.dispatch([event]); }, new Counters(relayDb, { now: () => 1 }), { confirmChallenge, ...(options.registration === undefined ? {} : { registration: options.registration }) });
-  // A real request carries a Host header, and the relay reads it. The test
-  // transport adds the one a client would send.
+  const router = createRelayRouter(relayDb, async (event) => { await dispatcher.dispatch([event]); }, new Counters(relayDb, { now: () => 1 }), { confirmChallenge, publicHosts: [new URL(RELAY_URL).host], ...(options.registration === undefined ? {} : { registration: options.registration }) });
+  // A real request carries a Host header. The relay does not read it for the
+  // challenge check, but the transport adds the one a client would send.
   const toRouter = (request: Request): Promise<Response> | Response => {
     const headers = new Headers(request.headers);
     headers.set("host", new URL(request.url).host);
@@ -175,9 +175,13 @@ describe("a self-hosted server and the relay, joined", () => {
     // first relay, as a hostile operator would.
     const secondRelay = async (request: Request): Promise<Response> => {
       const text = await request.clone().text();
-      const response = await w.router.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", host: new URL(RELAY_URL).host }, body: text });
-      replayed.push({ status: response.status, body: await response.clone().json() });
-      return response;
+      let last: Response | undefined;
+      // It sends whatever Host it likes, its own name and the first relay's.
+      for (const host of ["second-relay.example.net", new URL(RELAY_URL).host]) {
+        last = await w.router.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", host }, body: text });
+        replayed.push({ status: last.status, body: await last.clone().json() });
+      }
+      return last as Response;
     };
     const a = w.selfHosted(A, newDb(), true, { relayUrl: "https://second-relay.example.net", fetch: secondRelay });
     const token = await a.topic("prod");
@@ -185,8 +189,8 @@ describe("a self-hosted server and the relay, joined", () => {
 
     expect((await a.publish("prod", token)).status).toBe(200);
 
-    expect(replayed).toEqual([{ status: 422, body: { error: "challenge failed" } }]);
-    expect(w.confirmed).toEqual([false]);
+    expect(replayed).toEqual([{ status: 422, body: { error: "challenge failed" } }, { status: 422, body: { error: "challenge failed" } }]);
+    expect(w.confirmed).toEqual([false, false]);
     expect(w.relayDb.prepare("SELECT COUNT(*) AS n FROM relay_servers").get()).toEqual({ n: 0 });
     expect(a.lines.map((line) => line.reason)).toEqual(["challenge_failed"]);
     expect(w.sent).toEqual([]);
@@ -196,7 +200,7 @@ describe("a self-hosted server and the relay, joined", () => {
     const tokenOwn = await own.topic("prod");
     await own.publish("prod", tokenOwn);
     expect(w.keyOf(own)).toMatch(/^rk_/);
-    expect(w.confirmed).toEqual([false, true]);
+    expect(w.confirmed).toEqual([false, false, true]);
   });
 
   it("stops a key holder from ringing another server's phone", async () => {

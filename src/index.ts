@@ -7,6 +7,7 @@ import { createIngressRouter } from "./ingress/router.js";
 import { createTierRouter } from "./tier/router.js";
 import { createV1Router } from "./v1/router.js";
 import { createRelayRouter } from "./relay/router.js";
+import { relayHost } from "./relay/host.js";
 import { createStatsRouter } from "./stats/router.js";
 import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
@@ -62,8 +63,16 @@ export function createApp(deps: AppDependencies): Hono {
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
-    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy }));
+    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy, publicHosts: relayPublicHosts(deps.config) }));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+}
+
+// api.md §4.1. The names this relay answers to, from configuration only: the
+// hosts of its base-url and relay-url, plus RELAY_PUBLIC_HOSTS. The same
+// function builds the `relay` value a server sends, so the default-port and
+// case rules match on both sides.
+export function relayPublicHosts(config: Config): string[] {
+  return [...new Set([relayHost(config.baseUrl), relayHost(config.relayUrl), ...(config.relayPublicHosts ?? [])].filter((host): host is string => host !== undefined))];
 }
