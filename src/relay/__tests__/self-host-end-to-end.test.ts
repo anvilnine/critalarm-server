@@ -282,7 +282,7 @@ describe("a self-hosted server and the relay, joined", () => {
     expect(a.lines).toHaveLength(1);
   });
 
-  it("answers 403 topic mismatch after base_url changes, drops the key, then registers under the new address and delivers", async () => {
+  it("replaces a key from an older base_url on the first alarm of a topic made under the new one, and delivers that alarm", async () => {
     const w = world();
     const db = newDb();
     const before = w.selfHosted(A, db);
@@ -299,17 +299,53 @@ describe("a self-hosted server and the relay, joined", () => {
     expect(w.keyOf(after)).toBe(oldKey);
 
     await after.publish("web", tokenWeb);
-    expect(after.lines.map((line) => line.event)).toEqual(["relay_topic_mismatch"]);
-    expect(after.lines[0]).toMatchObject({ base_url: moved });
-    expect(after.errors).toHaveLength(1);
-    expect(w.keyOf(after)).toBe("");
-    expect(w.sent).toEqual([]);
-
-    await after.publish("web", tokenWeb);
-    expect(after.lines.map((line) => line.event)).toEqual(["relay_topic_mismatch", "relay_registered"]);
+    expect(after.lines.map((line) => line.event)).toEqual(["relay_key_replaced", "relay_registered"]);
+    expect(after.errors).toEqual([]);
     expect(w.keyOf(after)).toMatch(/^rk_/);
     expect(w.keyOf(after)).not.toBe(oldKey);
     expect(w.sent.map((entry) => entry.device)).toEqual([phone]);
+
+    // The next alarm needs no second registration.
+    w.relayCalls.length = 0;
+    await after.publish("web", tokenWeb);
+    expect(w.relayCalls).toEqual(["POST /relay/v1/push"]);
+    expect(w.sent.map((entry) => entry.device)).toEqual([phone, phone]);
+  });
+
+  it("keeps a good key and says once per topic that a topic made under the old base_url cannot ring", async () => {
+    const w = world();
+    const db = newDb();
+    const before = w.selfHosted(A, db);
+    const tokenProd = await before.topic("prod");
+    const oldPhone = w.phone(topicHash(A, "prod"));
+    await before.publish("prod", tokenProd);
+    expect(w.sent.map((entry) => entry.device)).toEqual([oldPhone]);
+
+    const moved = "https://moved.example.com";
+    const after = w.selfHosted(moved, db);
+    const tokenWeb = await after.topic("web");
+    const newPhone = w.phone(topicHash(moved, "web"));
+    // The first alarm of a topic made under the new address replaces the key.
+    await after.publish("web", tokenWeb);
+    const key = w.keyOf(after);
+    expect(w.sent.map((entry) => entry.device)).toEqual([oldPhone, newPhone]);
+    after.lines.length = 0;
+    w.relayCalls.length = 0;
+
+    // The old topic hashes the old address. The key under the new address is
+    // right, so the client keeps it and registers nothing.
+    for (let i = 0; i < 3; i += 1) await after.publish("prod", tokenProd);
+    expect(w.relayCalls).toEqual(["POST /relay/v1/push", "POST /relay/v1/push", "POST /relay/v1/push"]);
+    expect(w.keyOf(after)).toBe(key);
+    expect(after.errors).toHaveLength(3);
+    expect(after.lines.map((line) => line.event)).toEqual(["relay_topic_other_base_url"]);
+    expect(String(after.lines[0]?.message)).toContain("Delete the topic and create it again");
+    expect(w.sent.map((entry) => entry.device)).toEqual([oldPhone, newPhone]);
+
+    // The topic made under the new address still rings with the same key.
+    await after.publish("web", tokenWeb);
+    expect(w.sent.map((entry) => entry.device)).toEqual([oldPhone, newPhone, newPhone]);
+    expect(w.keyOf(after)).toBe(key);
   });
 
   it("has the relay route accept every kind the real client forwards with 202", async () => {

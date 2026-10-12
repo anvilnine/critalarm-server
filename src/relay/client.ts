@@ -2,6 +2,7 @@ import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypt
 import type { DeliveryEvent } from "../incident/types.js";
 import type { RelayClientOptions, RelayPayload } from "./types.js";
 import { version } from "../version.js";
+import { topicHash } from "./hash.js";
 
 // A failure the client has already logged and backed off from. The caller needs
 // no second log line for it.
@@ -20,6 +21,7 @@ export class RelayClient {
   private backoffMs = 0;
   private nextAttemptAt = 0;
   private lastReason: string | undefined;
+  private readonly warnedTopics = new Set<string>();
 
   constructor(private readonly options: RelayClientOptions) {}
 
@@ -65,13 +67,35 @@ export class RelayClient {
       key = await this.key();
       response = await this.push(key, payload);
     }
-    if (response.status === 403 && await errorText(response) === "topic mismatch") {
+    if (await isTopicMismatch(response)) {
+      // A topic's hash is stored when the topic is created and never worked
+      // out again. Work it out from the BASE_URL set now. If it matches, the
+      // topic is right and the key was registered under an older BASE_URL. If
+      // it differs, the topic was created under another BASE_URL and no key
+      // can fix that.
+      if (topicHash(this.options.baseUrl, event.topic) !== event.topicHash) {
+        this.warnForeignTopic(event.topic);
+        throw new RelayKeyError("relay push refused: topic created under another BASE_URL");
+      }
       this.dropKey(key);
-      this.log({ event: "relay_topic_mismatch", base_url: this.options.baseUrl, hint: "BASE_URL differs from the address this server registered with the relay. Check that BASE_URL has not changed since registration. The stored key is deleted, and the next alarm registers again with the current BASE_URL." });
-      throw new RelayKeyError("relay push refused: topic mismatch");
+      this.log({ event: "relay_key_replaced", relay_url: this.options.relayUrl, base_url: this.options.baseUrl, message: "The relay key was registered under an older BASE_URL. The server drops it and registers again with the current BASE_URL." });
+      key = await this.key();
+      response = await this.push(key, payload);
+      if (await isTopicMismatch(response)) {
+        this.log({ event: "relay_topic_mismatch", relay_url: this.options.relayUrl, base_url: this.options.baseUrl, message: "The relay refused a key it issued a moment ago for the current BASE_URL. Check that RELAY_URL points at a Crit Alarm relay and that BASE_URL is exactly the address the app uses for this server." });
+        throw new RelayKeyError("relay push refused: topic mismatch");
+      }
     }
     if (!response.ok) throw new Error(`relay push failed: ${response.status}`);
     return response;
+  }
+
+  // One line per topic, not per alarm. The topic is the server's own, and the
+  // operator needs its name to delete it.
+  private warnForeignTopic(topic: string): void {
+    if (this.warnedTopics.has(topic)) return;
+    this.warnedTopics.add(topic);
+    this.log({ event: "relay_topic_other_base_url", base_url: this.options.baseUrl, topic, message: `Topic ${topic} was created under another BASE_URL. Phones subscribed to it will not ring through the relay. Delete the topic and create it again, then add it to the phone again.` });
   }
 
   private push(key: string, payload: RelayPayload): Promise<Response> {
@@ -165,6 +189,10 @@ function isRedirectError(error: unknown): boolean {
     if (/redirect/i.test(current.message)) return true;
   }
   return false;
+}
+
+async function isTopicMismatch(response: Response): Promise<boolean> {
+  return response.status === 403 && await errorText(response) === "topic mismatch";
 }
 
 async function errorText(response: Response): Promise<string | undefined> {
