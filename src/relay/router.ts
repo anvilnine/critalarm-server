@@ -5,10 +5,9 @@ import type Database from "better-sqlite3";
 import { bearerSecretMatches } from "../bearer.js";
 import { relayKeyHash, newRelayKey } from "./client.js";
 import type { RelayPayload } from "./types.js";
-import type { DeliveryEvent } from "../incident/types.js";
+import type { Clock, DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
-import type { Clock } from "../incident/types.js";
 import { clientIp } from "../rate-limit.js";
 import { parseBaseUrl } from "./base-url.js";
 import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
@@ -78,7 +77,7 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   router.post("/relay/v1/servers", async (c) => {
     const authorization = c.req.header("authorization");
     const hasSecret = secret !== undefined && authorization !== undefined && /^Bearer /.test(authorization);
-    if (hasSecret && !bearerSecretMatches(authorization, secret)) { logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
+    if (hasSecret && !bearerSecretMatches(authorization, secret ?? "")) { logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
     if (!hasSecret && options.registration === "closed") { logRegistration("closed"); return c.json({ error: "registration closed" }, 403); }
     const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown; challenge?: unknown } | null;
     if (body === null || typeof body !== "object" || typeof body.base_url !== "string" || typeof body.version !== "string" || body.base_url === "" || body.version.length > 200) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
