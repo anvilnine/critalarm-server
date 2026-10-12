@@ -20,6 +20,7 @@ function publicIpv4(octets: readonly number[]): boolean {
   if (a === 172 && b >= 16 && b <= 31) return false;
   if (a === 192 && b === 168) return false;
   if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+  if (a === 192 && b === 88 && c === 99) return false; // 6to4 relay anycast
   if (a === 198 && (b === 18 || b === 19)) return false;
   if (a === 198 && b === 51 && c === 100) return false;
   if (a === 203 && b === 0 && c === 113) return false;
@@ -68,16 +69,17 @@ export function isPublicAddress(address: string): boolean {
   const groups = ipv6Groups(address);
   if (groups === undefined) return false;
   const [g0, g1, g2, g3, g4, g5] = groups as [number, number, number, number, number, number, number, number];
-  // :: and ::1.
-  if (groups.slice(0, 7).every((group) => group === 0) && (groups[7] === 0 || groups[7] === 1)) return false;
-  // ::ffff:a.b.c.d (IPv4-mapped), 64:ff9b::a.b.c.d (NAT64) and ::a.b.c.d (the
-  // old IPv4-compatible form) are judged by the IPv4 address inside.
+  // ::ffff:a.b.c.d (IPv4-mapped) and 64:ff9b::a.b.c.d (NAT64) are judged by the
+  // IPv4 address inside.
   const zeros = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0;
-  if (zeros && g4 === 0 && (g5 === 0xffff || g5 === 0)) return publicIpv4(embeddedIpv4(groups));
+  if (zeros && g4 === 0 && g5 === 0xffff) return publicIpv4(embeddedIpv4(groups));
   if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return publicIpv4(embeddedIpv4(groups));
-  if ((g0 & 0xfe00) === 0xfc00) return false; // fc00::/7
-  if ((g0 & 0xffc0) === 0xfe80) return false; // fe80::/10
-  if ((g0 & 0xff00) === 0xff00) return false; // ff00::/8
+  // Everything else must be global unicast, 2000::/3. That leaves out the old
+  // IPv4-compatible form, 64:ff9b:1::/48, fc00::/7, fe80::/10, fec0::/10,
+  // ff00::/8, 100::/64 and every other range outside it.
+  if ((g0 & 0xe000) !== 0x2000) return false;
+  if (g0 === 0x2001 && (g1 & 0xfe00) === 0) return false; // 2001::/23, which holds Teredo 2001::/32
   if (g0 === 0x2001 && g1 === 0x0db8) return false; // 2001:db8::/32
+  if (g0 === 0x2002) return false; // 2002::/16, 6to4
   return true;
 }
