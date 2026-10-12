@@ -13,7 +13,12 @@ type Ctx = { Bindings: Bindings; Variables: Variables };
 // Cloudflare always overwrites cf-connecting-ip and a client cannot reach
 // through it. With no such header, fall back to the forwarded hops, so a
 // self-hoster behind a plain nginx still gets per-client limiting.
-function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
+export interface ClientIpSource {
+  env?: { incoming?: { socket?: { remoteAddress?: string } } };
+  req: { header(name: string): string | undefined };
+}
+
+export function clientIp(c: ClientIpSource, behindProxy: boolean): string {
   if (!behindProxy) return c.env?.incoming?.socket?.remoteAddress ?? "anonymous";
   const cloudflare = c.req.header("cf-connecting-ip")?.trim();
   if (cloudflare) return cloudflare;

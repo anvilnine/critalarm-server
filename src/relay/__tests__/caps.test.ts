@@ -14,7 +14,7 @@ it.each([["free", 50], ["relay", 1000], ["hosted", 1000]] as const)("enforces th
     db.prepare("INSERT INTO devices(id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('d','a','hash','ios','push',1)").run();
     const hash = "a".repeat(64);
     db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('d',?)").run(hash);
-    db.prepare("INSERT INTO relay_servers(id,base_url,version,relay_key_hash,created_at) VALUES ('r','https://example.com','1',?,1)").run(relayKeyHash("rk_test"));
+    db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('r','https://example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
     const day = Math.floor(Date.now() / 86400000) * 86400;
     db.prepare("INSERT INTO relay_p4_usage(account_id,day_start,count) VALUES ('a',?,?)").run(day, limit - 1);
     const dispatch = vi.fn(async () => {});

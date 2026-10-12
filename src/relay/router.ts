@@ -8,6 +8,11 @@ import type { RelayPayload } from "./types.js";
 import type { DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
+import type { Clock } from "../incident/types.js";
+import { clientIp } from "../rate-limit.js";
+import { parseBaseUrl } from "./base-url.js";
+import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
+import { topicHash } from "./hash.js";
 
 // A p5 with no incident is a priority-5 message on a topic whose switch is off.
 // It is a plain notification and never rings. Every other kind keeps the rule
@@ -17,27 +22,96 @@ function isCritical(body: RelayPayload): boolean {
   return body.priority === 5;
 }
 
-export function createRelayRouter(db: Database.Database, dispatch: (event: DeliveryEvent) => Promise<DispatchResult | void>, counters: Counters, registrationSecret?: string): Hono {
+const REGISTRATION_RATE = { limit: 5, windowS: 60 };
+const REGISTRATION_DAILY_CAP = 20;
+
+export interface RelayRouterOptions {
+  // Lets a caller of POST /relay/v1/servers skip the challenge (api.md §4.1).
+  registrationSecret?: string;
+  registration?: "open" | "closed";
+  behindProxy?: boolean;
+  confirmChallenge?: ChallengeConfirmer;
+  clock?: Clock;
+}
+
+export function createRelayRouter(db: Database.Database, dispatch: (event: DeliveryEvent) => Promise<DispatchResult | void>, counters: Counters, options: RelayRouterOptions = {}): Hono {
   const router = new Hono();
-  // Registration used to hand an rk_ key to anyone who asked, and that key
-  // pushes to any topic_hash the holder can compute. The route exists only when
-  // the operator sets a registration secret, and then only for a caller that
-  // presents it.
-  if (registrationSecret !== undefined && registrationSecret !== "") router.post("/relay/v1/servers", async (c) => {
-    if (!bearerSecretMatches(c.req.header("authorization"), registrationSecret)) return c.json({ error: "unauthorized" }, 401);
-    const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown } | null;
-    if (body === null || typeof body.base_url !== "string" || typeof body.version !== "string") return c.json({ error: "invalid request" }, 400);
+  const confirm = options.confirmChallenge ?? confirmChallenge;
+  const clock: Clock = options.clock ?? { now: () => Math.floor(Date.now() / 1000) };
+  const secret = options.registrationSecret === undefined || options.registrationSecret === "" ? undefined : options.registrationSecret;
+  const recent = new Map<string, number[]>();
+
+  // True when this client may make another registration call. The rolling
+  // window lives in memory. The daily count lives in SQLite so a restart does
+  // not reset it. Only a call that gets through is counted against the day.
+  function withinLimits(client: string): boolean {
+    const now = clock.now();
+    for (const [key, times] of recent) {
+      const live = times.filter((time) => time > now - REGISTRATION_RATE.windowS);
+      if (live.length === 0) recent.delete(key); else recent.set(key, live);
+    }
+    const times = recent.get(client) ?? [];
+    if (times.length >= REGISTRATION_RATE.limit) return false;
+    const day = Math.floor(now / 86400) * 86400;
+    const row = db.prepare("SELECT count FROM relay_registration_attempts WHERE client = ? AND day_start = ?").get(client, day) as { count: number } | undefined;
+    if ((row?.count ?? 0) >= REGISTRATION_DAILY_CAP) return false;
+    db.prepare("INSERT INTO relay_registration_attempts(client,day_start,count) VALUES(?,?,1) ON CONFLICT(client,day_start) DO UPDATE SET count=count+1").run(client, day);
+    db.prepare("DELETE FROM relay_registration_attempts WHERE day_start < ?").run(day);
+    recent.set(client, [...times, now]);
+    return true;
+  }
+
+  function issueKey(baseUrl: string, version: string): string {
     const key = newRelayKey();
-    db.prepare("INSERT INTO relay_servers (id, base_url, version, relay_key_hash, created_at) VALUES (?, ?, ?, ?, ?)").run(`rly_${crypto.randomUUID()}`, body.base_url, body.version, relayKeyHash(key), Math.floor(Date.now() / 1000));
+    // One live key per base_url. The old key answers 401 from the next push on.
+    db.transaction(() => {
+      db.prepare("DELETE FROM relay_servers WHERE base_url = ? AND legacy = 0").run(baseUrl);
+      db.prepare("INSERT INTO relay_servers (id, base_url, version, relay_key_hash, created_at, legacy) VALUES (?, ?, ?, ?, ?, 0)").run(`rly_${crypto.randomUUID()}`, baseUrl, version, relayKeyHash(key), clock.now());
+    })();
+    return key;
+  }
+
+  const logRegistration = (outcome: string, host?: string) => console.log(JSON.stringify({ route: "/relay/v1/servers", outcome, ...(host === undefined ? {} : { host }) }));
+
+  // api.md §4.1. A key is issued to a server that proves it answers at its
+  // base_url, or to a caller that holds the operator's secret.
+  router.post("/relay/v1/servers", async (c) => {
+    const authorization = c.req.header("authorization");
+    const hasSecret = secret !== undefined && authorization !== undefined && /^Bearer /.test(authorization);
+    if (hasSecret && !bearerSecretMatches(authorization, secret)) { logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
+    if (!hasSecret && options.registration === "closed") { logRegistration("closed"); return c.json({ error: "registration closed" }, 403); }
+    const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown; challenge?: unknown } | null;
+    if (body === null || typeof body !== "object" || typeof body.base_url !== "string" || typeof body.version !== "string" || body.base_url === "" || body.version.length > 200) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
+    if (hasSecret) {
+      if (body.base_url.length > 200) { logRegistration("invalid base_url"); return c.json({ error: "invalid base_url" }, 400); }
+      const key = issueKey(body.base_url, body.version);
+      logRegistration("issued_with_secret");
+      return c.json({ relay_key: key }, 201);
+    }
+    if (typeof body.challenge !== "string" || !/^[A-Za-z0-9_-]{32,128}$/.test(body.challenge)) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
+    const parsed = parseBaseUrl(body.base_url);
+    if (parsed === undefined) { logRegistration("invalid base_url"); return c.json({ error: "invalid base_url" }, 400); }
+    if (!withinLimits(clientIp(c, options.behindProxy ?? false))) { logRegistration("rate limited", parsed.host); return c.json({ code: 42901, http: 429, error: "rate limited" }, 429); }
+    if (!await confirm(body.base_url, body.challenge)) { logRegistration("challenge failed", parsed.host); return c.json({ error: "challenge failed" }, 422); }
+    const key = issueKey(body.base_url, body.version);
+    logRegistration("issued", parsed.host);
     return c.json({ relay_key: key }, 201);
   });
   router.post("/relay/v1/push", async (c) => {
     const auth = c.req.header("authorization") ?? "";
     const key = /^Bearer (rk_[A-Za-z0-9_-]+)$/.exec(auth)?.[1];
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
-    if (keyHash === undefined || db.prepare("SELECT 1 FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) === undefined) return c.json({ error: "unauthorized" }, 401);
+    const server = keyHash === undefined ? undefined : db.prepare("SELECT base_url, legacy FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) as { base_url: string; legacy: number } | undefined;
+    if (keyHash === undefined || server === undefined) return c.json({ error: "unauthorized" }, 401);
     const body = await c.req.json().catch(() => null) as RelayPayload | null;
     if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "p5", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
+    // api.md §4.1. A key pushes only topics of the server it was registered
+    // for. The topic name is used for this check alone: it is not stored,
+    // logged or put on the event.
+    if (body.topic !== undefined || server.legacy === 0) {
+      if (typeof body.topic !== "string" || !/^[-_A-Za-z0-9]{1,64}$/.test(body.topic)) return c.json({ error: "invalid request" }, 400);
+      if (topicHash(server.base_url, body.topic) !== body.topic_hash) return c.json({ error: "topic mismatch" }, 403);
+    }
     // The accounts this push is for. The pushing server's message_id has no row
     // here (api.md §4.1), so the relay establishes the owning accounts itself
     // and names one on every dispatch; the dispatcher never guesses. A hash this

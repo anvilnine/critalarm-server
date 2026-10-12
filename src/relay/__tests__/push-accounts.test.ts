@@ -19,7 +19,7 @@ function setup() {
   for (const id of ["acc_1", "acc_2"]) db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES (?,'hosted',1)").run(id);
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_1','acc_1','h1','ios','t1',1)").run();
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_2','acc_2','h2','ios','t2',1)").run();
-  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES ('rly_1','https://alerts.example.com','1',?,1)").run(relayKeyHash("rk_test"));
+  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('rly_1','https://alerts.example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
   const events: DeliveryEvent[] = [];
   const app = createRelayRouter(db, async (event) => { events.push(event); }, new Counters(db, { now: () => 1 }));
   return { db, app, events };
@@ -72,7 +72,7 @@ describe("relayed push accounts", () => {
       db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_2','acc_2','h2','ios','token-2',1)").run();
       db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_1',?)").run(remoteHash);
       db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_2',?)").run(remoteHash);
-      db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES ('rly_1','https://alerts.example.com','1',?,1)").run(relayKeyHash("rk_test"));
+      db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('rly_1','https://alerts.example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
       const sent: { device: string; account: string | undefined }[] = [];
       const sender: PushSender = { send: async (device, event) => { sent.push({ device: device.id, account: event.accountId }); return { status: 200, stale: false }; } };
       const dispatcher = new PushDispatcher(db, { apns: sender, fcm: sender });
