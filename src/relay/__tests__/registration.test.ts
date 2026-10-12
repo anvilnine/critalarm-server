@@ -4,6 +4,7 @@ import { createApp } from "../../index.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import type { DeliveryEvent } from "../../incident/types.js";
+import { topicHash } from "../hash.js";
 
 // api.md §3.8 and §4.1. Registration carries a challenge, the challenge route
 // answers for it while the call is out, and a failed registration backs off.
@@ -347,26 +348,74 @@ describe("a key that stopped working", () => {
     db.close();
   });
 
-  it("drops the key on 403 topic mismatch, logs one clear line and does not retry", async () => {
+  // The hash a topic gets when it is created under the BASE_URL set now.
+  const current: DeliveryEvent = { ...baseEvent, topicHash: topicHash("https://a.test", "prod") };
+  // A topic created earlier, under another BASE_URL.
+  const foreign = (topic: string): DeliveryEvent => ({ ...baseEvent, topic, topicHash: topicHash("https://old.test", topic) });
+
+  it("drops a key registered under an older BASE_URL, registers again and retries the push once", async () => {
+    let registrations = 0; let pushes = 0;
+    const { client, logs, requests, db } = setup((request) => {
+      if (request.url.endsWith("/servers")) { registrations += 1; return json(201, { relay_key: `rk_${registrations}` }); }
+      pushes += 1;
+      return pushes === 2 ? json(403, { error: "topic mismatch" }) : new Response(null, { status: 202 });
+    });
+    await client.forwardOne(current);
+    await client.forwardOne(current);
+    expect(registrations).toBe(2);
+    expect(requests.filter((r) => r.url.endsWith("/push")).map((r) => r.auth)).toEqual(["Bearer rk_1", "Bearer rk_1", "Bearer rk_2"]);
+    expect(logs.map((l) => l.event)).toEqual(["relay_registered", "relay_key_replaced", "relay_registered"]);
+    expect(JSON.stringify(logs)).not.toContain("rk_");
+    db.close();
+  });
+
+  it("does not loop: a second mismatch on the retry throws and registers no more", async () => {
     const { client, logs, pushes, registrations, db } = setup((request) => request.url.endsWith("/servers") ? json(201, { relay_key: "rk_x" }) : json(403, { error: "topic mismatch" }));
-    await expect(client.forwardOne(baseEvent)).rejects.toBeInstanceOf(RelayKeyError);
-    expect(pushes()).toHaveLength(1);
-    expect(registrations()).toHaveLength(1);
-    expect(db.prepare("SELECT COUNT(*) AS n FROM relay_client_credentials").get()).toEqual({ n: 0 });
-    const mismatch = logs.filter((l) => l.event === "relay_topic_mismatch");
-    expect(mismatch).toHaveLength(1);
-    expect(String(mismatch[0]!.hint)).toContain("BASE_URL");
+    await expect(client.forwardOne(current)).rejects.toBeInstanceOf(RelayKeyError);
+    expect(pushes()).toHaveLength(2);
+    expect(registrations()).toHaveLength(2);
+    expect(logs.filter((l) => l.event === "relay_topic_mismatch")).toHaveLength(1);
     expect(JSON.stringify(logs)).not.toContain("rk_x");
     db.close();
   });
 
-  it("registers again with the current base_url on the next forward after a mismatch", async () => {
-    let mismatch = true;
-    const { client, registrations, db } = setup((request) => request.url.endsWith("/servers") ? json(201, { relay_key: "rk_x" }) : (mismatch ? json(403, { error: "topic mismatch" }) : new Response(null, { status: 202 })));
-    await expect(client.forwardOne(baseEvent)).rejects.toThrow();
-    mismatch = false;
-    await client.forwardOne(baseEvent);
+  it("backs off when the registration after a mismatch fails, and does not call the relay on the next forward", async () => {
+    let answered = false;
+    const { client, registrations, pushes, db } = setup((request) => {
+      if (request.url.endsWith("/servers")) { if (!answered) { answered = true; return json(201, { relay_key: "rk_x" }); } return json(429, { error: "rate limited" }); }
+      return json(403, { error: "topic mismatch" });
+    });
+    await expect(client.forwardOne(current)).rejects.toBeInstanceOf(RelayKeyError);
+    await expect(client.forwardOne(current)).rejects.toBeInstanceOf(RelayKeyError);
     expect(registrations()).toHaveLength(2);
+    expect(pushes()).toHaveLength(1);
+    db.close();
+  });
+
+  it("keeps the key and does not register for a topic created under another BASE_URL", async () => {
+    const { client, logs, registrations, pushes, db } = setup((request) => request.url.endsWith("/servers") ? json(201, { relay_key: "rk_x" }) : json(403, { error: "topic mismatch" }));
+    await expect(client.forwardOne(foreign("prod"))).rejects.toBeInstanceOf(RelayKeyError);
+    expect(pushes()).toHaveLength(1);
+    expect(registrations()).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM relay_client_credentials").get()).toEqual({ n: 1 });
+    const lines = logs.filter((l) => l.event === "relay_topic_other_base_url");
+    expect(lines).toHaveLength(1);
+    const message = String(lines[0]!.message);
+    expect(message).toContain("created under another BASE_URL");
+    expect(message).toContain("will not ring through the relay");
+    expect(message).toContain("Delete the topic and create it again");
+    expect(message).not.toContain("next alarm");
+    expect(JSON.stringify(logs)).not.toContain("rk_x");
+    db.close();
+  });
+
+  it("logs that once per topic, not once per alarm, and logs a second topic on its own", async () => {
+    const { client, logs, registrations, db } = setup((request) => request.url.endsWith("/servers") ? json(201, { relay_key: "rk_x" }) : json(403, { error: "topic mismatch" }));
+    for (let i = 0; i < 5; i += 1) await expect(client.forwardOne(foreign("prod"))).rejects.toBeInstanceOf(RelayKeyError);
+    await expect(client.forwardOne(foreign("web"))).rejects.toBeInstanceOf(RelayKeyError);
+    await expect(client.forwardOne(foreign("web"))).rejects.toBeInstanceOf(RelayKeyError);
+    expect(logs.filter((l) => l.event === "relay_topic_other_base_url").map((l) => l.topic)).toEqual(["prod", "web"]);
+    expect(registrations()).toHaveLength(1);
     db.close();
   });
 });
