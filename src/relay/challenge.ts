@@ -9,7 +9,7 @@ import { parseBaseUrl } from "./base-url.js";
 // Every other outcome is false and never an exception.
 export type ChallengeConfirmer = (baseUrl: string, challenge: string) => Promise<boolean>;
 
-const TIMEOUT_MS = 5000;
+const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 1024;
 
 export interface ResolvedAddress { address: string; family: number; }
@@ -17,14 +17,21 @@ export type Resolver = (host: string) => Promise<ResolvedAddress[]>;
 
 const resolveAll: Resolver = (host) => dnsLookup(host, { all: true });
 
-export function createChallengeConfirmer(resolve: Resolver = resolveAll): ChallengeConfirmer {
+// Tests pass a different address check, trust anchor and timeout. The server
+// builds its confirmer with none of them, and nothing reads them from the
+// environment.
+export interface ConfirmerOptions { isPublic?: (address: string) => boolean; ca?: string | Buffer; timeoutMs?: number; }
+
+export function createChallengeConfirmer(resolve: Resolver = resolveAll, options: ConfirmerOptions = {}): ChallengeConfirmer {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const isPublic = options.isPublic ?? isPublicAddress;
   return async (baseUrl, challenge) => {
     const parsed = parseBaseUrl(baseUrl);
     if (parsed === undefined) return false;
     let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<false>((done) => { timer = setTimeout(() => done(false), TIMEOUT_MS); });
+    const deadline = new Promise<false>((done) => { timer = setTimeout(() => done(false), timeoutMs); });
     try {
-      return await Promise.race([deadline, attempt(resolve, parsed.host, parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
+      return await Promise.race([deadline, attempt(resolve, isPublic, options.ca, timeoutMs, parsed.host, parsed.port, `${parsed.path}/v1/relay-challenge/${challenge}`, challenge)]);
     } catch {
       return false;
     } finally {
@@ -33,9 +40,9 @@ export function createChallengeConfirmer(resolve: Resolver = resolveAll): Challe
   };
 }
 
-async function attempt(resolve: Resolver, host: string, port: number, path: string, challenge: string): Promise<boolean> {
+async function attempt(resolve: Resolver, isPublic: (address: string) => boolean, ca: string | Buffer | undefined, timeoutMs: number, host: string, port: number, path: string, challenge: string): Promise<boolean> {
   const addresses = await resolve(host);
-  if (addresses.length === 0 || !addresses.every((entry) => isPublicAddress(entry.address))) return false;
+  if (addresses.length === 0 || !addresses.every((entry) => isPublic(entry.address))) return false;
   const target = addresses[0] as ResolvedAddress;
   // The connection goes to the address vetted above. A second DNS answer cannot
   // swap the target, and the certificate is still checked against the host name.
@@ -44,7 +51,7 @@ async function attempt(resolve: Resolver, host: string, port: number, path: stri
     else (callback as (error: null, address: string, family: number) => void)(null, target.address, target.family);
   };
   return new Promise<boolean>((done) => {
-    const req = request({ host, port, path, method: "GET", lookup: pinned, servername: host, headers: { accept: "application/json" }, timeout: TIMEOUT_MS }, (res) => {
+    const req = request({ host, port, path, method: "GET", lookup: pinned, servername: host, headers: { accept: "application/json" }, timeout: timeoutMs, ...(ca === undefined ? {} : { ca }) }, (res) => {
       // A redirect is a failure and is never followed.
       if (res.statusCode !== 200) { res.destroy(); req.destroy(); done(false); return; }
       const chunks: Buffer[] = [];

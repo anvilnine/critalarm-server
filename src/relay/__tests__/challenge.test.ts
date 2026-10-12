@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type Server } from "node:https";
+import type { AddressInfo } from "node:net";
+import { createSecureContext } from "node:tls";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { selfSignedCertificate } from "./selfsigned.js";
 import { createChallengeConfirmer } from "../challenge.js";
 
 const challenge = "c".repeat(40);
@@ -24,5 +29,80 @@ describe("the challenge confirmer", () => {
     const resolve = vi.fn(async () => [{ address: "8.8.8.8", family: 4 }]);
     expect(await createChallengeConfirmer(resolve)("http://alerts.example.com", challenge)).toBe(false);
     expect(resolve).not.toHaveBeenCalled();
+  });
+});
+
+// The real HTTPS path against a local server on 127.0.0.1. The resolver sends
+// a public-looking name there, the address check and the trust anchor are
+// injected, and no packet leaves the machine.
+describe("the challenge confirmer over HTTPS", () => {
+  const HOST = "alerts.example.com";
+  const { cert, key } = selfSignedCertificate(HOST);
+  let respond: (req: IncomingMessage, res: ServerResponse) => void = () => {};
+  const seen: { host?: string | undefined; sni?: string | undefined; path?: string | undefined; hits: number } = { hits: 0 };
+  let server: Server;
+  let port = 0;
+
+  beforeAll(async () => {
+    server = createServer({ cert, key, SNICallback: (name, done) => { seen.sni = name; done(null, createSecureContext({ cert, key })); } }, (req, res) => {
+      seen.hits += 1; seen.host = req.headers.host; seen.path = req.url;
+      respond(req, res);
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    port = (server.address() as AddressInfo).port;
+  });
+  afterAll(async () => { server.closeAllConnections(); await new Promise((done) => server.close(done)); });
+  beforeEach(() => { seen.hits = 0; seen.host = undefined; seen.sni = undefined; seen.path = undefined; });
+
+  const resolve = async () => [{ address: "127.0.0.1", family: 4 }];
+  const confirmer = (timeoutMs = 2000) => createChallengeConfirmer(resolve, { isPublic: () => true, ca: cert, timeoutMs });
+  const url = () => `https://${HOST}:${port}/crit`;
+  const json = (body: unknown) => (_req: IncomingMessage, res: ServerResponse) => { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+
+  it("confirms a 200 with the same challenge, connecting to the vetted address with the right Host and SNI", async () => {
+    respond = json({ challenge });
+    expect(await confirmer()(url(), challenge)).toBe(true);
+    expect(seen.path).toBe(`/crit/v1/relay-challenge/${challenge}`);
+    expect(seen.host).toBe(`${HOST}:${port}`);
+    expect(seen.sni).toBe(HOST);
+  });
+
+  it("fails on a redirect and does not follow it", async () => {
+    respond = (_req, res) => { res.writeHead(302, { location: "https://alerts.example.com/elsewhere" }); res.end(); };
+    expect(await confirmer()(url(), challenge)).toBe(false);
+    expect(seen.hits).toBe(1);
+  });
+
+  it("fails on a body over 1024 bytes", async () => {
+    respond = json({ challenge, padding: "x".repeat(2000) });
+    expect(await confirmer()(url(), challenge)).toBe(false);
+  });
+
+  it("fails when the answer carries another challenge value", async () => {
+    respond = json({ challenge: "d".repeat(40) });
+    expect(await confirmer()(url(), challenge)).toBe(false);
+  });
+
+  it("fails on a status other than 200", async () => {
+    respond = (_req, res) => { res.writeHead(404); res.end(JSON.stringify({ error: "not found" })); };
+    expect(await confirmer()(url(), challenge)).toBe(false);
+  });
+
+  it("fails when the server answers too slowly", async () => {
+    respond = () => {};
+    const started = Date.now();
+    expect(await confirmer(200)(url(), challenge)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1500);
+  });
+
+  it("fails when the certificate is not trusted", async () => {
+    respond = json({ challenge });
+    expect(await createChallengeConfirmer(resolve, { isPublic: () => true, timeoutMs: 2000 })(url(), challenge)).toBe(false);
+  });
+
+  it("refuses the loopback address in its default configuration", async () => {
+    respond = json({ challenge });
+    expect(await createChallengeConfirmer(resolve, { ca: cert })(url(), challenge)).toBe(false);
+    expect(seen.hits).toBe(0);
   });
 });
