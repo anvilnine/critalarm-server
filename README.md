@@ -46,7 +46,7 @@ credential, which lives in the app. Source and docs:
 | `relay-url` | `RELAY_URL` | `https://relay.critalarm.app` | Relay destination; with push credentials and no `mode`, an explicit value means hosted mode |
 | `relay-content` | `RELAY_CONTENT` | `none` | `none` keeps body on server; `full` includes title/body in push |
 | - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller that sends no registration secret |
-| - | `RELAY_REGISTRATION_SECRET` | unset | A relay with this set also accepts a caller that sends it, with no challenge. A self-hosted server sends it when it is set. Only for a server the relay's operator runs on a private network |
+| - | `RELAY_REGISTRATION_SECRET` | unset | A relay with this set also accepts a caller that sends it, with no challenge and no check on the `base_url` it names. Its holder can register any `base_url`, so it is for the operator's own servers and is never given to anyone else. A self-hosted server sends it when it is set. More than 5 wrong secrets in 60 seconds from one client answers 429 |
 | `behind-proxy` | `BEHIND_PROXY` | `false` | Read the client address from `cf-connecting-ip`, `x-forwarded-for` or `x-real-ip` for rate limits. With `true`, the origin must accept connections from the proxy only, because the address then comes from a header any caller can type |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 

@@ -95,6 +95,42 @@ describe("a relay key pushes only its own server's topics", () => {
     } finally { db.close(); }
   });
 
+  it("takes a push with the largest title and body and refuses a body over 16384 bytes", async () => {
+    const { db, sent, register, subscribe, push } = await setup();
+    try {
+      const keyA = await register(A);
+      subscribe("dev_a", topicHash(A, "prod"));
+      const biggest = await push(keyA, { topic_hash: topicHash(A, "prod"), topic: "prod", title: "t".repeat(4096), body: "b".repeat(4096) });
+      expect(biggest.status).toBe(202);
+      expect(sent).toEqual(["dev_a"]);
+
+      const over = await push(keyA, { topic_hash: topicHash(A, "prod"), topic: "prod", title: "t".repeat(9000), body: "b".repeat(9000) });
+      expect(over.status).toBe(400);
+      expect(await over.json()).toEqual({ error: "invalid request" });
+      expect(sent).toEqual(["dev_a"]);
+    } finally { db.close(); }
+  });
+
+  it("refuses a body over 16384 bytes that has no content-length, by its actual size", async () => {
+    const { db, app, sent, register, subscribe } = await setup();
+    try {
+      const keyA = await register(A);
+      subscribe("dev_a", topicHash(A, "prod"));
+      const text = JSON.stringify({ topic_hash: topicHash(A, "prod"), topic: "prod", incident_id: "inc_1", message_id: "m_1", priority: 5, kind: "open", pad: "p".repeat(20_000) });
+      const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(text.slice(0, 10_000))); controller.enqueue(new TextEncoder().encode(text.slice(10_000))); controller.close(); } });
+      const response = await app.request(new Request("https://relay.example.com/relay/v1/push", { method: "POST", headers: { authorization: `Bearer ${keyA}`, "content-type": "application/json" }, body: stream, duplex: "half" } as RequestInit));
+      expect(response.status).toBe(400);
+      expect(sent).toEqual([]);
+    } finally { db.close(); }
+  });
+
+  it("answers 401 to a bad key before it reads a body of any size", async () => {
+    const { db, push } = await setup();
+    try {
+      expect((await push("rk_nobody", { topic_hash: "a".repeat(64), pad: "p".repeat(20_000) })).status).toBe(401);
+    } finally { db.close(); }
+  });
+
   it("answers 400 to a new key that sends no topic", async () => {
     const { db, sent, register, subscribe, push } = await setup();
     try {

@@ -97,6 +97,37 @@ describe("relay server registration without a secret", () => {
     } finally { db.close(); }
   });
 
+  it("takes a body of exactly 4096 bytes and refuses 4097, by content-length or by actual size", async () => {
+    const { db, app, confirm } = setup();
+    try {
+      const headers = { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1", host: HOST };
+      const sized = (bytes: number): string => {
+        const base = JSON.stringify({ base_url: BASE, version: "0.1.0", challenge: CHALLENGE, pad: "" });
+        return JSON.stringify({ base_url: BASE, version: "0.1.0", challenge: CHALLENGE, pad: "p".repeat(bytes - base.length) });
+      };
+      expect(sized(4096)).toHaveLength(4096);
+      expect((await app.request("/relay/v1/servers", { method: "POST", headers, body: sized(4096) })).status).toBe(201);
+      expect(confirm).toHaveBeenCalledTimes(1);
+
+      const declared = await app.request("/relay/v1/servers", { method: "POST", headers, body: sized(4097) });
+      expect(declared.status).toBe(400);
+      expect(await declared.json()).toEqual({ error: "invalid request" });
+
+      const callsBefore = confirm.mock.calls.length;
+      const header = await app.request("/relay/v1/servers", { method: "POST", headers: { ...headers, "content-length": "5000" }, body: sized(4096) });
+      expect(header.status).toBe(400);
+      expect(confirm.mock.calls.length).toBe(callsBefore);
+
+      const stream = (text: string) => new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(text.slice(0, 2000))); controller.enqueue(new TextEncoder().encode(text.slice(2000))); controller.close(); } });
+      const streamed = await app.request(new Request("https://relay.critalarm.app/relay/v1/servers", { method: "POST", headers, body: stream(sized(60_000)), duplex: "half" } as RequestInit));
+      expect(streamed.status).toBe(400);
+      expect(await streamed.json()).toEqual({ error: "invalid request" });
+      const streamedOk = await app.request(new Request("https://relay.critalarm.app/relay/v1/servers", { method: "POST", headers: { ...headers, "cf-connecting-ip": "203.0.114.9" }, body: stream(sized(4096)), duplex: "half" } as RequestInit));
+      expect(streamedOk.status).toBe(201);
+      expect(confirm).toHaveBeenCalledTimes(2);
+    } finally { db.close(); }
+  });
+
   it("answers 400 invalid request for a body that is not JSON", async () => {
     const { db, app } = setup();
     try {

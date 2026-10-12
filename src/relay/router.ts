@@ -30,6 +30,31 @@ const MAX_CONFIRMATIONS_IN_FLIGHT = 4;
 const GLOBAL_STARTS = { limit: 60, windowS: 60 };
 const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
 
+// Largest body each route reads. A registration is a URL, a version and a
+// challenge. A push may carry a title and a body of 4096 bytes each.
+const MAX_REGISTRATION_BYTES = 4096;
+const MAX_PUSH_BYTES = 16384;
+
+// The body as parsed JSON, or "too large", or undefined when it is not JSON.
+// A content-length over the limit is refused without reading anything. A body
+// with no such header, or a wrong one, is read only up to the limit.
+async function readJson(request: Request, maxBytes: number): Promise<unknown | "too large" | undefined> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && Number(declared) > maxBytes) return "too large";
+  if (request.body === null) return undefined;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > maxBytes) { await reader.cancel().catch(() => undefined); return "too large"; }
+    chunks.push(value);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown; } catch { return undefined; }
+}
+
 export interface RelayRouterOptions {
   // Lets a caller of POST /relay/v1/servers skip the challenge (api.md §4.1).
   registrationSecret?: string;
@@ -111,7 +136,9 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
       if (!bearerSecretMatches(authorization, secret ?? "")) { secretWindow.record(guesser); logRegistration("unauthorized"); return c.json({ error: "unauthorized" }, 401); }
     }
     if (!hasSecret && options.registration === "closed") { logRegistration("closed"); return c.json({ error: "registration closed" }, 403); }
-    const body = await c.req.json().catch(() => null) as { base_url?: unknown; version?: unknown; challenge?: unknown } | null;
+    const read = await readJson(c.req.raw, MAX_REGISTRATION_BYTES);
+    if (read === "too large") { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
+    const body = (read ?? null) as { base_url?: unknown; version?: unknown; challenge?: unknown } | null;
     if (body === null || typeof body !== "object" || typeof body.base_url !== "string" || typeof body.version !== "string" || body.base_url === "" || body.version.length > 200) { logRegistration("invalid request"); return c.json({ error: "invalid request" }, 400); }
     if (hasSecret) {
       if (body.base_url.length > 200) { logRegistration("invalid base_url"); return c.json({ error: "invalid base_url" }, 400); }
@@ -143,8 +170,9 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
     const server = keyHash === undefined ? undefined : db.prepare("SELECT base_url, legacy FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) as { base_url: string; legacy: number } | undefined;
     if (keyHash === undefined || server === undefined) return c.json({ error: "unauthorized" }, 401);
-    const body = await c.req.json().catch(() => null) as RelayPayload | null;
-    if (body === null || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "p5", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
+    const read = await readJson(c.req.raw, MAX_PUSH_BYTES);
+    const body = (read === "too large" || read === undefined ? null : read) as RelayPayload | null;
+    if (body === null || typeof body !== "object" || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "p5", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     // api.md §4.1. A key pushes only topics of the server it was registered
     // for. The topic name is used for this check alone: it is not stored,
     // logged or put on the event.
