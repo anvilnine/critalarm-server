@@ -324,6 +324,31 @@ describe("registration log", () => {
   });
 });
 
+describe("backoff cap by reason", () => {
+  // The shortest wait, in whole seconds, after which a forward calls the relay again.
+  async function waits(handler: Handler, count: number): Promise<number[]> {
+    const { client, registrations, advance, db } = setup(handler);
+    const out: number[] = [];
+    for (let i = 0; i < count; i += 1) {
+      await client.forwardOne(baseEvent).catch(() => undefined);
+      const calls = registrations().length;
+      let waited = 0;
+      for (;;) { advance(1_000); waited += 1_000; await client.forwardOne(baseEvent).catch(() => undefined); if (registrations().length > calls) break; }
+      out.push(waited / 1_000);
+    }
+    db.close();
+    return out;
+  }
+
+  it("caps the wait at 5 minutes when the relay answers 429", async () => {
+    expect(await waits(failing(429, "rate limited"), 7)).toEqual([30, 60, 120, 240, 300, 300, 300]);
+  });
+
+  it("keeps the 1 hour cap for other reasons", async () => {
+    expect(await waits(failing(500, "boom"), 9)).toEqual([30, 60, 120, 240, 480, 960, 1920, 3600, 3600]);
+  });
+});
+
 describe("forwards skipped while registration waits", () => {
   it("reports how many were dropped in the line that ends the wait, and counts nothing per event", async () => {
     let ok = false;
