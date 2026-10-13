@@ -271,7 +271,8 @@ describe("a key issued before 1.20.0", () => {
   it("is what the migration makes of every row that existed before it, even rows sharing a base_url", () => {
     const db = openDatabase(":memory:");
     try {
-      migrate(db, migrationCount - 1);
+      // The legacy migration is the one before the relay name column.
+      migrate(db, migrationCount - 2);
       const insert = db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES (?,?,'1',?,1)");
       insert.run("r1", A, "k1");
       insert.run("r2", A, "k2");

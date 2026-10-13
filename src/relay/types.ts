@@ -12,7 +12,9 @@ export interface RelayPayload {
   ring_until: number | null;
   title?: string; body?: string; topic?: string;
 }
-export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string; fetch?: (request: Request) => Promise<Response>;
+export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string;
+  // api.md §4.1, relay-plain-hash. False sends the secret push only. Unset is on.
+  plainHash?: boolean; fetch?: (request: Request) => Promise<Response>;
   // Milliseconds. Tests inject a fake one for the challenge window and the backoff.
   now?: () => number;
   // One JSON-able object per line. Defaults to console.error(JSON.stringify(line)).
