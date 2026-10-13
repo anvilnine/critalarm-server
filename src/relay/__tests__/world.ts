@@ -57,7 +57,8 @@ function buildWorld(options: { registration?: "open" | "closed"; plainHash?: boo
     headers.set("host", new URL(request.url).host);
     return router.request(new Request(request, { headers }));
   };
-  const relayFetch = async (request: Request): Promise<Response> => { relayCalls.push(`${request.method} ${new URL(request.url).pathname}`); return toRouter(request); };
+  const relayPushBodies: Record<string, unknown>[] = [];
+  const relayFetch = async (request: Request): Promise<Response> => { relayCalls.push(`${request.method} ${new URL(request.url).pathname}`); if (new URL(request.url).pathname === "/relay/v1/push") relayPushBodies.push(await request.clone().json() as Record<string, unknown>); return toRouter(request); };
   let phones = 0;
   const phone = (hash: string, accountId = `acc_${++phones}`): string => {
     relayDb.prepare("INSERT OR IGNORE INTO accounts (id,tier,created_at) VALUES (?,'hosted',1)").run(accountId);
@@ -91,7 +92,7 @@ function buildWorld(options: { registration?: "open" | "closed"; plainHash?: boo
   }
   const rawPush = (key: string, body: Record<string, unknown>) => router.request("/relay/v1/push", { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ incident_id: "inc_x", message_id: "m_x", priority: 5, kind: "open", ring_until: 2_000_000_000, ...body }) });
   const keyOf = (server: SelfHosted): string => (server.db.prepare("SELECT relay_key FROM relay_client_credentials WHERE relay_url = ?").get(RELAY_URL) as { relay_key: string } | undefined)?.relay_key ?? "";
-  return { relayDb, router, sent, servers, relayCalls, confirmed, phone, selfHosted, rawPush, keyOf, clock, toRouter };
+  return { relayDb, router, relayPushBodies, sent, servers, relayCalls, confirmed, phone, selfHosted, rawPush, keyOf, clock, toRouter };
 }
 
 
@@ -101,6 +102,8 @@ export interface World {
   sent: { device: string; kind: string; topicHash: string }[];
   servers: Map<string, SelfHosted>;
   relayCalls: string[];
+  // The JSON body of every push the relay received, in order.
+  relayPushBodies: Record<string, unknown>[];
   confirmed: boolean[];
   phone(hash: string, accountId?: string): string;
   selfHosted(baseUrl: string, db?: Database.Database, register?: boolean, via?: { relayUrl: string; fetch: (request: Request) => Promise<Response> }): SelfHosted;
