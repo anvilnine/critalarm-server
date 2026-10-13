@@ -3,6 +3,30 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.21.0 - 2026-10-13
+
+### Added
+
+- `relay_name` on every topic object of a `selfhosted` server (§3.1): 32
+  random bytes as 43 characters of base64url, made by the server, readable
+  with a management credential only. Absent in `relay` and `hosted` mode.
+- Server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`), `on` or `off`,
+  default `on` (§4.1).
+
+### Changed
+
+- The app subscribes a topic that has a `relay_name` as
+  `sha256(base_url + "/" + relay_name)`. A topic without one is subscribed
+  by name, as before (§3.1).
+- A self-hosted server pushes the hash made from `relay_name`, with
+  `relay_name` in the push's `topic` field. The relay's check is unchanged
+  and the relay does not see the topic's name on that push (§4.1).
+- While `relay-plain-hash` is `on`, the server also sends the push from
+  1.20.0, made from the topic's name, so an app from before this version
+  keeps getting alarms. Both pushes carry the same `message_id`.
+- Compatibility. The relay needs no change. An app from before 1.21.0
+  ignores `relay_name`. `relay` and `hosted` servers behave as in 1.20.0.
+
 ## 1.20.0 - 2026-10-13
 
 ### Added
