@@ -69,7 +69,7 @@ describe("ntfy publish", () => {
     const response = await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "5" }, body: "down" });
     expect(await response.json()).not.toHaveProperty("incident_id");
     expect(db.prepare("SELECT incident_id FROM messages").get()).toEqual({ incident_id: null });
-    expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p5", incidentId: null, priority: 5, critical: false })]);
+    expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p5", topic: "prod", incidentId: null, priority: 5, critical: false })]);
   });
 
   it("forwards priority 4 and suppresses priority 1 and 2 delivery", async () => {
@@ -78,7 +78,7 @@ describe("ntfy publish", () => {
     await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "1" }, body: "min" });
     await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "2" }, body: "low" });
     expect(dispatch).toHaveBeenCalledTimes(1);
-    expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p4", incidentId: null, priority: 4 })]);
+    expect(dispatch).toHaveBeenCalledWith([expect.objectContaining({ kind: "p4", topic: "prod", incidentId: null, priority: 4 })]);
   });
 
   it("forwards priority 4 after publisher-side cap removal", async () => {

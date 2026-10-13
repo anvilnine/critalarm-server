@@ -1,3 +1,4 @@
+import { relayHost } from "./relay/host.js";
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
@@ -56,6 +57,8 @@ export interface Config {
   relayUrl: string;
   relayUrlExplicit?: boolean;
   relayContent: "none" | "full";
+  // api.md §4.1. Self-hosted only: also push the hash made from the topic name.
+  relayPlainHash?: "on" | "off";
   listen: string;
   port: number;
   dataDir: string;
@@ -63,6 +66,9 @@ export interface Config {
   allowNoopPush?: boolean;
   statsKey?: string;
   relayRegistrationSecret?: string;
+  relayRegistration?: "open" | "closed";
+  // Extra public host names of this relay, beyond the hosts of base-url and relay-url.
+  relayPublicHosts?: string[];
   apns?: ApnsConfig;
   fcm?: FcmConfig;
   revenueCat?: RevenueCatConfig;
@@ -109,6 +115,7 @@ const fileSchema = z.object({
   "base-url": z.string().optional(),
   "relay-url": z.string().optional(),
   "relay-content": z.string().optional(),
+  "relay-plain-hash": z.string().optional(),
   listen: z.string().optional(),
   "data-dir": z.string().optional(),
   "behind-proxy": z.boolean().optional(),
@@ -280,6 +287,18 @@ function weeklyChecksValue(value: string | undefined): boolean {
   return false;
 }
 
+function relayPublicHosts(value: string | undefined): string[] {
+  const hosts = (value ?? "").split(",").map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== "");
+  for (const host of hosts) if (!/^[a-z0-9.-]+(:[0-9]{1,5})?$/.test(host) || relayHost(`https://${host}`) === undefined) throw configError("RELAY_PUBLIC_HOSTS");
+  return hosts.map((host) => relayHost(`https://${host}`) ?? host);
+}
+
+function relayRegistrationValue(value: string | undefined): "open" | "closed" {
+  if (value === undefined || value === "" || value === "open") return "open";
+  if (value !== "closed") throw configError("RELAY_REGISTRATION");
+  return "closed";
+}
+
 function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
@@ -365,6 +384,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const port = portValue(env.PORT ?? listen.slice(1));
   const relayContent = stringValue(env, "RELAY_CONTENT", file["relay-content"]) ?? "none";
   if (relayContent !== "none" && relayContent !== "full") throw configError("relay-content");
+  const relayPlainHash = stringValue(env, "RELAY_PLAIN_HASH", file["relay-plain-hash"]) ?? "on";
+  if (relayPlainHash !== "on" && relayPlainHash !== "off") throw configError("relay-plain-hash");
   const apns = apnsConfig(env, file);
   const fcm = fcmConfig(env, file);
   const revenueCatSecret = stringValue(env, "REVENUECAT_SHARED_SECRET", file.revenuecat?.["shared-secret"]);
@@ -419,15 +440,20 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     relayUrl: urlValue("relay-url", stringValue(env, "RELAY_URL", file["relay-url"]) ?? "https://relay.critalarm.app"),
     relayUrlExplicit,
     relayContent: relayContent as "none" | "full",
+    relayPlainHash: relayPlainHash as "on" | "off",
     listen,
     port,
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",
     behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
     allowNoopPush,
     ...(env.STATS_KEY === undefined || env.STATS_KEY === "" ? {} : { statsKey: env.STATS_KEY }),
-    // The secret POST /relay/v1/servers demands. Unset means the route is not
-    // mounted on a relay, and a self-hosted server registers without one.
+    // The secret that lets a caller of POST /relay/v1/servers skip the
+    // challenge (api.md §4.1). Unset means every caller proves its base_url.
     ...(env.RELAY_REGISTRATION_SECRET === undefined || env.RELAY_REGISTRATION_SECRET === "" ? {} : { relayRegistrationSecret: env.RELAY_REGISTRATION_SECRET }),
+    relayRegistration: relayRegistrationValue(env.RELAY_REGISTRATION),
+    // api.md §4.1. Host names a challenge answer may name as this relay, beyond
+    // the hosts of BASE_URL and RELAY_URL. Comma-separated.
+    ...(relayPublicHosts(env.RELAY_PUBLIC_HOSTS).length === 0 ? {} : { relayPublicHosts: relayPublicHosts(env.RELAY_PUBLIC_HOSTS) }),
     ...(apns === undefined ? {} : { apns }),
     ...(fcm === undefined ? {} : { fcm }),
     ...(revenueCatSecret === undefined ? {} : { revenueCat: { sharedSecret: revenueCatSecret, entitlements: revenueCatEntitlements } }),

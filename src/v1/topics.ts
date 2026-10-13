@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { Config } from "../config.js";
 import type { Clock } from "../incident/types.js";
@@ -12,9 +12,15 @@ const namePattern=/^[-_A-Za-z0-9]{1,64}$/;
 // and a missing name becomes Token N, where N is the topic's current token
 // count plus one.
 function chooseTokenName(input:unknown,count:number){const trimmed=typeof input==="string"?input.trim().slice(0,40).trim():"";return trimmed===""?`Token ${count+1}`:trimmed;}
-type Row={id:string;name:string;critical:number;repeat_interval_s:number;max_ring_s:number;desk_timer_s:number;relay_content:"none"|"full";created_at:number};
-function view(row:Row){return {name:row.name,critical:row.critical===1,repeat_interval_s:row.repeat_interval_s,max_ring_s:row.max_ring_s,desk_timer_s:row.desk_timer_s,relay_content:row.relay_content,created_at:row.created_at};}
-export function listTopics(db:Database.Database,accountId:string){return (db.prepare("SELECT id,name,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at FROM topics WHERE account_id=? ORDER BY created_at,name").all(accountId) as Row[]).map(view);}
+type Row={id:string;name:string;critical:number;repeat_interval_s:number;max_ring_s:number;desk_timer_s:number;relay_content:"none"|"full";created_at:number;relay_name:string|null};
+// api.md §3.1. 32 random bytes as 43 characters of base64url, and the same shape
+// as a topic name, which the relay's check relies on (§4.1).
+export function newRelayName(){return randomBytes(32).toString("base64url");}
+// Gives every topic without a relay name one. Safe to run more than once: a
+// topic that has one is left alone. Only a selfhosted server calls it.
+export function ensureRelayNames(db:Database.Database){const set=db.prepare("UPDATE topics SET relay_name=? WHERE id=? AND relay_name IS NULL");db.transaction(()=>{for(const row of db.prepare("SELECT id FROM topics WHERE relay_name IS NULL").all() as {id:string}[])set.run(newRelayName(),row.id);})();}
+function view(row:Row,config:Config){return {name:row.name,critical:row.critical===1,repeat_interval_s:row.repeat_interval_s,max_ring_s:row.max_ring_s,desk_timer_s:row.desk_timer_s,relay_content:row.relay_content,created_at:row.created_at,...(config.mode==="selfhosted"&&row.relay_name!==null?{relay_name:row.relay_name}:{})};}
+export function listTopics(db:Database.Database,config:Config,accountId:string){return (db.prepare("SELECT id,name,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at,relay_name FROM topics WHERE account_id=? ORDER BY created_at,name").all(accountId) as Row[]).map(row=>view(row,config));}
 function criticalCapReached(db: Database.Database, config: Config, accountId: string): boolean {
   if (config.mode === "selfhosted") return false;
   const account = db.prepare("SELECT tier FROM accounts WHERE id=?").get(accountId) as { tier: Tier };
@@ -33,16 +39,16 @@ export function createTopic(db: Database.Database, config: Config, clock: Clock,
     const id = `top_${randomUUID()}`;
     const now = clock.now();
     const topicHash = createHash("sha256").update(`${config.baseUrl}/${name}`).digest("hex");
-    db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES (?,?,?,?,?,?,30,1800,600,?,?)").run(id,accountId,name,config.baseUrl,topicHash,critical ? 1 : 0,config.relayContent,now);
+    db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at,relay_name) VALUES (?,?,?,?,?,?,30,1800,600,?,?,?)").run(id,accountId,name,config.baseUrl,topicHash,critical ? 1 : 0,config.relayContent,now,config.mode==="selfhosted"?newRelayName():null);
     // A brand new topic holds no tokens yet, so an unnamed first token is
     // always Token 1.
     const chosen = chooseTokenName(tokenName, 0);
     db.prepare("INSERT INTO topic_tokens (id,topic_id,hash,name,created_at) VALUES (?,?,?,?,?)").run(tokenId,id,createHash("sha256").update(token).digest("hex"),chosen,now);
     sweepTopicIntoDevices(db, accountId, topicHash);
-    return {...view(ownedTopic(db, accountId, name)!), token, token_id: tokenId, token_name: chosen};
+    return {...view(ownedTopic(db, accountId, name)!, config), token, token_id: tokenId, token_name: chosen};
   })();
 }
-export function ownedTopic(db:Database.Database,accountId:string,name:string){return db.prepare("SELECT id,name,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at FROM topics WHERE account_id=? AND name=?").get(accountId,name) as Row|undefined;}
+export function ownedTopic(db:Database.Database,accountId:string,name:string){return db.prepare("SELECT id,name,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at,relay_name FROM topics WHERE account_id=? AND name=?").get(accountId,name) as Row|undefined;}
 export function patchTopic(db: Database.Database, config: Config, accountId: string, name: string, input: Record<string, unknown>) {
   return db.transaction(() => {
     const topic = ownedTopic(db, accountId, name); if (topic === undefined) return undefined;

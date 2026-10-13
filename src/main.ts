@@ -14,7 +14,8 @@ import { ApnsProviderToken } from "./push/apns-token.js";
 import { FcmSender } from "./push/fcm.js";
 import { PushDispatcher } from "./push/dispatcher.js";
 import type { PushSender } from "./push/types.js";
-import { RelayClient } from "./relay/client.js";
+import { RelayClient, RelayKeyError } from "./relay/client.js";
+import { runAfterListen } from "./relay/startup.js";
 import { createAuthHandler } from "./auth/better-auth.js";
 import { createBilling } from "./tier/billing-startup.js";
 import { createChecks } from "./check/startup.js";
@@ -46,10 +47,15 @@ const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clo
 const checks = createChecks(config, { db, clock, fetch, ...(apnsToken === undefined ? {} : { apnsToken }) });
 const dispatcher = new PushDispatcher(db, { apns: checks.noting(apns), fcm: checks.noting(fcm), liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
-const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
+const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, plainHash: config.relayPlainHash !== "off", ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
 const dispatch = async (events: readonly DeliveryEvent[]) => {
   if (relay !== undefined) {
-    try { await relay.forward(events); } catch (error: unknown) { console.error("relay forward failed", error); }
+    try { await relay.forward(events); } catch (error: unknown) {
+      // A key failure is already logged once by the client, which is backing
+      // off. The client counts the forwards dropped here, and the line that ends
+      // the wait reports the count. There is no line per event.
+      if (!(error instanceof RelayKeyError)) console.error("relay forward failed", error);
+    }
     return;
   }
   return dispatcher.dispatch(events);
@@ -70,9 +76,8 @@ const stopReconcile = billing.start();
 const reconcileAfterMerge = (accountId: string) => {
   void billing.afterMerge(accountId).catch((error: unknown) => { console.error("revenuecat reconcile failed", error); });
 };
-const app = createApp({ config, db, clock, ids, dispatch, reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }), ...(billing.storeReads === undefined ? {} : { storeReads: billing.storeReads }) });
+const app = createApp({ config, db, clock, ids, dispatch, ...(relay === undefined ? {} : { relayChallenge: (value: string) => relay.isRelayChallenge(value) }), reconcileAccount: reconcileAfterMerge, ...(authHandler === undefined ? {} : { authHandler }), ...(billing.storeReads === undefined ? {} : { storeReads: billing.storeReads }) });
 
-await dispatch(incidents.scanDue());
 const stop = startTimerScanner(incidents, dispatch, 250);
 // api.md §4.2. Retention, on its own slower timer: the window moves by a day,
 // so once an hour is enough. On a self-hosted server this starts nothing, and
@@ -94,7 +99,9 @@ const handler: typeof app.fetch = logRequests
       return response;
     }
   : app.fetch;
-serve({ fetch: handler, port: config.port });
+// See runAfterListen: listen first, then register with the relay, then catch up
+// on timers that came due while the server was down.
+await runAfterListen((onListening) => { serve({ fetch: handler, port: config.port }, onListening); }, { ...(relay === undefined ? {} : { register: () => relay.registerAtStartup() }), scanDue: async () => { await dispatch(incidents.scanDue()); } });
 const shutdown = () => { stop(); stopPrune(); stopChecks(); stopReconcile(); apnsSender?.close(); db.close(); process.exit(0); };
 process.once("SIGTERM", shutdown);
 process.once("SIGINT", shutdown);
