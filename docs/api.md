@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.20.0
+**Version:** 1.21.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.21.0** stops a stranger from working out the hash a phone listens on, for topics on a self-hosted server. Until now the hash was `sha256(base_url + "/" + topic)`, and both parts are known or easy to guess: `base_url` is in the open `GET /v1/info`, and topic names like `prod` are common. Any device registered with the relay may subscribe to any hash (§4.2), so a stranger could subscribe a phone of their own to another server's topic and learn when it fires, and read the title and body when that server runs `relay_content: full`. From this version a `selfhosted` server gives every topic a `relay_name`, 32 random bytes, and returns it on the topic object, which only a management credential can read (§3.1). The app makes the hash from `relay_name` in place of the name when a topic has one. The server pushes that hash and sends `relay_name` in the push's `topic` field (§4.1), so the relay's check from 1.20.0 works unchanged and the relay no longer sees the topic's name on that push. A server in `relay` or `hosted` mode returns no `relay_name` and nothing changes there: it finds devices by account as well as by hash, so a guessed hash reaches nobody. Everything is additive. An app built before this version ignores the new field and keeps subscribing to the hash made from the name. A self-hosted server keeps pushing that hash too, as a second push, until its owner turns it off (`relay-plain-hash`, §4.1). The relay needs no change.
 
 **1.20.0** lets a self-hosted server get a relay key without a secret from the relay's operator, and ties every relay key to one server. Three changes, all in §4.1 and the new §3.8. First, registration carries a `challenge`. The relay calls the server back at its `base_url` and issues a key only when the server answers with the same value, so a key is proof that its holder answers at that `base_url`. Second, a push carries `topic`, the topic's name. The relay works out `sha256(base_url + "/" + topic)` from the `base_url` the key was registered with and refuses a push whose `topic_hash` is anything else, so a key can only ring subscribers of its own server's topics. Until now any key holder could push any hash it could compute, which is why registration was closed to strangers. Third, a server answers `GET /v1/relay-challenge/{challenge}` (§3.8). The relay now sees a topic's name while it checks a push. It does not store it, log it or send it on. The app is untouched: it sends and receives nothing new. A server built for 1.19.0 that holds a key from before this version keeps pushing as it did. A server built for 1.19.0 that asks for a new key without the operator's secret is refused with `400`, because it sends no `challenge`.
 
@@ -245,7 +247,8 @@ Wrong, missing, or out of scope → `401`.
 
 ```
 GET    /v1/topics
-→ 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":... }]
+→ 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":...,
+           "relay_name":"<43 characters of [A-Za-z0-9_-]>" }]   // relay_name: selfhosted mode only
 
 POST   /v1/topics
   { "name":"prod", "critical":false, "token_name":"CI server" }   // critical and token_name optional
@@ -282,6 +285,10 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 `critical` defaults to `false` on creation. A topic that rings has to be switched on deliberately, so the default stays `false`.
 
 `relay_content` is read-only here; it is server config.
+
+**`relay_name` is the secret half of a topic's hash.** A server in `selfhosted` mode makes one for every topic: 32 random bytes written as 43 characters of base64url. It is on every topic object the server returns (`GET`, `POST`, `PATCH`), it never changes for the life of the topic, and no request can set it. A topic that existed before the server was upgraded gets one at the upgrade. No route without a management credential returns it, and it is never written to a log. A server in `relay` or `hosted` mode leaves the field out.
+
+**The app picks the hash from the topic object.** A topic with a `relay_name` is subscribed as `sha256(base_url + "/" + relay_name)`. A topic without one is subscribed as `sha256(base_url + "/" + name)`, as before. `base_url` is the one from `GET /v1/info` in both cases. An app that learns a `relay_name` for a topic it had subscribed by name adds the new subscription first and removes the old one after the relay has answered `204`, so there is no moment with neither. Between the two calls the device holds both, and a server that still pushes the plain hash (§4.1) reaches it twice with the same `message_id`. The app treats the second as a duplicate.
 
 **A token name is optional on the way in and always present on the way out.** `token_name` on topic creation and `name` on `POST .../tokens` may be left off; `name` on the `PATCH` may not. A name is trimmed and then cut to 40 characters, so a longer one is shortened rather than refused. A name that is empty after trimming counts as missing, and a missing name becomes `Token N`, where N is the topic's current token count plus one. Names are not unique inside a topic, so two tokens may carry the same one. That has a visible edge: delete `Token 2` of three and mint another, and the topic holds two rows called `Token 3` until somebody renames one. Making that impossible needs a per-topic counter that survives deletes, which is more state than the problem is worth.
 
@@ -541,7 +548,7 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 
 {
   "topic_hash": "sha256hex",                 // sha256(base_url + "/" + topic)
-  "topic": "prod",                           // the topic's name. checked against topic_hash, then dropped
+  "topic": "prod",                           // what the hash was made from: the topic's relay_name (§3.1), or its name. checked, then dropped
   "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
   "message_id": "m_7f3k2p9q",
   "priority": 5,
@@ -558,7 +565,9 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 → 429 {"error":"cap", "cap":"critical_topics"|"devices"|"p4_daily"}
 ```
 
-**A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must be a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
+**A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must have the shape of a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), which a `relay_name` also has, so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
+
+**A topic with a `relay_name` has two hashes, and the server may push both.** The secret hash is `sha256(base_url + "/" + relay_name)`, pushed with `topic` set to the `relay_name`. The plain hash is `sha256(base_url + "/" + name)`, pushed with `topic` set to the name. An app from before 1.21.0 is subscribed to the plain hash, and an app from 1.21.0 on is subscribed to the secret one. The server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`) decides whether the plain push is sent: `on` sends both pushes for every event, `off` sends the secret one only. The default is `on` in this version. Both pushes carry the same `incident_id`, `message_id`, `kind` and `ring_until`. The server works out both hashes from the `BASE_URL` it is running with. While `relay-plain-hash` is `on`, a stranger who guesses the name can still subscribe to the plain hash, so an owner whose phones all run an app from 1.21.0 on turns it `off`. The relay cannot tell the two pushes apart and does not need to: each passes the same check.
 
 A key issued before 1.20.0 has no proven `base_url` behind it. The relay still accepts a push from one without `topic`, and checks `topic` when it is sent. Every key issued from 1.20.0 on needs `topic` on every push.
 
@@ -603,7 +612,7 @@ PATCH  /relay/v1/devices/{device_id}                     // re-register: new pus
 
 POST   /relay/v1/devices/{device_id}/subscriptions
   Authorization: Bearer dv_...
-  { "topic_hash":"sha256hex" }
+  { "topic_hash":"sha256hex" }                         // which hash: §3.1
 → 204
 
 DELETE /relay/v1/devices/{device_id}/subscriptions/{topic_hash}
