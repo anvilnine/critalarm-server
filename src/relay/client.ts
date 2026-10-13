@@ -62,8 +62,61 @@ export class RelayClient {
     // not critical while it has an incident. The wire has no field for that
     // state, so the relay could not tell it from a p5 that should ring.
     if (event.kind === "p5" && event.incidentId !== null && !event.critical) return undefined;
-    const payload: RelayPayload = { topic_hash: event.topicHash, topic: event.topic, incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind, ring_until: event.ringUntil };
-    if (this.options.relayContent === "full") { payload.title = event.title; payload.body = event.body; }
+    const base = { incident_id: event.incidentId, message_id: event.messageId, priority: event.priority, kind: event.kind, ring_until: event.ringUntil };
+    const content = this.options.relayContent === "full" ? { title: event.title, body: event.body } : {};
+    // api.md §4.1. A topic with a relay name has two hashes. The secret push goes
+    // first and always. The plain push follows while relay-plain-hash is on, and
+    // alone when the topic has no relay name. One push failing never stops the
+    // other, and each recovers its own key, so neither is sent twice.
+    const relayName = this.relayNameOf(event);
+    const plain: RelayPayload = { topic_hash: event.topicHash, topic: event.topic, ...base, ...content };
+    let response: Response | undefined;
+    let failure: { error: unknown } | undefined;
+    const attempt = async (run: () => Promise<Response>): Promise<void> => {
+      try { response = await run(); } catch (error: unknown) { failure ??= { error }; }
+    };
+    if (relayName !== undefined) await attempt(() => this.pushSecret(relayName, base, content));
+    if (relayName === undefined || this.options.plainHash !== false) await attempt(() => this.pushPlain(event, plain));
+    if (failure !== undefined) throw failure.error;
+    return response;
+  }
+
+  // The relay name of the topic this event belongs to, or undefined when the
+  // topic has none (or is gone). It is read per event so it is never held in
+  // memory longer than a push.
+  private relayNameOf(event: DeliveryEvent): string | undefined {
+    const row = this.options.db.prepare("SELECT relay_name FROM topics WHERE topic_hash = ? AND name = ?").get(event.topicHash, event.topic) as { relay_name: string | null } | undefined;
+    return row?.relay_name ?? undefined;
+  }
+
+  // The hash is worked out from the BASE_URL set now, on every push, so a
+  // changed BASE_URL needs no stored value to be fixed.
+  private async pushSecret(relayName: string, base: Omit<RelayPayload, "topic_hash" | "topic" | "title" | "body">, content: { title?: string; body?: string }): Promise<Response> {
+    const payload: RelayPayload = { topic_hash: topicHash(this.options.baseUrl, relayName), topic: relayName, ...base, ...content };
+    let key = await this.key();
+    let response = await this.push(key, payload);
+    if (response.status === 401) {
+      this.dropKey(key);
+      key = await this.key();
+      response = await this.push(key, payload);
+    }
+    if (await isTopicMismatch(response)) {
+      // The hash was made from the current BASE_URL, so the key was registered
+      // under an older one. Drop it, register again and try once more.
+      this.dropKey(key);
+      this.log({ event: "relay_key_replaced", relay_url: this.options.relayUrl, base_url: this.options.baseUrl, message: "The relay key was registered under an older BASE_URL. The server drops it and registers again with the current BASE_URL." });
+      key = await this.key();
+      response = await this.push(key, payload);
+      if (await isTopicMismatch(response)) {
+        this.log({ event: "relay_topic_mismatch", relay_url: this.options.relayUrl, base_url: this.options.baseUrl, message: "The relay refused a key it issued a moment ago for the current BASE_URL. Check that RELAY_URL points at a Crit Alarm relay and that BASE_URL is exactly the address the app uses for this server." });
+        throw new RelayKeyError("relay push refused: topic mismatch");
+      }
+    }
+    if (!response.ok) throw new Error(`relay push failed: ${response.status}`);
+    return response;
+  }
+
+  private async pushPlain(event: DeliveryEvent, payload: RelayPayload): Promise<Response> {
     let key = await this.key();
     let response = await this.push(key, payload);
     if (response.status === 401) {

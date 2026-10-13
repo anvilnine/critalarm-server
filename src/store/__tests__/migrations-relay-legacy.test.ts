@@ -13,7 +13,8 @@ describe("the relay key legacy migration", () => {
   function before() {
     const db = openDatabase(":memory:");
     databases.push(db);
-    migrate(db, migrationCount - 1);
+    // The legacy migration is the one before the relay name column.
+    migrate(db, migrationCount - 2);
     return db;
   }
 

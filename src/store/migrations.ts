@@ -494,6 +494,9 @@ const migrations: Migration[] = [
       PRIMARY KEY (client, day_start)
     );
   `,
+  // api.md §3.1. The secret half of a topic's relay hash. Null until the server
+  // makes one, which only a selfhosted server does.
+  `ALTER TABLE topics ADD COLUMN relay_name TEXT;`,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the

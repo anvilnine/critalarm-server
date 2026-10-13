@@ -1,3 +1,4 @@
+import { ensureRelayNames } from "./v1/topics.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { Config } from "./config.js";
@@ -36,6 +37,9 @@ export interface AppDependencies { config: Config; db: Database.Database; clock:
   // api.md §3.8. True for the relay challenge in flight. Only a selfhosted server with a relay client supplies it.
   relayChallenge?: (value: string) => boolean; }
 export function createApp(deps: AppDependencies): Hono {
+  // api.md §3.1. A topic made before the upgrade gets its relay name before the
+  // first request.
+  if (deps.config.mode === "selfhosted") ensureRelayNames(deps.db);
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
   // api.md §3.7. better-auth's OAuth surface, gated twice: main.ts builds the

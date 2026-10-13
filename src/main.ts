@@ -47,7 +47,7 @@ const fcm = config.fcm === undefined ? noop : new FcmSender({ ...config.fcm, clo
 const checks = createChecks(config, { db, clock, fetch, ...(apnsToken === undefined ? {} : { apnsToken }) });
 const dispatcher = new PushDispatcher(db, { apns: checks.noting(apns), fcm: checks.noting(fcm), liveActivity: apnsSender }, clock);
 const incidents = new IncidentService(db, clock, ids);
-const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
+const relay = (config.mode ?? "relay") === "selfhosted" ? new RelayClient({ db, relayUrl: config.relayUrl, baseUrl: config.baseUrl, relayContent: config.relayContent, plainHash: config.relayPlainHash !== "off", ...(config.relayRegistrationSecret === undefined ? {} : { registrationSecret: config.relayRegistrationSecret }) }) : undefined;
 const dispatch = async (events: readonly DeliveryEvent[]) => {
   if (relay !== undefined) {
     try { await relay.forward(events); } catch (error: unknown) {

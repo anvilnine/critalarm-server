@@ -57,6 +57,8 @@ export interface Config {
   relayUrl: string;
   relayUrlExplicit?: boolean;
   relayContent: "none" | "full";
+  // api.md §4.1. Self-hosted only: also push the hash made from the topic name.
+  relayPlainHash?: "on" | "off";
   listen: string;
   port: number;
   dataDir: string;
@@ -113,6 +115,7 @@ const fileSchema = z.object({
   "base-url": z.string().optional(),
   "relay-url": z.string().optional(),
   "relay-content": z.string().optional(),
+  "relay-plain-hash": z.string().optional(),
   listen: z.string().optional(),
   "data-dir": z.string().optional(),
   "behind-proxy": z.boolean().optional(),
@@ -381,6 +384,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
   const port = portValue(env.PORT ?? listen.slice(1));
   const relayContent = stringValue(env, "RELAY_CONTENT", file["relay-content"]) ?? "none";
   if (relayContent !== "none" && relayContent !== "full") throw configError("relay-content");
+  const relayPlainHash = stringValue(env, "RELAY_PLAIN_HASH", file["relay-plain-hash"]) ?? "on";
+  if (relayPlainHash !== "on" && relayPlainHash !== "off") throw configError("relay-plain-hash");
   const apns = apnsConfig(env, file);
   const fcm = fcmConfig(env, file);
   const revenueCatSecret = stringValue(env, "REVENUECAT_SHARED_SECRET", file.revenuecat?.["shared-secret"]);
@@ -435,6 +440,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     relayUrl: urlValue("relay-url", stringValue(env, "RELAY_URL", file["relay-url"]) ?? "https://relay.critalarm.app"),
     relayUrlExplicit,
     relayContent: relayContent as "none" | "full",
+    relayPlainHash: relayPlainHash as "on" | "off",
     listen,
     port,
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",
