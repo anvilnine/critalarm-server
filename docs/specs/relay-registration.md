@@ -76,6 +76,30 @@ a topic name on the relay side.
 Keys issued before this version are marked `legacy` by the migration. They may push without
 `topic`, and a `topic` they send is checked. Every key issued from now on needs `topic`.
 
+## Relay name (1.21.0)
+
+Contract 1.21.0 (`docs/api.md` §3.1 and §4.1) closes the first item under "What is still open": a
+guessed URL and topic name no longer lead to the hash.
+
+- A `selfhosted` server gives every topic a `relay_name`, 32 bytes from `crypto.randomBytes` as 43
+  characters of base64url. Migration 23 adds the column. The server fills it for topics that exist
+  at startup, before the first request. Nothing changes it afterwards and no request sets it.
+- The relay client pushes `sha256(BASE_URL + "/" + relay_name)` with `topic` set to the relay name.
+  It works the hash out from the `BASE_URL` it runs with on every push.
+- The relay needs no change. A relay name has the shape of a topic name (`[-_A-Za-z0-9]{1,64}`), so
+  the check in `router.ts` that hashes `base_url + "/" + topic` accepts it.
+- `relay-plain-hash` (`RELAY_PLAIN_HASH`, default `on`) decides whether the older push, made from
+  the topic's name, goes out too. Both pushes carry the same `incident_id`, `message_id`, `kind` and
+  `ring_until`. A failure of one does not stop the other, and each push recovers its own key, so a
+  `401` on the secret push does not send the plain one twice.
+- Key recovery on `401` and on `topic mismatch` works for both pushes. The secret hash is worked out
+  fresh, so a `topic mismatch` on it always means the key was registered under an older `BASE_URL`.
+  The "topic created under another `BASE_URL`" case applies to the plain hash only.
+- The relay counts one event per push (`router.ts` line 213, `src/stats/counters.ts` line 84), so
+  with both pushes on, `incidents_opened`, `alarms_rung` and `acks` for that key count twice. The
+  `p4_daily` cap counts per account that holds the hash. An account subscribed to both hashes is
+  charged twice for one p4 event, which only happens while an app holds both subscriptions.
+
 ## Limits added
 
 - `base_url` must be `https`, a dotted host name with at least two labels (no IP literal, no
@@ -136,12 +160,14 @@ No code deletes these rows.
 
 ## What is still open
 
-- **A guessed URL and topic name still subscribe a stranger.** The hash is computable by anyone who
-  knows a server's URL and a topic name. Such a person can subscribe a phone of their own to that
-  hash and learn when the topic fires. If that server runs `relay-content: full`, they also read
-  the title and body. A key cannot push to the topic, and nothing stops anyone listening to it.
+- **A guessed URL and topic name still subscribe a stranger while `relay-plain-hash` is `on`.** The
+  hash is computable by anyone who knows a server's URL and a topic name. Such a person can
+  subscribe a phone of their own to that hash and learn when the topic fires. If that server runs
+  `relay-content: full`, they also read the title and body. A key cannot push to the topic, and
+  nothing stops anyone listening to it. With the setting `off`, only the hash made from the relay
+  name goes out, and nobody can guess it.
 - **Upgrading a server that holds a key from before 1.20.0 can silence old topics.** The 1.20.0 server sends `topic` on every push, so the relay now checks the hash. A topic created under an older `BASE_URL` stops ringing after the upgrade, and the log says so once per topic.
 - **A server on a private network cannot register without the operator's secret.** The relay will not call a private address.
 - **A registration by challenge costs the relay a DNS query and a connection to a host the caller picks.** The limits above bound how many at a time and per minute. They do not stop a determined caller who uses many /64 networks, which is why the global limits exist.
 
-A per-server secret salt in the hash would close the first two, and it needs an app change, so it is not part of this work.
+The relay name closes the first item once `relay-plain-hash` is `off`. It does not touch the second.
