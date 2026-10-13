@@ -355,12 +355,37 @@ operator nothing at all to go on.
 
 - No public topics. Every topic has a token from creation.
 - The topic hash on the relay is `sha256(base_url + "/" + topic)`, ntfy's
-  scheme. Knowing the hash lets you receive pokes for a topic, not send them.
-  Sending needs the topic token on the user's server.
-- The relay server key comes from `POST /relay/v1/servers`. Today that route
-  only mounts when `RELAY_REGISTRATION_SECRET` is set and then demands it, and
-  nothing rate-limits it. The contract still says anonymous; that gap is an
-  open item in `planning/decisions.md`.
+  scheme. Knowing the hash lets you subscribe a phone to a topic and learn when
+  it fires, and read title and body if that server runs `relay-content: full`.
+  It does not let you send. Sending needs the topic token on the user's server,
+  and a push to the relay needs a relay key for the same `base_url`.
+- The relay server key comes from `POST /relay/v1/servers`. The route is always
+  mounted on a relay. A server gets a key by answering a challenge at its
+  `base_url` (`GET /v1/relay-challenge/{challenge}`), or by sending the
+  operator's `RELAY_REGISTRATION_SECRET`. The relay keeps the `base_url` with
+  the key and checks every push: `sha256(base_url + "/" + topic)` must equal
+  `topic_hash`, or the answer is `403 topic mismatch`. A key issued before
+  contract 1.20.0 is marked `legacy` and can still push any hash without
+  `topic`. Some of those keys may date from when registration needed no
+  secret, so before opening registration an operator lists them with
+  `SELECT id, base_url, version, created_at FROM relay_servers WHERE legacy = 1;`
+  and deletes any row they cannot attribute with
+  `DELETE FROM relay_servers WHERE id = '<id>';`. The server never deletes
+  these rows itself. The challenge answer names the relay it was made for, and
+  the relay accepts it only when that is one of its own public host names. It
+  takes them from configuration (the hosts of `BASE_URL` and `RELAY_URL`, plus
+  `RELAY_PUBLIC_HOSTS`) and never from the request.
+  Registration by challenge is
+  limited to 5 calls per minute and 20 per day per client, where an IPv6
+  client is its /64 and an IPv4-mapped IPv6 address is its IPv4, and to 60
+  confirmations started per minute and 4 running at once across all clients.
+  `RELAY_REGISTRATION=closed` shuts it to callers without the secret. The
+  secret skips the challenge and every check on the `base_url`, so it is for the
+  operator's own servers and is never handed to anyone else. With
+  `BEHIND_PROXY=true` the client address comes from a header, so the origin must
+  accept connections from the proxy only. A per-server salt in the hash would
+  close the subscribe gap above and needs an app change. Design note:
+  `docs/specs/relay-registration.md`.
 - Device routes need the device token issued at registration. Registration
   itself is the only unauthenticated relay route.
 - A device token reaches only rows owned by its account. Another account's topic

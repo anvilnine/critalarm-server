@@ -1,3 +1,4 @@
+import { topicHash } from "../../relay/hash.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Config } from "../../config.js";
@@ -11,7 +12,9 @@ import { migrate } from "../../store/migrations.js";
 
 const RELAY_KEY = "rk_abusive000000000000000000000000";
 const KEY_HASH = createHash("sha256").update(RELAY_KEY).digest("hex");
-const TOPIC_HASH = "b".repeat(64);
+const BASE_URL = "https://alerts.example.com";
+// A key registered under 1.20.0 pushes a topic whose hash is its own base_url's.
+const TOPIC_HASH = topicHash(BASE_URL, "prod");
 const STATS_KEY = "sk_stats_test";
 const noon = Math.floor(Date.UTC(2026, 8, 13, 12, 0, 0) / 1000);
 
@@ -46,7 +49,7 @@ function setup(mode: "relay" | "selfhosted" = "relay", statsKey: string | null =
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_android','acc_1','h_android','android','android-token',?)").run(noon);
   db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_ios',?)").run(TOPIC_HASH);
   db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_android',?)").run(TOPIC_HASH);
-  db.prepare("INSERT INTO relay_servers (id, base_url, version, relay_key_hash, created_at) VALUES ('rly_1','https://alerts.example.com','0.1.0',?,1)").run(KEY_HASH);
+  db.prepare("INSERT INTO relay_servers (id, base_url, version, relay_key_hash, created_at) VALUES ('rly_1',?,'0.1.0',?,1)").run(BASE_URL, KEY_HASH);
   const clock = { now: () => noon };
   const dispatcher = new PushDispatcher(
     db,
@@ -67,7 +70,7 @@ function push(app: ReturnType<typeof setup>["app"], kind: string) {
   return app.request("/relay/v1/push", {
     method: "POST",
     headers: { authorization: `Bearer ${RELAY_KEY}`, "content-type": "application/json" },
-    body: JSON.stringify({ topic_hash: TOPIC_HASH, incident_id: "inc_1", message_id: "m_1", priority: 5, kind }),
+    body: JSON.stringify({ topic_hash: TOPIC_HASH, topic: "prod", incident_id: "inc_1", message_id: "m_1", priority: 5, kind }),
   });
 }
 

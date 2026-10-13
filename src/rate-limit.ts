@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { rateLimiter } from "hono-rate-limiter";
 import type { Context, MiddlewareHandler } from "hono";
 import type { Bindings, Variables } from "./index.js";
+import { embeddedIpv4, ipv6Groups } from "./relay/address.js";
 
 type Ctx = { Bindings: Bindings; Variables: Variables };
 
@@ -13,8 +16,13 @@ type Ctx = { Bindings: Bindings; Variables: Variables };
 // Cloudflare always overwrites cf-connecting-ip and a client cannot reach
 // through it. With no such header, fall back to the forwarded hops, so a
 // self-hoster behind a plain nginx still gets per-client limiting.
-function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
-  if (!behindProxy) return c.env?.incoming?.socket?.remoteAddress ?? "anonymous";
+export interface ClientIpSource {
+  env?: unknown;
+  req: { header(name: string): string | undefined };
+}
+
+export function clientIp(c: ClientIpSource, behindProxy: boolean): string {
+  if (!behindProxy) return (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "anonymous";
   const cloudflare = c.req.header("cf-connecting-ip")?.trim();
   if (cloudflare) return cloudflare;
   const xff = c.req.header("x-forwarded-for");
@@ -23,6 +31,25 @@ function clientIp(c: Context<Ctx>, behindProxy: boolean): string {
     if (first) return first;
   }
   return c.req.header("x-real-ip") ?? "anonymous";
+}
+
+// The key a per-client limit counts on. An IPv4 address stands for itself. An
+// IPv6 address stands for its /64, because one home or one rented host holds a
+// whole /64 and could otherwise pick a new address for every call. An
+// IPv4-mapped IPv6 address counts as its IPv4. Anything that is not an address
+// (a header a caller typed) is hashed, so no key grows past 64 characters.
+export function clientKey(address: string): string {
+  const text = address.trim();
+  const family = isIP(text);
+  if (family === 4) return text;
+  if (family === 6) {
+    const groups = ipv6Groups(text);
+    if (groups !== undefined) {
+      if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) return embeddedIpv4(groups).join(".");
+      return `v6:${groups.slice(0, 4).map((group) => group.toString(16)).join(":")}`;
+    }
+  }
+  return `h:${createHash("sha256").update(text).digest("hex").slice(0, 32)}`;
 }
 
 // 30 requests / 60s per IP by default, in-memory store. Each call builds its

@@ -31,7 +31,7 @@ describe("relay client", () => {
   it("forwards a p5 that joins an open incident", async () => {
     const { bodies, client, event, db } = harness();
     await client.forwardOne({ ...event, kind: "p5", ringUntil: 1_010 });
-    expect(bodies).toEqual([{ topic_hash: "a".repeat(64), incident_id: "inc", message_id: "msg", priority: 5, kind: "p5", ring_until: 1_010 }]);
+    expect(bodies).toEqual([{ topic_hash: "a".repeat(64), topic: "prod", incident_id: "inc", message_id: "msg", priority: 5, kind: "p5", ring_until: 1_010 }]);
     db.close();
   });
 
@@ -40,7 +40,7 @@ describe("relay client", () => {
   it("forwards a p5 on a topic with the switch off, with no incident", async () => {
     const { bodies, client, event, db } = harness();
     await client.forwardOne({ ...event, kind: "p5", incidentId: null, ringUntil: null, critical: false });
-    expect(bodies).toEqual([{ topic_hash: "a".repeat(64), incident_id: null, message_id: "msg", priority: 5, kind: "p5", ring_until: null }]);
+    expect(bodies).toEqual([{ topic_hash: "a".repeat(64), topic: "prod", incident_id: null, message_id: "msg", priority: 5, kind: "p5", ring_until: null }]);
     db.close();
   });
 

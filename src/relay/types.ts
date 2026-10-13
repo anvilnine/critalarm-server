@@ -10,7 +10,13 @@ export interface RelayPayload {
   // api.md §4.1. opened_at + max_ring_s on the pushing server, so the relay can
   // pass the ring window on. Null on p4, on a p5 with no incident, and on the state kinds.
   ring_until: number | null;
-  title?: string; body?: string;
+  title?: string; body?: string; topic?: string;
 }
-export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string; fetch?: (request: Request) => Promise<Response>; }
+export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string;
+  // api.md §4.1, relay-plain-hash. False sends the secret push only. Unset is on.
+  plainHash?: boolean; fetch?: (request: Request) => Promise<Response>;
+  // Milliseconds. Tests inject a fake one for the challenge window and the backoff.
+  now?: () => number;
+  // One JSON-able object per line. Defaults to console.error(JSON.stringify(line)).
+  log?: (line: Record<string, unknown>) => void; }
 export interface RelayIngressDependencies { db: Database.Database; dispatch(event: DeliveryEvent): Promise<void>; }

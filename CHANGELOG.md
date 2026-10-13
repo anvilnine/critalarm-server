@@ -3,6 +3,69 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.21.0 - 2026-10-13
+
+### Added
+
+- `relay_name` on every topic object of a `selfhosted` server (§3.1): 32
+  random bytes as 43 characters of base64url, made by the server, readable
+  with a management credential only. Absent in `relay` and `hosted` mode.
+- Server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`), `on` or `off`,
+  default `on` (§4.1).
+
+### Changed
+
+- The app subscribes a topic that has a `relay_name` as
+  `sha256(base_url + "/" + relay_name)`. A topic without one is subscribed
+  by name, as before (§3.1).
+- A self-hosted server pushes the hash made from `relay_name`, with
+  `relay_name` in the push's `topic` field. The relay's check is unchanged
+  and the relay does not see the topic's name on that push (§4.1).
+- While `relay-plain-hash` is `on`, the server also sends the push from
+  1.20.0, made from the topic's name, so an app from before this version
+  keeps getting alarms. Both pushes carry the same `message_id`.
+- Compatibility. The relay needs no change. An app from before 1.21.0
+  ignores `relay_name`. `relay` and `hosted` servers behave as in 1.20.0.
+
+## 1.20.0 - 2026-10-13
+
+### Added
+
+- `challenge` on `POST /relay/v1/servers` (§4.1). The relay calls
+  `GET {base_url}/v1/relay-challenge/{challenge}` and issues a key only when
+  the server answers with the same value.
+- `GET /v1/relay-challenge/{challenge}` on the server (§3.8), no auth. It
+  answers `200` for the value of the registration in flight and `404` for
+  anything else. The answer names the relay the value was made for, and a
+  relay issues a key only when that is one of its own configured host
+  names.
+- `topic` on `POST /relay/v1/push` (§4.1), the topic's name. The relay
+  checks it against `topic_hash` and the key's `base_url`, then drops it.
+- Errors `invalid base_url` (`400`), `challenge failed` (`422`),
+  `registration closed` (`403`) and `topic mismatch` (`403`) (§1.8, §4.1).
+- Rules for `base_url` at registration: `https`, a host name of two labels
+  or more, public addresses only, port 443 or 8443, no credentials, query,
+  fragment or trailing `/`, at most 200 characters (§4.1).
+
+### Changed
+
+- A relay key is no longer issued to anyone who asks. It is issued to a
+  server that proves it answers at its `base_url`, with no secret from the
+  relay's operator. The relay's code had refused strangers since the relay
+  was hardened, so 1.19.0 said "anonymously" and no relay did it.
+- A relay key pushes only topics of the server it was registered for. A
+  push whose `topic_hash` is not `sha256(base_url + "/" + topic)` answers
+  `403 {"error":"topic mismatch"}`.
+- One key per `base_url`. A new registration that passes the challenge
+  replaces the old key, which then answers `401`.
+- The relay sees a topic's name on every push. 1.19.0 sent it the hash
+  only. The relay does not store, log or forward the name.
+- Compatibility. The app sends and receives nothing new. A key issued
+  before 1.20.0 keeps working without `topic`. A 1.19.0 server that asks
+  for a new key without the operator's secret gets `400`, because it sends no `challenge`. A 1.20.0
+  server that pushes to a 1.19.0 relay is accepted: that relay ignores the
+  two new fields.
+
 ## 1.19.0 - 2026-10-09
 
 ### Added

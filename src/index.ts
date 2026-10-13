@@ -1,3 +1,4 @@
+import { ensureRelayNames } from "./v1/topics.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { Config } from "./config.js";
@@ -7,6 +8,7 @@ import { createIngressRouter } from "./ingress/router.js";
 import { createTierRouter } from "./tier/router.js";
 import { createV1Router } from "./v1/router.js";
 import { createRelayRouter } from "./relay/router.js";
+import { relayHost } from "./relay/host.js";
 import { createStatsRouter } from "./stats/router.js";
 import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
@@ -31,8 +33,13 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads;
+  // api.md §3.8. True for the relay challenge in flight. Only a selfhosted server with a relay client supplies it.
+  relayChallenge?: (value: string) => boolean; }
 export function createApp(deps: AppDependencies): Hono {
+  // api.md §3.1. A topic made before the upgrade gets its relay name before the
+  // first request.
+  if (deps.config.mode === "selfhosted") ensureRelayNames(deps.db);
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
   // api.md §3.7. better-auth's OAuth surface, gated twice: main.ts builds the
@@ -60,8 +67,16 @@ export function createApp(deps: AppDependencies): Hono {
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
-    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));
+    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy, publicHosts: relayPublicHosts(deps.config) }));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+}
+
+// api.md §4.1. The names this relay answers to, from configuration only: the
+// hosts of its base-url and relay-url, plus RELAY_PUBLIC_HOSTS. The same
+// function builds the `relay` value a server sends, so the default-port and
+// case rules match on both sides.
+export function relayPublicHosts(config: Config): string[] {
+  return [...new Set([relayHost(config.baseUrl), relayHost(config.relayUrl), ...(config.relayPublicHosts ?? [])].filter((host): host is string => host !== undefined))];
 }
