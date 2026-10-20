@@ -12,6 +12,7 @@ import { clientIp, clientKey } from "../rate-limit.js";
 import { parseBaseUrl } from "./base-url.js";
 import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
 import { topicHash } from "./hash.js";
+import { readJson } from "../body-limit.js";
 
 // A p5 with no incident is a priority-5 message on a topic whose switch is off.
 // It is a plain notification and never rings. Every other kind keeps the rule
@@ -35,26 +36,6 @@ const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
 // character into six bytes.
 const MAX_REGISTRATION_BYTES = 4096;
 const MAX_PUSH_BYTES = 65536;
-
-// The body as parsed JSON, or "too large", or undefined when it is not JSON.
-// A content-length over the limit is refused without reading anything. A body
-// with no such header, or a wrong one, is read only up to the limit.
-async function readJson(request: Request, maxBytes: number): Promise<unknown | "too large" | undefined> {
-  const declared = request.headers.get("content-length");
-  if (declared !== null && Number(declared) > maxBytes) return "too large";
-  if (request.body === null) return undefined;
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > maxBytes) { await reader.cancel().catch(() => undefined); return "too large"; }
-    chunks.push(value);
-  }
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown; } catch { return undefined; }
-}
 
 export interface RelayRouterOptions {
   // Lets a caller of POST /relay/v1/servers skip the challenge (api.md §4.1).
