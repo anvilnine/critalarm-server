@@ -177,7 +177,23 @@ jobs:
       IMAGE_TAG_VARIABLE: CRITALARM_IMAGE_TAG
 
     steps:
+      # Full history, so the next step can tell whether the tag is on main.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A `v*` tag can be pushed on any commit, including one that never went
+      # through a pull request. Only a commit that is already on main deploys.
+      - name: Check the tagged commit is on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "Tag $GITHUB_REF_NAME points at $commit, which is not on main. Merge it to main first, then tag." >&2
+            exit 1
+          fi
+          echo "$commit is on main."
 
       - uses: actions/setup-node@v4
         with:
