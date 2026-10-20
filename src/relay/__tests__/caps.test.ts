@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createRelayRouter } from "../router.js";
 import { relayKeyHash } from "../client.js";
+import { topicHash } from "../hash.js";
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
@@ -12,14 +13,14 @@ it.each([["free", 50], ["relay", 1000], ["hosted", 1000]] as const)("enforces th
   try {
     db.prepare("INSERT INTO accounts(id,tier,created_at) VALUES ('a',?,1)").run(tier);
     db.prepare("INSERT INTO devices(id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('d','a','hash','ios','push',1)").run();
-    const hash = "a".repeat(64);
+    const hash = topicHash("https://example.com", "prod");
     db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('d',?)").run(hash);
     db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('r','https://example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
     const day = Math.floor(Date.now() / 86400000) * 86400;
     db.prepare("INSERT INTO relay_p4_usage(account_id,day_start,count) VALUES ('a',?,?)").run(day, limit - 1);
     const dispatch = vi.fn(async () => {});
     const app = createRelayRouter(db, dispatch, new Counters(db, { now: () => Date.now() / 1000 }));
-    const send = () => app.request("/relay/v1/push", { method: "POST", headers: { Authorization: "Bearer rk_test" }, body: JSON.stringify({ topic_hash: hash, incident_id: null, message_id: "m_1", priority: 4, kind: "p4" }) });
+    const send = () => app.request("/relay/v1/push", { method: "POST", headers: { Authorization: "Bearer rk_test" }, body: JSON.stringify({ topic_hash: hash, topic: "prod", incident_id: null, message_id: "m_1", priority: 4, kind: "p4" }) });
     expect((await send()).status).toBe(202);
     const rejected = await send();
     expect(rejected.status).toBe(429);
