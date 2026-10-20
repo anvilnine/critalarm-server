@@ -61,7 +61,14 @@ export function createAuthHandler(config: Config, db: Database.Database, clock: 
         // same person. Without this the two identities never join up and one
         // human ends up holding two accounts.
         allowDifferentEmails: true,
-        trustedProviders: ["apple", "google"],
+        // A trusted provider is linked to a user with the same email without
+        // better-auth looking at the provider's email_verified claim. Google
+        // is left off, so a Google identity joins an existing user only when
+        // Google says the address is verified. Apple stays on for now: its
+        // token marks a personal Apple Account address as verified, relay
+        // addresses included. Apple documents one exception (Sign in with
+        // Apple at Work & School), which is a follow-up, not this change.
+        trustedProviders: ["apple"],
       },
     },
     socialProviders: {
