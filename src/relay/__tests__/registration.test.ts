@@ -35,7 +35,7 @@ const failing = (status: number, error: string): Handler => (request) => request
 
 function appFor(mode: "selfhosted" | "relay" | "hosted", client?: RelayClient) {
   const db = openDatabase(":memory:"); migrate(db);
-  const config = { baseUrl: "https://a.test", relayUrl: "https://relay.test", relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false, mode };
+  const config = { baseUrl: "https://a.test", relayUrl: "https://relay.test", relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false as const, mode };
   return createApp({ config, db, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {}, ...(client === undefined ? {} : { relayChallenge: (value: string) => client.isRelayChallenge(value) }) });
 }
 
@@ -95,7 +95,7 @@ describe("registration challenge", () => {
       const client: RelayClient = new RelayClient({ db, relayUrl, baseUrl: "https://a.test", relayContent: "none", fetch: async (request: Request) => {
         if (!request.url.endsWith("/servers")) return new Response(null, { status: 202 });
         const value = (JSON.parse(await request.clone().text()) as { challenge: string }).challenge;
-        const config = { baseUrl: "https://a.test", relayUrl, relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false, mode: "selfhosted" as const };
+        const config = { baseUrl: "https://a.test", relayUrl, relayContent: "none" as const, listen: ":8080", port: 8080, dataDir: "/tmp", behindProxy: false as const, mode: "selfhosted" as const };
         const app = createApp({ config, db: appDb, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {}, relayChallenge: (v: string) => client.isRelayChallenge(v) });
         seen = await (await app.request(`/v1/relay-challenge/${value}`, {}, env)).json();
         return json(201, { relay_key: "rk_x" });

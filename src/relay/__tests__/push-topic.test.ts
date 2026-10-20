@@ -26,7 +26,7 @@ async function setup() {
   const sender: PushSender = { send: async (device) => { sent.push(device.id); return { status: 200, stale: false }; } };
   const dispatcher = new PushDispatcher(db, { apns: sender, fcm: sender });
   let clock = 1_800_000_000;
-  const app = createRelayRouter(db, async (event) => dispatcher.dispatch([event]), new Counters(db, { now: () => 1 }), { behindProxy: true, confirmChallenge: async () => true, clock: { now: () => clock } });
+  const app = createRelayRouter(db, async (event) => dispatcher.dispatch([event]), new Counters(db, { now: () => 1 }), { behindProxy: "cloudflare", confirmChallenge: async () => true, clock: { now: () => clock } });
   async function register(baseUrl: string): Promise<string> {
     clock += 61;
     const response = await app.request("/relay/v1/servers", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.114.1", host: "relay.example.com" }, body: JSON.stringify({ base_url: baseUrl, version: "1", challenge: CHALLENGE }) });

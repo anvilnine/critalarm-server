@@ -7,30 +7,39 @@ import { embeddedIpv4, ipv6Groups } from "./relay/address.js";
 
 type Ctx = { Bindings: Bindings; Variables: Variables };
 
-// Only a configured proxy is allowed to say who the client is. Without
-// BEHIND_PROXY the forwarded headers are ignored and the socket peer is the key.
+// Who may say what the client's address is (BEHIND_PROXY, README
+// "Configuration"):
 //
-// Behind Cloudflare, prefer cf-connecting-ip. Cloudflare APPENDS to
-// x-forwarded-for instead of replacing it, so the left-most hop is whatever the
-// client typed, and a client that changes it every request never fills a bucket.
-// Cloudflare always overwrites cf-connecting-ip and a client cannot reach
-// through it. With no such header, fall back to the forwarded hops, so a
-// self-hoster behind a plain nginx still gets per-client limiting.
+// - false: nobody. The socket peer is the client. The default, and right for
+//   the shipped docker-compose.yml, which publishes the port directly.
+// - "cloudflare": Cloudflare, through cf-connecting-ip, which Cloudflare
+//   always overwrites. Nothing else is read. Right only when the origin
+//   accepts connections from Cloudflare alone.
+// - a number N: N proxies of your own sit in front, each appending the address
+//   it saw to x-forwarded-for. The client is the Nth entry from the right.
+//   Entries further left are whatever the client typed.
+//
+// Any value that is not an IP address falls back to the socket peer. The old
+// boolean read cf-connecting-ip and then the LEFT-most x-forwarded-for hop, so
+// a client that typed a new x-forwarded-for on every request never filled a
+// bucket.
+export type ProxyTrust = false | "cloudflare" | number;
+
 export interface ClientIpSource {
   env?: unknown;
   req: { header(name: string): string | undefined };
 }
 
-export function clientIp(c: ClientIpSource, behindProxy: boolean): string {
-  if (!behindProxy) return (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "anonymous";
-  const cloudflare = c.req.header("cf-connecting-ip")?.trim();
-  if (cloudflare) return cloudflare;
-  const xff = c.req.header("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
+export function clientIp(c: ClientIpSource, trust: ProxyTrust): string {
+  const peer = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming?.socket?.remoteAddress ?? "anonymous";
+  if (trust === false) return peer;
+  if (trust === "cloudflare") {
+    const cloudflare = c.req.header("cf-connecting-ip")?.trim();
+    return cloudflare !== undefined && isIP(cloudflare) !== 0 ? cloudflare : peer;
   }
-  return c.req.header("x-real-ip") ?? "anonymous";
+  const hops = (c.req.header("x-forwarded-for") ?? "").split(",").map((hop) => hop.trim()).filter((hop) => hop !== "");
+  const client = hops[hops.length - trust];
+  return client !== undefined && isIP(client) !== 0 ? client : peer;
 }
 
 // The key a per-client limit counts on. An IPv4 address stands for itself. An
@@ -70,7 +79,7 @@ export function clientKey(address: string): string {
 export function makeRateLimiter(
   onLimit?: (c: Context<Ctx>) => Response | Promise<Response>,
   limit = 30,
-  behindProxy = false,
+  trust: ProxyTrust = false,
 ): MiddlewareHandler<Ctx> {
   let inner: MiddlewareHandler<Ctx> | undefined;
 
@@ -79,7 +88,8 @@ export function makeRateLimiter(
       windowMs: 60_000,
       limit,
       standardHeaders: "draft-6",
-      keyGenerator: (ctx) => clientIp(ctx, behindProxy),
+      // An IPv6 client counts by its /64, the same as the relay's own limits.
+      keyGenerator: (ctx) => clientKey(clientIp(ctx, trust)),
       ...(onLimit ? { handler: (ctx) => onLimit(ctx) } : {}),
     });
     return inner(c, next);
