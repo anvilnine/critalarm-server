@@ -178,7 +178,9 @@ Pushing a `v*` tag does two things: it publishes the semver image tags, and it
 deploys the hosted production server. **A push to `main` does not deploy
 production.** It publishes `latest` and `sha-*` and stops there. This is an
 alarm server, so the copy that wakes people up changes when someone asks for it
-and not before.
+and not before. The deploy also stops unless the tagged commit is already on
+`main`, so a tag pushed on an unmerged branch publishes its image and deploys
+nothing. The script pushes `main` before the tag for that reason.
 
 The deploy writes the released version into the image tag variable on the
 hosting platform, starts the service, then polls `GET /v1/info` until it reports
