@@ -1,4 +1,6 @@
 import type { DeliveryEvent } from "../domain-events.js";
+import { CapError } from "../tier/devices.js";
+import { chargeP4 } from "../tier/p4-usage.js";
 import type { IngressDependencies, PublishInput, PublishResult, TopicRecord } from "./types.js";
 
 type StoredMessage = {
@@ -10,6 +12,13 @@ export class PublishService {
   constructor(private readonly deps: IngressDependencies) {}
 
   async publish(topic: TopicRecord, input: PublishInput): Promise<PublishResult> {
+    // api.md §4.2. On a relay or hosted server a priority-4 publish counts
+    // against the account's caps.p4_daily, the same count a relayed p4 uses.
+    // Over the cap nothing is stored or sent. A self-hosted server has no caps.
+    // No cap ever applies to priority 5.
+    if (input.priority === 4 && this.deps.mode !== "selfhosted" && !chargeP4(this.deps.db, this.deps.clock, topic.accountId)) {
+      throw new CapError("p4_daily");
+    }
     const title = input.title ?? topic.name;
     const result = input.priority === 5 && topic.critical
       ? this.publishCritical(topic, input, title)

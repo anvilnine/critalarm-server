@@ -1,5 +1,4 @@
-import { capsFor } from "../tier/caps.js";
-import type { Tier } from "../tier/types.js";
+import { chargeP4 } from "../tier/p4-usage.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { bearerSecretMatches } from "../bearer.js";
@@ -172,16 +171,13 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     // relay already serves a topic for is not a remote topic: base_url is
     // server-wide, so a stranger can compute a hosted account's topic_hash from
     // the topic name, and a push for it is dropped rather than rung.
-    const accounts = db.prepare("SELECT DISTINCT d.account_id, a.tier FROM subscriptions s JOIN devices d ON d.id = s.device_id JOIN accounts a ON a.id = d.account_id WHERE s.topic_hash = ? AND NOT EXISTS (SELECT 1 FROM topics t WHERE t.account_id = d.account_id AND t.topic_hash = s.topic_hash)").all(body.topic_hash) as { account_id: string; tier: Tier }[];
-    if (body.kind === "p4") {
-      const day = Math.floor(Date.now() / 1000 / 86400) * 86400;
-      let eligible = 0;
-      for (const account of accounts) {
-        const row = db.prepare("SELECT count FROM relay_p4_usage WHERE account_id = ? AND day_start = ?").get(account.account_id, day) as { count: number } | undefined;
-        if ((row?.count ?? 0) < capsFor(account.tier).p4_daily) { eligible += 1; db.prepare("INSERT INTO relay_p4_usage(account_id,day_start,count) VALUES(?,?,1) ON CONFLICT(account_id,day_start) DO UPDATE SET count=count+1").run(account.account_id, day); }
-      }
-      if (accounts.length > 0 && eligible === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
-    }
+    const subscribed = db.prepare("SELECT DISTINCT d.account_id FROM subscriptions s JOIN devices d ON d.id = s.device_id WHERE s.topic_hash = ? AND NOT EXISTS (SELECT 1 FROM topics t WHERE t.account_id = d.account_id AND t.topic_hash = s.topic_hash)").all(body.topic_hash) as { account_id: string }[];
+    // api.md §4.2. A p4 goes only to the accounts still under caps.p4_daily,
+    // and each of those is charged one. An account at its cap gets nothing,
+    // even when another account on the same hash is under it. Only when every
+    // subscribed account is at its cap is the push refused.
+    const accounts = body.kind === "p4" ? subscribed.filter((account) => chargeP4(db, clock, account.account_id)) : subscribed;
+    if (body.kind === "p4" && subscribed.length > 0 && accounts.length === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: isCritical(body) };
     let delivered = 0;
     for (const account of accounts) {

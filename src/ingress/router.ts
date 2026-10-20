@@ -6,6 +6,7 @@ import { ownedTopic } from "../v1/topics.js";
 import { authenticateTopic } from "./auth.js";
 import { MAX_MESSAGE_BYTES, ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
 import { readBytes } from "../body-limit.js";
+import { CapError } from "../tier/devices.js";
 import { PublishService } from "./service.js";
 import { historyCutoff } from "../retention/window.js";
 import type { IngressDependencies } from "./types.js";
@@ -80,6 +81,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
       return c.json(await service.publish(topic, { topic: name, ...await parsePublishRequest(c.req.raw) }));
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
+      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       throw error;
     }
   };
@@ -94,6 +96,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
       return c.json(await service.publish(topic, input));
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
+      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       throw error;
     }
   });
