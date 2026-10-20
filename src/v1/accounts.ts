@@ -11,6 +11,7 @@ import { highestEntitledTier, isHigherTier } from "../tier/revenuecat.js";
 import { sweepDeviceIntoTopics, sweepTopicIntoDevices } from "../tier/subscriptions.js";
 import type { Tier } from "../tier/types.js";
 import type { V1Env } from "./auth.js";
+import { jsonBody, textBody } from "../body-limit.js";
 
 // api.md §3.7. Signing in does not create an account. Registration already made
 // one (§4.2) and it has owned topics, devices and billing ever since. These
@@ -565,7 +566,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
 
   r.post("/v1/account/link", async (c) => {
     let body: unknown;
-    try { body = await c.req.json(); } catch { return c.json({ error: "invalid request" }, 400); }
+    try { body = await jsonBody(c.req.raw); } catch { return c.json({ error: "invalid request" }, 400); }
     const parsed = linkSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
     const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.intent ?? "sign_in");
@@ -574,7 +575,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
 
   r.post("/v1/account/merge", async (c) => {
     let body: unknown;
-    try { body = await c.req.json(); } catch { return c.json({ error: "invalid request" }, 400); }
+    try { body = await jsonBody(c.req.raw); } catch { return c.json({ error: "invalid request" }, 400); }
     const parsed = mergeSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
     const result = mergeAccounts(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.into_account);
@@ -587,7 +588,7 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
 
   r.post("/v1/account/switch", async (c) => {
     let body: unknown;
-    try { body = await c.req.json(); } catch { return c.json({ error: "invalid request" }, 400); }
+    try { body = await jsonBody(c.req.raw); } catch { return c.json({ error: "invalid request" }, 400); }
     const parsed = switchSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
     const result = switchAccount(deps.db, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.into_account);
@@ -602,7 +603,8 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
   r.delete("/v1/account", async (c) => {
     // No body at all is the normal call for an account nobody has signed in to,
     // so an empty request is read as "no identity token" rather than refused.
-    const raw = await c.req.text();
+    let raw: string;
+    try { raw = await textBody(c.req.raw); } catch { return c.json({ error: "invalid request" }, 400); }
     let identityToken: string | undefined;
     if (raw.trim() !== "") {
       let body: unknown;
