@@ -250,11 +250,17 @@ describe("a key issued before 1.20.0", () => {
     return { db, sent, push };
   }
 
-  it("still pushes without topic", async () => {
+  // Such a key used to skip the check when it left `topic` out, and then rang
+  // subscribers of any hash it named, another server's included.
+  it("needs topic like every other key, and rings nobody without it", async () => {
     const { db, sent, push } = await legacy();
     try {
-      expect((await push({ topic_hash: topicHash(A, "prod") })).status).toBe(202);
-      expect(sent).toEqual(["dev_a"]);
+      db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_b','acc_a','hb','ios','t',1)").run();
+      db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_b',?)").run(topicHash(B, "prod"));
+      expect((await push({ topic_hash: topicHash(A, "prod") })).status).toBe(400);
+      expect((await push({ topic_hash: topicHash(B, "prod") })).status).toBe(400);
+      expect((await push({ topic_hash: "a".repeat(64) })).status).toBe(400);
+      expect(sent).toEqual([]);
     } finally { db.close(); }
   });
 

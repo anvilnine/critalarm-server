@@ -15,7 +15,9 @@ import { PushDispatcher } from "../../push/dispatcher.js";
 // api.md §4.1 and §5. The relay takes a push of kind p5 and builds the push the
 // contract describes for it, on both platforms.
 
-const remoteHash = "a".repeat(64);
+// Every relay key gets the topic check, so the hash is made from a name under
+// the key's base_url and every push sends that name.
+const remoteHash = topicHash("https://alerts.example.com", "remote");
 const apnsKey = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey;
 const fcmKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey;
 
@@ -35,7 +37,7 @@ function seed() {
 }
 
 function pushBody(overrides: Record<string, unknown>) {
-  return JSON.stringify({ topic_hash: remoteHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "p5", ring_until: 1_060, ...overrides });
+  return JSON.stringify({ topic_hash: remoteHash, topic: "remote", incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "p5", ring_until: 1_060, ...overrides });
 }
 
 function send(app: ReturnType<typeof createRelayRouter>, body: string) {

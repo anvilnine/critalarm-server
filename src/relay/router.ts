@@ -153,18 +153,18 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     const auth = c.req.header("authorization") ?? "";
     const key = /^Bearer (rk_[A-Za-z0-9_-]+)$/.exec(auth)?.[1];
     const keyHash = key === undefined ? undefined : relayKeyHash(key);
-    const server = keyHash === undefined ? undefined : db.prepare("SELECT base_url, legacy FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) as { base_url: string; legacy: number } | undefined;
+    const server = keyHash === undefined ? undefined : db.prepare("SELECT base_url FROM relay_servers WHERE relay_key_hash = ?").get(keyHash) as { base_url: string } | undefined;
     if (keyHash === undefined || server === undefined) return c.json({ error: "unauthorized" }, 401);
     const read = await readJson(c.req.raw, MAX_PUSH_BYTES);
     const body = (read === "too large" || read === undefined ? null : read) as RelayPayload | null;
     if (body === null || typeof body !== "object" || !/^[0-9a-f]{64}$/.test(body.topic_hash) || !["open", "repeat", "reopen", "p4", "p5", "ack", "close", "expire"].includes(body.kind)) return c.json({ error: "invalid request" }, 400);
     // api.md §4.1. A key pushes only topics of the server it was registered
     // for. The topic name is used for this check alone: it is not stored,
-    // logged or put on the event.
-    if (body.topic !== undefined || server.legacy === 0) {
-      if (typeof body.topic !== "string" || !/^[-_A-Za-z0-9]{1,64}$/.test(body.topic)) return c.json({ error: "invalid request" }, 400);
-      if (topicHash(server.base_url, body.topic) !== body.topic_hash) return c.json({ error: "topic mismatch" }, 403);
-    }
+    // logged or put on the event. Every key gets the check, including one
+    // issued before 1.20.0 (legacy = 1): such a key that left out `topic`
+    // could ring subscribers of any hash, another server's included.
+    if (typeof body.topic !== "string" || !/^[-_A-Za-z0-9]{1,64}$/.test(body.topic)) return c.json({ error: "invalid request" }, 400);
+    if (topicHash(server.base_url, body.topic) !== body.topic_hash) return c.json({ error: "topic mismatch" }, 403);
     // The accounts this push is for. The pushing server's message_id has no row
     // here (api.md §4.1), so the relay establishes the owning accounts itself
     // and names one on every dispatch; the dispatcher never guesses. A hash this
