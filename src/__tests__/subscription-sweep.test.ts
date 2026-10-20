@@ -57,7 +57,7 @@ function register(app: App, deviceId: string, platform: "ios" | "android", pushT
 }
 
 async function registerFirst(app: App): Promise<string> {
-  const response = await register(app, deviceOne, "ios", "ios-one");
+  const response = await register(app, deviceOne, "ios", "aaaa0001");
   expect(response.status).toBe(201);
   return (await response.json() as { device_token: string }).device_token;
 }
@@ -117,7 +117,7 @@ describe("subscription sweep", () => {
       [deviceTwo, hashOf("prod")], [deviceTwo, hashOf("staging")],
     ]);
     expect((await publish(app, "prod", prodToken)).status).toBe(200);
-    expect(apns.tokens).toEqual(["ios-one"]);
+    expect(apns.tokens).toEqual(["aaaa0001"]);
     expect(fcm.tokens).toEqual(["android-two"]);
   });
 
@@ -132,7 +132,7 @@ describe("subscription sweep", () => {
 
     expectRows(db, accountOf(db), [[deviceOne, hashOf("prod")], [deviceTwo, hashOf("prod")]]);
     expect((await publish(app, "prod", prodToken)).status).toBe(200);
-    expect(apns.tokens).toEqual(["ios-one"]);
+    expect(apns.tokens).toEqual(["aaaa0001"]);
     expect(fcm.tokens).toEqual(["android-two"]);
   });
 
@@ -212,7 +212,7 @@ describe("subscription sweep", () => {
 
     expectRows(db, accountOf(db), [[deviceOne, hashOf("prod")]]);
     expect((await publish(app, "prod", prodToken)).status).toBe(200);
-    expect(apns.tokens).toEqual(["ios-one"]);
+    expect(apns.tokens).toEqual(["aaaa0001"]);
     expect(fcm.tokens).toEqual([]);
   });
 
@@ -221,7 +221,7 @@ describe("subscription sweep", () => {
     const { token } = ensureSelfHostedIdentity(db);
     const headers = { Authorization: `Bearer ${token}`, "content-type": "application/json" };
 
-    expect((await register(app, deviceOne, "ios", "ios-one")).status).toBe(404);
+    expect((await register(app, deviceOne, "ios", "aaaa0001")).status).toBe(404);
     expect((await app.request("/v1/topics", { method: "POST", headers, body: '{"name":"prod","critical":true}' })).status).toBe(201);
     expect(db.prepare("SELECT * FROM devices").all()).toEqual([]);
     expect(db.prepare("SELECT * FROM subscriptions").all()).toEqual([]);
