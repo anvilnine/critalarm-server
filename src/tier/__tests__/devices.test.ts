@@ -31,7 +31,7 @@ function setup() {
   return { app: createTierRouter(deps), db, clock, deps };
 }
 
-const device = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "apns-token", app_version: "1.0.0" } as const;
+const device = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "aaaa0001", app_version: "1.0.0" } as const;
 
 describe("device registry", () => {
   it("creates an account and device for an unknown device id without storing the plaintext token", async () => {
@@ -49,7 +49,7 @@ describe("device registry", () => {
       account_id: "acc_1",
       device_token_hash: createHash("sha256").update("dv_test_1").digest("hex"),
       platform: "ios",
-      push_token: "apns-token",
+      push_token: "aaaa0001",
       last_seen: 1_000,
     }]);
     expect(JSON.stringify(db.prepare("SELECT * FROM devices").all())).not.toContain("dv_test_1");
@@ -59,11 +59,11 @@ describe("device registry", () => {
     const { app, db } = setup();
     await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(device) });
 
-    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ push_token: "new-token", app_version: "1.0.1" }) });
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ push_token: "bbbb0001", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(401);
     expect(db.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual({ count: 1 });
-    expect(db.prepare("SELECT push_token FROM devices").get()).toEqual({ push_token: "apns-token" });
+    expect(db.prepare("SELECT push_token FROM devices").get()).toEqual({ push_token: "aaaa0001" });
   });
 
   it("updates a known authenticated device without minting a second token", async () => {
@@ -72,11 +72,11 @@ describe("device registry", () => {
     const { device_token: deviceToken } = await registration.json() as { device_token: string };
     clock.value = 1_100;
 
-    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ push_token: "new-token", app_version: "1.0.1" }) });
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ push_token: "bbbb0001", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 }, packs: [] });
-    expect(db.prepare("SELECT push_token, last_seen, device_token_hash FROM devices").all()).toEqual([{ push_token: "new-token", last_seen: 1_100, device_token_hash: createHash("sha256").update(deviceToken).digest("hex") }]);
+    expect(db.prepare("SELECT push_token, last_seen, device_token_hash FROM devices").all()).toEqual([{ push_token: "bbbb0001", last_seen: 1_100, device_token_hash: createHash("sha256").update(deviceToken).digest("hex") }]);
   });
 
   it("hides another device path from a device token", async () => {
@@ -86,7 +86,7 @@ describe("device registry", () => {
     db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_2', 'free', 1)").run();
     db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_other', 'acc_2', ?, 'android', 'fcm-token', 1)").run(createHash("sha256").update("dv_other").digest("hex"));
 
-    const response = await app.request("/relay/v1/devices/dev_other", { method: "PATCH", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ push_token: "attacker-token", app_version: "1.0.1" }) });
+    const response = await app.request("/relay/v1/devices/dev_other", { method: "PATCH", headers: { Authorization: `Bearer ${deviceToken}`, "content-type": "application/json" }, body: JSON.stringify({ push_token: "dddd0001", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(404);
     expect(db.prepare("SELECT push_token FROM devices WHERE id = 'dev_other'").get()).toEqual({ push_token: "fcm-token" });
@@ -96,7 +96,7 @@ describe("device registry", () => {
     const { app } = setup();
     await app.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(device) });
 
-    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: "Bearer dv_unknown", "content-type": "application/json" }, body: JSON.stringify({ push_token: "new-token", app_version: "1.0.1" }) });
+    const response = await app.request(`/relay/v1/devices/${device.device_id}`, { method: "PATCH", headers: { Authorization: "Bearer dv_unknown", "content-type": "application/json" }, body: JSON.stringify({ push_token: "bbbb0001", app_version: "1.0.1" }) });
 
     expect(response.status).toBe(401);
   });
@@ -153,15 +153,15 @@ describe("known-device POST", () => {
     await app.request("/relay/v1/devices", { method: "POST", body: JSON.stringify(device) });
     const before = db.prepare("SELECT device_token_hash FROM devices").get();
     const response = await app.request(method === "POST" ? "/relay/v1/devices" : `/relay/v1/devices/${device.device_id}`, {
-      method, headers: { Authorization: "Bearer dv_test_1" }, body: JSON.stringify({ ...device, push_token: "updated", app_version: "2.0.0" }),
+      method, headers: { Authorization: "Bearer dv_test_1" }, body: JSON.stringify({ ...device, push_token: "cccc0001", app_version: "2.0.0" }),
     });
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body).not.toHaveProperty("device_token");
     expect(body).toEqual({ account_id: "acc_1", tier: "free", caps: { devices: 5, critical_topics: 2, p4_daily: 50, history_days: 7 }, packs: [] });
-    expect(db.prepare("SELECT push_token, app_version FROM devices").get()).toEqual({ push_token: "updated", app_version: "2.0.0" });
+    expect(db.prepare("SELECT push_token, app_version FROM devices").get()).toEqual({ push_token: "cccc0001", app_version: "2.0.0" });
     expect(db.prepare("SELECT device_token_hash FROM devices").get()).toEqual(before);
-    expect(db.prepare("SELECT token FROM device_tokens").get()).toEqual({ token: "updated" });
+    expect(db.prepare("SELECT token FROM device_tokens").get()).toEqual({ token: "cccc0001" });
   });
 
   it.each([undefined, "dv_wrong", "dv_test_2"])("rejects re-registration with %s without changing identity", async token => {
@@ -170,7 +170,7 @@ describe("known-device POST", () => {
       await app.request("/relay/v1/devices", { method: "POST", body: JSON.stringify({ ...device, device_id: id }) });
     }
     const before = db.prepare("SELECT * FROM devices").all();
-    const response = await app.request("/relay/v1/devices", { method: "POST", headers: token === undefined ? {} : { Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...device, push_token: "changed" }) });
+    const response = await app.request("/relay/v1/devices", { method: "POST", headers: token === undefined ? {} : { Authorization: `Bearer ${token}` }, body: JSON.stringify({ ...device, push_token: "cccc0002" }) });
     expect(response.status).toBe(401);
     expect(db.prepare("SELECT * FROM devices").all()).toEqual(before);
     expect(db.prepare("SELECT COUNT(*) AS count FROM accounts").get()).toEqual({ count: 2 });

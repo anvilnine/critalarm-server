@@ -24,8 +24,15 @@ export class PublishService {
       // What was missing is any way to find out why. A bad FCM_PRIVATE_KEY on
       // the dev server turned every publish into a bare "Internal Server
       // Error" with nothing in the container log to explain it.
+      //
+      // The dispatcher now catches a send that throws, so one bad device does
+      // not stop the others. When every send threw and nothing was delivered,
+      // that is still the case above, and it still answers 500.
       try {
-        await this.deps.dispatch(result.events);
+        const outcome = await this.deps.dispatch(result.events);
+        if (outcome !== undefined && (outcome.failed ?? 0) > 0 && outcome.delivered === 0) {
+          throw new Error(`every push failed (${outcome.failed})`);
+        }
       } catch (error) {
         console.error("dispatch_failed", {
           topic: topic.name,

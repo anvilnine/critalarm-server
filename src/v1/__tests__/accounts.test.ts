@@ -964,7 +964,7 @@ describe("DELETE /v1/account", () => {
     const join = await app.request("/relay/v1/devices", {
       method: "POST",
       headers: { Authorization: "Bearer aj_a", "content-type": "application/json" },
-      body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "p", app_version: "1.0.0" }),
+      body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "ab", app_version: "1.0.0" }),
     });
     expect(join.status).toBe(401);
   });
@@ -1069,7 +1069,7 @@ describe("POST /v1/account/join-token", () => {
     return app.request("/relay/v1/devices", {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ device_id: deviceId, platform: "ios", push_token: "p", app_version: "1.0.0" }),
+      body: JSON.stringify({ device_id: deviceId, platform: "ios", push_token: "ab", app_version: "1.0.0" }),
     });
   }
 

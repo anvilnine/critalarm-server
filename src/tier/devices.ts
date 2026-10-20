@@ -1,20 +1,28 @@
 import { z } from "zod";
 import { authenticateAccountJoin, authenticateDevice, credentialHash } from "./auth.js";
-import { setAlarmToken } from "./device-tokens.js";
+import { fcmTokenSchema, pushTokenSchemaFor, setAlarmToken } from "./device-tokens.js";
 import { capsFor } from "./caps.js";
 import { sweepDeviceIntoTopics } from "./subscriptions.js";
 import type { AccountContext, TierDependencies } from "./types.js";
 import { checkDueAfterNewToken } from "../check/device-hooks.js";
 
 const deviceId = z.string().regex(/^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+// The shape a token must have depends on the platform (device-tokens.ts). A
+// registration names its platform, so it is checked here. An update does not,
+// so it gets the wider of the two shapes here and the device's own platform
+// in updateDevice.
 export const registrationSchema = z.object({
   device_id: deviceId,
   platform: z.enum(["ios", "android"]),
   push_token: z.string().min(1),
   app_version: z.string().min(1),
+}).superRefine((value, context) => {
+  if (!pushTokenSchemaFor(value.platform).safeParse(value.push_token).success) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["push_token"], message: "not a push token for this platform" });
+  }
 });
 export const deviceUpdateSchema = z.object({
-  push_token: z.string().min(1),
+  push_token: fcmTokenSchema,
   app_version: z.string().min(1),
 });
 export const subscriptionSchema = z.object({
@@ -96,7 +104,9 @@ export function updateDevice(deps: TierDependencies, deviceIdValue: string, inpu
   const context = authenticateDevice(deps.db, bearer);
   if (context === null) return null;
   if (context.deviceId !== deviceIdValue) return null;
-  const before = deps.db.prepare("SELECT push_token FROM devices WHERE id = ?").get(deviceIdValue) as { push_token: string } | undefined;
+  const before = deps.db.prepare("SELECT push_token, platform FROM devices WHERE id = ?").get(deviceIdValue) as { push_token: string; platform: "ios" | "android" } | undefined;
+  // Throws a ZodError, which the routes answer with 400 before anything is written.
+  if (before !== undefined) pushTokenSchemaFor(platform ?? before.platform).parse(input.push_token);
   deps.db.prepare("UPDATE devices SET push_token = ?, app_version = ?, last_seen = ?, platform = COALESCE(?, platform) WHERE id = ?").run(input.push_token, input.app_version, deps.clock.now(), platform ?? null, deviceIdValue);
   const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceIdValue) as { platform: "ios" | "android" } | undefined;
   if (device !== undefined) setAlarmToken(deps.db, deps.clock, deviceIdValue, device.platform, input.push_token);
