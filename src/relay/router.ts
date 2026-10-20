@@ -8,7 +8,7 @@ import type { RelayPayload } from "./types.js";
 import type { Clock, DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
-import { clientIp, clientKey } from "../rate-limit.js";
+import { clientIp, clientKey, type ProxyTrust } from "../rate-limit.js";
 import { parseBaseUrl } from "./base-url.js";
 import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
 import { topicHash } from "./hash.js";
@@ -41,7 +41,7 @@ export interface RelayRouterOptions {
   // Lets a caller of POST /relay/v1/servers skip the challenge (api.md §4.1).
   registrationSecret?: string;
   registration?: "open" | "closed";
-  behindProxy?: boolean;
+  behindProxy?: ProxyTrust;
   confirmChallenge?: ChallengeConfirmer;
   // The relay's own public host names, from configuration. A challenge answer
   // must name one of them. Never read from the request.

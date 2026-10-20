@@ -333,7 +333,7 @@ relay-url: https://relay.critalarm.app # default
 relay-content: none                    # none | full
 listen: :8080
 data-dir: /data
-behind-proxy: true
+behind-proxy: false                    # false | cloudflare | number of proxies in front
 ```
 
 `relay-url` may be overridden with `RELAY_URL`. `relay-content` accepts `none`
@@ -382,8 +382,8 @@ operator nothing at all to go on.
   `RELAY_REGISTRATION=closed` shuts it to callers without the secret. The
   secret skips the challenge and every check on the `base_url`, so it is for the
   operator's own servers and is never handed to anyone else. With
-  `BEHIND_PROXY=true` the client address comes from a header, so the origin must
-  accept connections from the proxy only. A per-server salt in the hash would
+  `BEHIND_PROXY` set to `cloudflare` or a hop count the client address comes
+  from a header, so the origin must accept connections from the proxy only. A per-server salt in the hash would
   close the subscribe gap above and needs an app change. Design note:
   `docs/specs/relay-registration.md`.
 - Device routes need the device token issued at registration. Registration

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { parseApplePrivateKey, type AppleSigningKey } from "./auth/apple-client-secret.js";
 import type { RevenueCatApiConfig } from "./tier/reconcile.js";
 import { isPackId, type PackId, type PackIncludes } from "./tier/packs.js";
+import type { ProxyTrust } from "./rate-limit.js";
 
 export interface ApnsConfig {
   teamId: string;
@@ -62,7 +63,8 @@ export interface Config {
   listen: string;
   port: number;
   dataDir: string;
-  behindProxy: boolean;
+  // Who may name the client's address for rate limits (rate-limit.ts).
+  behindProxy: ProxyTrust;
   allowNoopPush?: boolean;
   statsKey?: string;
   relayRegistrationSecret?: string;
@@ -118,7 +120,7 @@ const fileSchema = z.object({
   "relay-plain-hash": z.string().optional(),
   listen: z.string().optional(),
   "data-dir": z.string().optional(),
-  "behind-proxy": z.boolean().optional(),
+  "behind-proxy": z.union([z.boolean(), z.number(), z.string()]).optional(),
   apns: providerSchema,
   fcm: fcmSchema,
   revenuecat: z.object({ "shared-secret": z.string().min(1).optional(), entitlements: z.record(z.string(), z.enum(["free", "relay", "hosted"])).optional() }).optional(),
@@ -377,6 +379,26 @@ function authConfig(env: NodeJS.ProcessEnv, readFile: ((path: string) => string)
   };
 }
 
+// BEHIND_PROXY. Unset, false, off or 0: no proxy. cloudflare: read
+// cf-connecting-ip. A whole number from 1 to 10: that many proxies of your own
+// append to x-forwarded-for. true is what this setting took before it had
+// kinds. It is read as cloudflare, because that is the header the old code
+// trusted first, and startup warns, because a server behind one nginx that
+// set true got the forwarded address from the old code and gets the proxy's
+// address now.
+function proxyTrustValue(value: string | number | boolean | undefined): ProxyTrust {
+  if (value === undefined || value === false) return false;
+  const text = String(value).trim().toLowerCase();
+  if (text === "" || text === "false" || text === "off" || text === "0") return false;
+  if (text === "cloudflare") return "cloudflare";
+  if (text === "true") {
+    console.warn("behind_proxy_true", { reading: "cloudflare", reason: "BEHIND_PROXY=true is read as cloudflare: the client address comes from cf-connecting-ip only. Set BEHIND_PROXY=cloudflare to keep this and drop the warning, or BEHIND_PROXY=1 behind one nginx, Caddy or Traefik" });
+    return "cloudflare";
+  }
+  if (/^\d+$/.test(text) && Number(text) >= 1 && Number(text) <= 10) return Number(text);
+  throw configError("behind-proxy");
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => string): Config {
   const file = readConfiguration(env, readFile);
   const listen = stringValue(env, "LISTEN", file.listen) ?? ":8080";
@@ -444,7 +466,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, readFile?: (path: string) => 
     listen,
     port,
     dataDir: stringValue(env, "DATA_DIR", file["data-dir"]) ?? "/data",
-    behindProxy: env.BEHIND_PROXY === undefined ? file["behind-proxy"] ?? false : env.BEHIND_PROXY === "true",
+    behindProxy: proxyTrustValue(env.BEHIND_PROXY === undefined || env.BEHIND_PROXY === "" ? file["behind-proxy"] : env.BEHIND_PROXY),
     allowNoopPush,
     ...(env.STATS_KEY === undefined || env.STATS_KEY === "" ? {} : { statsKey: env.STATS_KEY }),
     // The secret that lets a caller of POST /relay/v1/servers skip the
