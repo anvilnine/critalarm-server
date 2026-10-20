@@ -16,11 +16,12 @@ import { addToken, createTopic, deleteToken, deleteTopic, listTokens, listTopics
 import { version } from "../version.js";
 import { relayHost } from "../relay/host.js";
 import { BodyTooLarge, jsonBody } from "../body-limit.js";
+import { CapError } from "../tier/devices.js";
 const MAX_SEND_BYTES = 65_536;
 type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>;identities?:IdentityResolver;revoke?:TokenRevoker;reconcileAccount?:(accountId:string)=>void;relayChallenge?:(value:string)=>boolean};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,updated_at:i.updatedAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS, relay_content AS relayContent FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
-export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=requireDevice(deps.db,deps.config.mode ?? "hosted");const service=new PublishService({...deps,incidents:deps.incidents});r.get("/v1/info",c=>c.json({name:"critalarm",version,base_url:deps.config.baseUrl,relay_url:deps.config.relayUrl,relay_content:deps.config.relayContent,mode:deps.config.mode ?? "hosted"}));
+export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=requireDevice(deps.db,deps.config.mode ?? "hosted");const service=new PublishService({...deps,incidents:deps.incidents,mode:deps.config.mode ?? "hosted"});r.get("/v1/info",c=>c.json({name:"critalarm",version,base_url:deps.config.baseUrl,relay_url:deps.config.relayUrl,relay_content:deps.config.relayContent,mode:deps.config.mode ?? "hosted"}));
   // api.md §3.8. No auth: the relay holds no credential for this server yet.
   // It is registered before every other route and outside the auth prefixes. It
   // answers for a selfhosted server only; in relay and hosted mode it is 404.
@@ -71,6 +72,7 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
       return c.json({ id: result.id, incident_id: result.incident_id ?? null });
     } catch (error: unknown) {
       if (error instanceof ParseError) return c.json({ error: error.message }, error.status);
+      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       throw error;
     }
   });
