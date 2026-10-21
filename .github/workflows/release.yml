@@ -235,7 +235,9 @@ jobs:
           esac
           reference="${{ steps.version.outputs.version }}@$digest"
           echo "Pinning $IMAGE_TAG_VARIABLE to $reference"
-          status=$(curl -sS -o /tmp/patch-env.json -w '%{http_code}' \
+          # The response body is thrown away, never printed: this repo is
+          # public and so are its workflow logs. The status says enough.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
             -X PATCH \
             -H "Authorization: Bearer $COOLIFY_TOKEN" \
             -H 'Content-Type: application/json' \
@@ -243,10 +245,8 @@ jobs:
             -d "{\"key\":\"$IMAGE_TAG_VARIABLE\",\"value\":\"$reference\",\"is_literal\":true}" \
             "$COOLIFY_URL/api/v1/services/$COOLIFY_SERVICE_UUID/envs")
           echo "HTTP $status"
-          cat /tmp/patch-env.json
-          echo
           case "$status" in
-            2*) ;;
+            2*) echo "Coolify took the image tag update." ;;
             *) echo "Coolify refused the image tag update." >&2; exit 1 ;;
           esac
 
@@ -263,16 +263,14 @@ jobs:
       - name: Recreate the containers on the new image
         run: |
           set -euo pipefail
-          status=$(curl -sS -o /tmp/deploy.json -w '%{http_code}' \
+          status=$(curl -sS -o /dev/null -w '%{http_code}' \
             -X POST \
             -H "Authorization: Bearer $COOLIFY_TOKEN" \
             -H 'Accept: application/json' \
             "$COOLIFY_URL/api/v1/deploy?uuid=$COOLIFY_SERVICE_UUID&force=true")
           echo "HTTP $status"
-          cat /tmp/deploy.json
-          echo
           case "$status" in
-            2*) ;;
+            2*) echo "Coolify queued the deploy." ;;
             *) echo "Coolify refused the deploy request." >&2; exit 1 ;;
           esac
 
