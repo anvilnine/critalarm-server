@@ -18,6 +18,7 @@ import type { TokenRevoker } from "./auth/revoke.js";
 import type { StoreReads } from "./tier/types.js";
 import { createCheckRouter } from "./check/router.js";
 import { CheckStore } from "./check/store.js";
+import { boundedRequest, SMALL_JSON_BYTES } from "./body-limit.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -46,9 +47,20 @@ export function createApp(deps: AppDependencies): Hono {
   // handler only when Apple or Google credentials are configured, and it is
   // mounted only outside selfhosted mode. A self-hosted server must not carry
   // the sign-in routes at all.
+  //
+  // better-auth reads the body itself, so it goes through the bounded reader
+  // first and better-auth gets a copy of what was read. The biggest body here
+  // is an ID token sign-in or Apple's form_post callback (code, id_token,
+  // state, user), a few KB each. Over the limit answers 400
+  // {"error":"invalid request"}, as every other JSON route does, and
+  // better-auth never sees the request.
   if (deps.authHandler !== undefined && (deps.config.mode ?? "relay") !== "selfhosted") {
     const handler = deps.authHandler;
-    app.on(["POST", "GET"], "/api/auth/*", c => handler(c.req.raw));
+    app.on(["POST", "GET"], "/api/auth/*", async c => {
+      const request = await boundedRequest(c.req.raw, SMALL_JSON_BYTES);
+      if (request === "too large") return c.json({ error: "invalid request" }, 400);
+      return handler(request);
+    });
   }
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
