@@ -62,13 +62,21 @@ export function createAuthHandler(config: Config, db: Database.Database, clock: 
         // human ends up holding two accounts.
         allowDifferentEmails: true,
         // A trusted provider is linked to a user with the same email without
-        // better-auth looking at the provider's email_verified claim. Google
-        // is left off, so a Google identity joins an existing user only when
-        // Google says the address is verified. Apple stays on for now: its
-        // token marks a personal Apple Account address as verified, relay
-        // addresses included. Apple documents one exception (Sign in with
-        // Apple at Work & School), which is a follow-up, not this change.
-        trustedProviders: ["apple"],
+        // better-auth looking at the provider's email_verified claim. No
+        // provider is trusted, so an Apple or Google identity joins an
+        // existing user only when the provider says the address is verified.
+        // Apple marks a personal Apple Account address as verified, relay
+        // addresses included, and documents email_verified false for some
+        // Sign in with Apple at Work & School users. Those no longer join a
+        // stranger's user by email.
+        //
+        // Implicit linking itself stays on. The app swaps every provider's ID
+        // token at /api/auth/sign-in/social and never calls linkSocial, so
+        // with disableImplicitLinking a person whose Google address is their
+        // Apple address could not sign in with the second provider at all:
+        // better-auth answers 401 "account not linked" before the app holds
+        // an identity_token for /v1/account/link (api.md §3.7).
+        trustedProviders: [],
       },
     },
     socialProviders: {

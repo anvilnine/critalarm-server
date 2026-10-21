@@ -158,7 +158,8 @@ docker run -d --name critalarm \
 ```
 
 Tags: `latest` and the short commit sha on `main`, plus the semver tags
-(`1.2.3`, `1.2`, `1`) when a `v*` tag is pushed.
+(`1.2.3`, `1.2`, `1`) when a `v*` tag is pushed. `release.yml` runs the type
+check and the tests first and publishes nothing if they fail.
 
 ## Releasing
 
