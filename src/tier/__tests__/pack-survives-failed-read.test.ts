@@ -16,7 +16,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 const END = NOW + 3_600;
 const RENEWED = END + 30 * 86_400;
-const DEVICE = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "apns-token", app_version: "1.0.0" } as const;
+const DEVICE = { device_id: "dev_123e4567-e89b-12d3-a456-426614174000", platform: "ios", push_token: "aaaa0001", app_version: "1.0.0" } as const;
 const CAPS = { devices: 5, critical_topics: null, p4_daily: 1000, history_days: 90 };
 const HELD = [{ id: "pro", expires_at: END }];
 
@@ -39,7 +39,7 @@ function relay(db: TestDatabase, clock: FakeClock, storeReads?: StoreReads) {
   return {
     app,
     register: () => json(send("POST", "/relay/v1/devices", DEVICE)),
-    patch: () => json(send("PATCH", `/relay/v1/devices/${DEVICE.device_id}`, { push_token: "apns-token-2", app_version: "1.0.1" })),
+    patch: () => json(send("PATCH", `/relay/v1/devices/${DEVICE.device_id}`, { push_token: "aaaa0002", app_version: "1.0.1" })),
     packs: () => json(send("GET", "/relay/v1/packs")),
     refresh: () => json(send("POST", "/relay/v1/packs/refresh")),
   };

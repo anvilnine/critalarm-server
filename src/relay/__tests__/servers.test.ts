@@ -19,7 +19,7 @@ function setup(options: RelayRouterOptions = {}, db = openDatabase(":memory:")) 
   migrate(db);
   const confirm = vi.fn(async () => true);
   const clock = { t: 1_800_000_000 };
-  const app = createRelayRouter(db, vi.fn(async () => {}), new Counters(db, { now: () => 1 }), { behindProxy: true, confirmChallenge: confirm, publicHosts: [HOST], clock: { now: () => clock.t }, ...options });
+  const app = createRelayRouter(db, vi.fn(async () => {}), new Counters(db, { now: () => 1 }), { behindProxy: "cloudflare", confirmChallenge: confirm, publicHosts: [HOST], clock: { now: () => clock.t }, ...options });
   return { db, app, confirm, clock };
 }
 

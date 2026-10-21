@@ -11,10 +11,18 @@ import { RollingLimit } from "./account-limit.js";
 import { packsCheckedAt, packsFor, type PackRules } from "./packs.js";
 import { namedCustomers, parseReadTrigger, queueReadsForEvent } from "./revenuecat-trigger.js";
 import type { Tier, TierDependencies } from "./types.js";
+import { jsonBody, SMALL_JSON_BYTES } from "../body-limit.js";
 
-async function requestJson(request: Request): Promise<unknown> {
+// A RevenueCat event is the largest body here: it carries the subscriber's
+// attributes as well as the event. It is read only after the shared secret
+// matched.
+const MAX_WEBHOOK_BYTES = 262_144;
+
+// A body over the limit or one that is not JSON both answer 400
+// {"error":"invalid request"}, through the ZodError every route here catches.
+async function requestJson(request: Request, maxBytes: number = SMALL_JSON_BYTES): Promise<unknown> {
   try {
-    return await request.json();
+    return await jsonBody(request, maxBytes);
   } catch {
     throw new z.ZodError([]);
   }
@@ -209,7 +217,7 @@ export function createTierRouter(deps: TierDependencies): Hono {
   if (revenueCatSecret !== "") router.post("/webhooks/revenuecat", async (c) => {
     if (!bearerSecretMatches(c.req.header("authorization"), revenueCatSecret)) return c.json({ error: "unauthorized" }, 401);
     try {
-      const body = await requestJson(c.req.raw);
+      const body = await requestJson(c.req.raw, MAX_WEBHOOK_BYTES);
       // Reading switched on: the event only names the customers to read. The
       // 200 goes out once the reads are queued, not once they have run.
       if (deps.storeReads?.mode === "on") {

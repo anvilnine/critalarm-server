@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
 import type { IncidentService } from "../incident/service.js";
 import type { Clock, IdGenerator } from "../incident/types.js";
+import type { ProxyTrust } from "../rate-limit.js";
 
 export interface PublishInput {
   topic: string;
@@ -53,7 +54,7 @@ export interface IngressDependencies {
   dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>;
   mode?: "selfhosted" | "relay" | "hosted";
   publishLimit?: number;
-  behindProxy?: boolean;
+  behindProxy?: ProxyTrust;
 }
 
 export type IngressRouter = Hono;

@@ -126,8 +126,8 @@ guessed URL and topic name no longer lead to the hash.
 - Across all clients: at most 60 confirmations started per 60 seconds and 4 running at once. A call
   over either answers `429`, makes no outbound request and is not charged to its client. There is no
   limit per target host, because one would let a stranger lock a real server out of registering.
-- With `BEHIND_PROXY=true` the client address comes from a header, so the origin must accept
-  connections from the proxy only.
+- With `BEHIND_PROXY` set to `cloudflare` or a hop count the client address comes from a header,
+  so the origin must accept connections from the proxy only.
 - A registration body over 4096 bytes and a push body over 65536 bytes (JSON escaping can turn a
   4096-byte body into 24 KB, and a title and body of that size must fit) answer `400 invalid request`, judged by `content-length` and by the bytes read.
 - `RELAY_REGISTRATION=closed` answers `403` to every call without the operator's secret and makes no outbound request.
@@ -140,10 +140,12 @@ guessed URL and topic name no longer lead to the hash.
 
 ## Keys issued before 1.20.0
 
-A key issued before 1.20.0 is marked `legacy`. It can still push any hash without `topic`, and the
-relay does not tie it to a server. Some of these keys may date from when registration needed no
-secret, so the operator cannot assume each one belongs to a server they know. Before opening
-registration, list them:
+A key issued before 1.20.0 is marked `legacy`. Such a key used to push any hash when it left out
+`topic`. It no longer can: the relay checks `topic` against the key's `base_url` on every push, for
+legacy keys too, and a push without `topic` answers `400`. A legacy `base_url` was never proven by a
+challenge, though. Some of these keys may date from when registration needed no secret, so the
+operator cannot assume each one belongs to a server they know. Before opening registration, list
+them:
 
 ```sql
 SELECT id, base_url, version, created_at FROM relay_servers WHERE legacy = 1;

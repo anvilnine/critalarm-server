@@ -4,7 +4,9 @@ import { makeRateLimiter } from "../rate-limit.js";
 import { authenticateManagement } from "../v1/auth.js";
 import { ownedTopic } from "../v1/topics.js";
 import { authenticateTopic } from "./auth.js";
-import { ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
+import { MAX_MESSAGE_BYTES, ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
+import { readBytes } from "../body-limit.js";
+import { CapError } from "../tier/devices.js";
 import { PublishService } from "./service.js";
 import { historyCutoff } from "../retention/window.js";
 import type { IngressDependencies } from "./types.js";
@@ -24,9 +26,11 @@ function parseError(c: { json: (value: unknown, status: 400 | 413) => Response }
   return c.json({ error: error.message }, 400);
 }
 
+// POST / runs this before it knows the topic, so before any token is checked.
+// The read stops at 4097 bytes (body-limit.ts).
 async function jsonValue(request: Request): Promise<unknown> {
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > 4096) throw new ParseError(413, "message too large");
+  const bytes = await readBytes(request, MAX_MESSAGE_BYTES);
+  if (bytes === "too large") throw new ParseError(413, "message too large");
   try {
     return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
@@ -77,6 +81,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
       return c.json(await service.publish(topic, { topic: name, ...await parsePublishRequest(c.req.raw) }));
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
+      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       throw error;
     }
   };
@@ -91,6 +96,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
       return c.json(await service.publish(topic, input));
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
+      if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
       throw error;
     }
   });

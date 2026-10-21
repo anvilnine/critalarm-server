@@ -11,6 +11,8 @@ type DeviceRow = {
   apns_environment: ApnsEnvironment | null;
 };
 
+type Tally = { delivered: number; failed: number };
+
 type IncidentStateRow = { state: "open" | "acked" | "closed" | "expired"; opened_at: number };
 
 // A Live Activity token plus the Apple host its device is known to be on, so
@@ -40,29 +42,45 @@ export class PushDispatcher {
     private readonly clock: Clock = { now: () => Math.floor(Date.now() / 1000) },
   ) {}
 
+  // The timer scan hands over one batch with events from many accounts. A send
+  // that throws (a token APNs refuses before sending, a transport that is down)
+  // is logged, counted and skipped, so it never stops the pushes after it in
+  // the batch. Before this, one bad device on one account dropped every repeat
+  // that sorted after it, for every account.
   async dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult> {
-    let delivered = 0;
+    const tally = { delivered: 0, failed: 0 };
     for (const event of events) {
-      const accountId = this.owningAccount(event);
-      if (accountId === undefined) continue;
-      delivered += await this.sendToDevices(event, accountId);
-      await this.updateLiveActivities(event, accountId);
+      try {
+        const accountId = this.owningAccount(event);
+        if (accountId === undefined) continue;
+        await this.sendToDevices(event, accountId, tally);
+        await this.updateLiveActivities(event, accountId, tally);
+      } catch (error: unknown) {
+        tally.failed += 1;
+        console.error(JSON.stringify({ event: "push_event_failed", kind: event.kind, incident_id: event.incidentId, message_id: event.messageId, error: errorText(error) }));
+      }
     }
-    return { delivered };
+    return tally.failed === 0 ? { delivered: tally.delivered } : tally;
   }
 
   // Returns how many pushes the provider accepted. A refused push is not
   // counted, so a run of 500s or 410s never shows up as delivery. A state kind
   // goes to Android only (api.md §5.2): it stops a phone that is still ringing,
   // and iOS gets the same news as a Live Activity update instead.
-  private async sendToDevices(event: DeliveryEvent, accountId: string): Promise<number> {
-    let delivered = 0;
+  private async sendToDevices(event: DeliveryEvent, accountId: string, tally: Tally): Promise<void> {
     const devices = this.subscribedDevices(event.topicHash, accountId)
       .filter((device) => !isStateKind(event.kind) || device.platform === "android");
     for (const device of devices) {
-      const result = await this.senderFor(device).send(device, event);
+      let result: PushResult;
+      try {
+        result = await this.senderFor(device).send(device, event);
+      } catch (error: unknown) {
+        tally.failed += 1;
+        console.error(JSON.stringify({ event: "push_send_failed", device_id: device.id, platform: device.platform, kind: event.kind, error: errorText(error) }));
+        continue;
+      }
       this.rememberApnsEnvironment(device, result);
-      if (result.status >= 200 && result.status < 300 && !result.stale) delivered += 1;
+      if (result.status >= 200 && result.status < 300 && !result.stale) tally.delivered += 1;
       if (device.platform === "ios" && result.stale) {
         this.db
           .prepare("UPDATE devices SET push_token = '' WHERE id = ? AND push_token = ?")
@@ -72,7 +90,6 @@ export class PushDispatcher {
           .run(device.id, device.pushToken);
       }
     }
-    return delivered;
   }
 
   // Which Apple host rang the phone, so the next push starts there instead of
@@ -86,7 +103,7 @@ export class PushDispatcher {
     this.db.prepare("UPDATE devices SET apns_environment = ? WHERE id = ?").run(result.apnsEnvironment, device.id);
   }
 
-  private async updateLiveActivities(event: DeliveryEvent, accountId: string): Promise<void> {
+  private async updateLiveActivities(event: DeliveryEvent, accountId: string, tally: Tally): Promise<void> {
     const action = liveActivityEvent[event.kind];
     const sender = this.senders.liveActivity;
     if (action === undefined || sender === undefined || event.incidentId === null) {
@@ -107,7 +124,14 @@ export class PushDispatcher {
         openedAt,
         ...(target.apns_environment === null ? {} : { apnsEnvironment: target.apns_environment }),
       };
-      const result = await sender.sendLiveActivity(push);
+      let result: PushResult;
+      try {
+        result = await sender.sendLiveActivity(push);
+      } catch (error: unknown) {
+        tally.failed += 1;
+        console.error(JSON.stringify({ event: "live_activity_send_failed", action, incident_id: event.incidentId, error: errorText(error) }));
+        continue;
+      }
       if (result.stale) {
         this.db.prepare("DELETE FROM device_tokens WHERE token = ? AND kind IN ('la_start', 'la_update')").run(target.token);
       }
@@ -183,4 +207,10 @@ function fallbackState(kind: DeliveryEvent["kind"]): "open" | "acked" | "closed"
   if (kind === "close") return "closed";
   if (kind === "expire") return "expired";
   return "open";
+}
+
+// The message only. A thrown error can carry the request it failed on, and a
+// push token has no place in the log.
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message.slice(0, 200) : "unknown error";
 }

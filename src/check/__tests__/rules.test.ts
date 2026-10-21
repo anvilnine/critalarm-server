@@ -774,11 +774,11 @@ describe("when a device registers a new push token", () => {
     await missRound(harness, T0);
     expect((await harness.api.check("dev_a")).next_due_at).toBe(N1);
     harness.clock.value = T0 + DAY + HOUR;
-    expect((await patch(harness, "push-new")).status).toBe(200);
+    expect((await patch(harness, "abcdef01")).status).toBe(200);
     expect((await harness.api.check("dev_a")).next_due_at).toBe(T0 + DAY + HOUR);
     await harness.scanAt(T0 + DAY + HOUR + 60);
     expect(harness.sender.sent).toHaveLength(4);
-    expect(harness.sender.sent.at(-1)).toMatchObject({ target: { pushToken: "push-new" }, push: { attempt: 1 } });
+    expect(harness.sender.sent.at(-1)).toMatchObject({ target: { pushToken: "abcdef01" }, push: { attempt: 1 } });
     expect((await harness.api.rounds("dev_a"))[0]).toMatchObject({ opened_at: T0 + DAY + HOUR + 60, result: null });
   });
 
@@ -787,7 +787,7 @@ describe("when a device registers a new push token", () => {
     await harness.scanAt(T0);
     await harness.api.receipt("dev_a", lastCheckId(harness.sender));
     harness.clock.value = T0 + HOUR;
-    await patch(harness, "push-new");
+    expect((await patch(harness, "abcdef01")).status).toBe(200);
     expect((await harness.api.check("dev_a")).next_due_at).toBe(N1);
     await harness.scanAt(T0 + 2 * HOUR);
     expect(harness.sender.sent).toHaveLength(1);
@@ -795,9 +795,11 @@ describe("when a device registers a new push token", () => {
 
   it("the same token sent again is not a new one", async () => {
     const harness = await enrolled();
+    // An APNs token is hex (tier/device-tokens.ts), so the device starts on one.
+    harness.db.prepare("UPDATE devices SET push_token = 'abcd0a' WHERE id = 'dev_a'").run();
     await missRound(harness, T0);
     harness.clock.value = T0 + DAY + HOUR;
-    await patch(harness, "push-dev_a");
+    expect((await patch(harness, "abcd0a")).status).toBe(200);
     expect((await harness.api.check("dev_a")).next_due_at).toBe(N1);
   });
 });

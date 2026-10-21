@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { IncidentService } from "../../incident/service.js";
 import type { Clock, IdGenerator } from "../../incident/types.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
 import { createIngressRouter } from "../router.js";
+import type { IngressDependencies } from "../types.js";
 
 class FakeClock implements Clock {
   constructor(public value = 1_000) {}
@@ -19,7 +20,7 @@ class FixedIds implements IdGenerator {
   timer(): string { this.timerNumber += 1; return `tm_${this.timerNumber}`; }
 }
 
-function setup(critical = true, dispatch = vi.fn(async () => {})) {
+function setup(critical = true, dispatch: Mock<IngressDependencies["dispatch"]> = vi.fn(async () => {})) {
   const db = openDatabase(":memory:");
   migrate(db);
   db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1', 'free', 1)").run();
@@ -121,5 +122,17 @@ describe("ntfy publish", () => {
     const response = await app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "4" }, body: "down" });
     expect(response.status).toBe(500);
     expect(db.prepare("SELECT id, body FROM messages").all()).toEqual([{ id: "m_1", body: "down" }]);
+  });
+
+  // The dispatcher catches a send that throws so one bad device cannot stop
+  // the rest. Nobody paged is still a 500, and somebody paged is a 200.
+  it("answers 500 when every send threw and nothing was delivered, and 200 when one got through", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const none = setup(false, vi.fn(async () => ({ delivered: 0, failed: 2 })));
+      expect((await none.app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "4" }, body: "down" })).status).toBe(500);
+      const some = setup(false, vi.fn(async () => ({ delivered: 1, failed: 1 })));
+      expect((await some.app.request("/prod", { method: "POST", headers: { ...bearer, Priority: "4" }, body: "down" })).status).toBe(200);
+    } finally { error.mockRestore(); }
   });
 });
