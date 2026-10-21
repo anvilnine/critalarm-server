@@ -10,4 +10,3 @@
 - ACK has no relay wire event. Acceptance proves ACK-stop by absence of repeats until `reopen`.
 - A `relay-content: none` request contains neither topic name nor `max_ring_s`; relay cannot produce §5.1's topic-named fallback or exact TTL. Implementation uses generic fallback and 1800-second TTL.
 - Mode inference is underspecified because `relay-url` has a default while its presence distinguishes hosted from relay mode. Implementation uses explicit configuration presence for mode and returns effective default URL from `/v1/info`.
-- A topic hash may have subscribers from multiple accounts, but §4.1 does not define response when only some accounts exceed `p4_daily`. Implementation delivers to eligible accounts and returns 202 unless every matching subscribed account is capped.
