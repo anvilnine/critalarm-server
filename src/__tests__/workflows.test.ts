@@ -50,3 +50,21 @@ describe("release.yml deploy", () => {
     }
   });
 });
+
+// A tag like @v4 can be moved to any commit by whoever controls the action's
+// repository. A full commit SHA cannot. The comment names the release the SHA
+// is, so a reader and Dependabot can tell what it is.
+describe("every workflow", () => {
+  const files = ["ci.yml", "release.yml"];
+
+  it.each(files)("%s pins each action to a full commit SHA with its version beside it", (name) => {
+    const text = readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
+    const steps = Object.values(workflow(name).jobs).flatMap((job) => job.steps);
+    const uses = steps.map((step) => step.uses).filter((value): value is string => value !== undefined);
+    expect(uses.length).toBeGreaterThan(0);
+    for (const value of uses) expect(value).toMatch(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{40}$/);
+    const lines = text.split("\n").filter((line) => /^\s*(- )?uses:/.test(line));
+    expect(lines.length).toBe(uses.length);
+    for (const line of lines) expect(line).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+  });
+});
