@@ -69,3 +69,19 @@ export async function textBody(request: Request, maxBytes: number = SMALL_JSON_B
   if (bytes === "too large") throw new BodyTooLarge();
   return Buffer.from(bytes).toString("utf8");
 }
+
+// The same request with its body read through readBytes, for a handler that
+// reads the body itself (better-auth on /api/auth/*). The bytes go back in as
+// the new body, so the handler sees the same method, URL, headers and body it
+// would have seen, and can still call request.json() or request.formData().
+// Content-Length and Transfer-Encoding are dropped: the new body is a buffer
+// and carries its own length. A request with no body is handed on untouched.
+export async function boundedRequest(request: Request, maxBytes: number): Promise<Request | "too large"> {
+  if (request.body === null) return request;
+  const bytes = await readBytes(request, maxBytes);
+  if (bytes === "too large") return "too large";
+  const headers = new Headers(request.headers);
+  headers.delete("content-length");
+  headers.delete("transfer-encoding");
+  return new Request(request.url, { method: request.method, headers, body: bytes, signal: request.signal });
+}
