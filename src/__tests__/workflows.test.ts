@@ -35,4 +35,18 @@ describe("release.yml deploy", () => {
     expect(guard).toBeLessThan(firstCoolify);
     expect(steps[guard]?.run).toMatch(/exit 1/);
   });
+
+  // The repo is public and so are its workflow logs. Coolify's answers used to
+  // be printed there in full.
+  it("prints the HTTP status of each Coolify call and never the response body", () => {
+    const calls = (deploy?.steps ?? []).filter((step) => /COOLIFY_URL/.test(step.run ?? "") && /\bcurl\b/.test(step.run ?? ""));
+    expect(calls.length).toBe(2);
+    for (const step of calls) {
+      const run = step.run ?? "";
+      expect(run).toMatch(/curl [^\n]*-o \/dev\/null/);
+      expect(run).toMatch(/echo "HTTP \$status"/);
+      expect(run).not.toMatch(/\bcat\b/);
+      expect(run).not.toMatch(/\/tmp\//);
+    }
+  });
 });
