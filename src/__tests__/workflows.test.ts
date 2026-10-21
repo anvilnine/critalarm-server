@@ -7,7 +7,7 @@ import { parse } from "yaml";
 
 type Step = { uses?: string; run?: string; with?: Record<string, unknown>; name?: string };
 type Job = { if?: string; needs?: string | string[]; permissions?: Record<string, string>; steps: Step[] };
-type Workflow = { permissions?: Record<string, string>; jobs: Record<string, Job> };
+type Workflow = { on?: { push?: { branches?: string[]; tags?: string[] } }; permissions?: Record<string, string>; jobs: Record<string, Job> };
 
 const workflow = (name: string) => parse(readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8")) as Workflow;
 
@@ -66,5 +66,42 @@ describe("every workflow", () => {
     const lines = text.split("\n").filter((line) => /^\s*(- )?uses:/.test(line));
     expect(lines.length).toBe(uses.length);
     for (const line of lines) expect(line).toMatch(/@[0-9a-f]{40} # v\d+\.\d+\.\d+$/);
+  });
+});
+
+// `latest` and `sha-*` used to go out on every push to main before any test
+// had run, and a tag could deploy while CI was still going.
+describe("release.yml publish", () => {
+  const release = workflow("release.yml");
+  const needs = (job: Job | undefined): string[] => job?.needs === undefined ? [] : Array.isArray(job.needs) ? job.needs : [job.needs];
+  // Every job a job waits on, directly or through another.
+  const upstream = (name: string, seen = new Set<string>()): Set<string> => {
+    for (const parent of needs(release.jobs[name])) {
+      if (!seen.has(parent)) { seen.add(parent); upstream(parent, seen); }
+    }
+    return seen;
+  };
+
+  it("has a test job that type checks and runs the tests", () => {
+    const runs = (release.jobs.test?.steps ?? []).map((step) => step.run ?? "");
+    expect(runs).toContain("npm ci");
+    expect(runs).toContain("npm run typecheck");
+    expect(runs).toContain("npm test");
+    expect(release.jobs.test?.permissions).toEqual({ contents: "read" });
+  });
+
+  it("makes every job that logs in to the registry or deploys wait on the tests", () => {
+    const pushing = Object.entries(release.jobs)
+      .filter(([, job]) => job.steps.some((step) => step.uses?.startsWith("docker/login-action@") === true || /COOLIFY/.test(step.run ?? "")))
+      .map(([name]) => name);
+    expect(pushing.sort()).toEqual(["deploy", "publish", "publish-arm64"]);
+    for (const name of pushing) expect(upstream(name).has("test")).toBe(true);
+    expect(needs(release.jobs.publish)).toContain("test");
+  });
+
+  it("still runs on main and on v* tags, and deploys on a tag only", () => {
+    expect(release.on?.push?.branches).toEqual(["main"]);
+    expect(release.on?.push?.tags).toEqual(["v*"]);
+    expect(release.jobs.deploy?.if).toBe("startsWith(github.ref, 'refs/tags/v')");
   });
 });
