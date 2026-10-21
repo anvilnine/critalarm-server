@@ -3,6 +3,52 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.22.0 - 2026-10-21
+
+### Added
+
+- Body limits per route, in a table in §1.8. A `Content-Length` over the
+  limit is refused without reading the body. The publish routes take 4096
+  bytes, `POST /v1/topics/{name}/send` 64 KiB, `POST /relay/v1/push`
+  64 KiB, `POST /relay/v1/servers` 4096 bytes, the RevenueCat webhook
+  256 KiB, and the sign-in surface and every other JSON route 16 KiB.
+- The server setting `behind-proxy` (`BEHIND_PROXY`) in §1.8: unset or
+  `off` reads the socket peer, `cloudflare` reads `CF-Connecting-IP`, and
+  `1` to `10` reads that many entries from the right of `X-Forwarded-For`.
+- §3.7 says when the sign-in surface treats a first sign-in with a
+  provider as an identity it already holds: the addresses match and the
+  provider marks its address as verified.
+
+### Changed
+
+- Every relay key needs `topic` on every push, a key issued before 1.20.0
+  included. A push without it answers `400 {"error":"invalid request"}`
+  (§4.1). The 1.20.0 summary notes that the exemption is gone.
+- A priority-4 publish on a `relay` or `hosted` server over
+  `caps.p4_daily` answers `429 {"error":"cap","cap":"p4_daily"}` and is
+  neither stored nor sent (§1.7). This holds on every publish route. A
+  `selfhosted` server counts nothing.
+- `POST /relay/v1/push` sends a `p4` only to the subscribed accounts still
+  under `caps.p4_daily` and charges only those. It answers `429` only when
+  every subscribed account is at its cap (§4.1).
+- `413` `41301` covers a `?m=` message, a title, tags and a click URL over
+  4096 bytes, as well as a body over 4096 bytes (§1.8).
+- `{"error":"invalid request"}` also covers a body over the route's limit
+  (§1.8).
+- An IPv6 client counts against a rate limit by its /64 (§1.8).
+- The sign-in surface links an Apple identity to an existing one by email
+  only when Apple marks the address as verified. Google already worked that
+  way. An unverified match answers `401` and issues no `identity_token`
+  (§3.7).
+- The `429` line of `POST /relay/v1/push` lists `p4_daily` only. The push
+  never answered `critical_topics` or `devices`.
+- Compatibility. No route or field was added or removed. The app is
+  unaffected. A server built for 1.20.0 or later already sends `topic` on
+  every push. A server built before 1.20.0 sends none, and the relay
+  refuses its pushes with `400` until it is upgraded. An integration that
+  sent more than `caps.p4_daily` priority-4 publishes a day to a hosted
+  server now gets `429` past the cap where it used to get `200`.
+
 ## 1.21.0 - 2026-10-13
 
 ### Added
