@@ -420,3 +420,79 @@ describe("state kinds to Android", () => {
     });
   }
 });
+
+// The timer scan hands the dispatcher one batch with events from many
+// accounts. A sender that throws used to end the whole batch, so one account's
+// bad device token dropped the repeat pushes of every account after it.
+describe("a send that throws", () => {
+  class ThrowingFor implements PushSender {
+    readonly deliveries: string[] = [];
+    constructor(private readonly badDevice: string) {}
+    async send(device: PushDevice): Promise<PushResult> {
+      if (device.id === this.badDevice) throw new Error("NGHTTP2_REFUSED_STREAM");
+      this.deliveries.push(device.id);
+      return { status: 200, stale: false };
+    }
+  }
+
+  const repeat = (accountId: string): DeliveryEvent => ({ ...event(), kind: "repeat", messageId: `m_${accountId}`, accountId });
+
+  it("still sends the other devices and the other accounts' events in the same batch, and counts the failure", async () => {
+    const db = setup();
+    const apns = new ThrowingFor("dev_ios");
+    const fcm = new RecordingSender({ status: 200, stale: false });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await new PushDispatcher(db, { apns, fcm }).dispatch([repeat("acc_1"), repeat("acc_2")]);
+      expect(apns.deliveries).toEqual(["dev_cross"]);
+      expect(fcm.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_android"]);
+      expect(result).toEqual({ delivered: 2, failed: 1 });
+      expect(error).toHaveBeenCalledTimes(1);
+      const line = JSON.parse(String(error.mock.calls[0]?.[0])) as Record<string, unknown>;
+      expect(line).toMatchObject({ event: "push_send_failed", device_id: "dev_ios", kind: "repeat" });
+      expect(JSON.stringify(line)).not.toContain("ios-token");
+    } finally { error.mockRestore(); }
+  });
+
+  it("keeps going when a Live Activity send throws", async () => {
+    const db = liveActivitySetup();
+    db.prepare("INSERT INTO incidents (id,topic_id,state,opened_at,last_message_at,updated_at,max_ring_s) VALUES ('inc_2','top_2','open',900,900,900,60)").run();
+    db.prepare("INSERT INTO device_tokens (device_id,kind,activity_id,incident_id,token,updated_at) VALUES ('dev_cross','la_start','',NULL,'start-cross',1)").run();
+    const started: string[] = [];
+    const liveActivity: LiveActivitySender = {
+      async sendLiveActivity(push) {
+        if (push.token === "start-ios") throw new Error("transport closed");
+        started.push(push.token);
+        return { status: 200, stale: false };
+      },
+    };
+    const apns = new RecordingSender({ status: 200, stale: false });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await new PushDispatcher(db, { apns, fcm, liveActivity }, { now: () => 2_000 }).dispatch([
+        { ...event(), accountId: "acc_1" },
+        { ...event(), incidentId: "inc_2", messageId: "m_2", accountId: "acc_2" },
+      ]);
+      expect(started).toEqual(["start-cross"]);
+      expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_ios", "dev_cross"]);
+      expect(result).toEqual({ delivered: 3, failed: 1 });
+    } finally { error.mockRestore(); }
+  });
+
+  it("logs and skips an event whose lookup throws, then sends the next one", async () => {
+    const db = setup();
+    const apns = new RecordingSender({ status: 200, stale: false });
+    const fcm = new RecordingSender({ status: 200, stale: false });
+    const dispatcher = new PushDispatcher(db, { apns, fcm });
+    // SQLite refuses to bind an object, so the device lookup throws.
+    const broken = { ...repeat("acc_1"), topicHash: {} as unknown as string };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await dispatcher.dispatch([broken, repeat("acc_2")]);
+      expect(apns.deliveries.map((delivery) => delivery.device.id)).toEqual(["dev_cross"]);
+      expect(result).toEqual({ delivered: 1, failed: 1 });
+      expect(JSON.parse(String(error.mock.calls[0]?.[0]))).toMatchObject({ event: "push_event_failed", kind: "repeat" });
+    } finally { error.mockRestore(); }
+  });
+});

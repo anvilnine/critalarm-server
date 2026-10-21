@@ -12,9 +12,12 @@ export function isStateKind(kind: DeliveryEvent["kind"]): boolean {
 
 // What a dispatch reports back. `delivered` counts alarm pushes that APNs or
 // FCM accepted. Wiring that only forwards (self-hosted relay client) and test
-// fakes return nothing, so the caller treats that as zero.
+// fakes return nothing, so the caller treats that as zero. `failed` counts
+// sends that threw instead of answering with a status, and is there only when
+// at least one did.
 export interface DispatchResult {
   delivered: number;
+  failed?: number;
 }
 
 export type Dispatch = (events: readonly DeliveryEvent[]) => Promise<DispatchResult | void>;

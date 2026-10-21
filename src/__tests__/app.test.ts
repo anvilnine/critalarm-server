@@ -10,7 +10,7 @@ describe("loadConfig", () => {
         "relay-content: none",
         "listen: :8080",
         "data-dir: /var/lib/critalarm",
-        "behind-proxy: true",
+        "behind-proxy: cloudflare",
       ].join("\n"),
     );
 
@@ -19,7 +19,7 @@ describe("loadConfig", () => {
       relayContent: "none",
       port: 9090,
       dataDir: "/var/lib/critalarm",
-      behindProxy: true,
+      behindProxy: "cloudflare",
     });
   });
 

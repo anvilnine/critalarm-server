@@ -48,7 +48,7 @@ credential, which lives in the app. Source and docs:
 | `relay-plain-hash` | `RELAY_PLAIN_HASH` | `on` | Self-hosted mode. `on` also pushes the hash made from the topic's name, for apps that do not use the relay name yet. `off` pushes the relay name's hash only. See "Relay names" below |
 | - | `RELAY_REGISTRATION` | `open` | Relay and hosted modes. `open` lets a server get a relay key by answering a challenge at its `base_url`. `closed` answers 403 to every caller that sends no registration secret |
 | - | `RELAY_REGISTRATION_SECRET` | unset | A relay with this set also accepts a caller that sends it, with no challenge and no check on the `base_url` it names. Its holder can register any `base_url`, so it is for the operator's own servers and is never given to anyone else. A self-hosted server sends it when it is set. More than 5 wrong secrets in 60 seconds from one client answers 429 |
-| `behind-proxy` | `BEHIND_PROXY` | `false` | Read the client address from `cf-connecting-ip`, `x-forwarded-for` or `x-real-ip` for rate limits. With `true`, the origin must accept connections from the proxy only, because the address then comes from a header any caller can type |
+| `behind-proxy` | `BEHIND_PROXY` | `false` | Who may name the client address for rate limits. `false`: nobody, the socket peer is the client. `cloudflare`: `cf-connecting-ip` only. A number from 1 to 10: that many of your own proxies append to `x-forwarded-for`, and the client is that many entries from the right. An entry that is not an IP address falls back to the socket peer. The old `true` is read as `cloudflare` and warns at startup; behind one nginx, Caddy or Traefik set `1`. With any value but `false`, the origin must accept connections from the proxy only |
 | - | `RELAY_PUBLIC_HOSTS` | unset | Relay and hosted modes. Comma-separated host names this relay answers to, added to the hosts of `BASE_URL` and `RELAY_URL`. A challenge answer must name one of them, or registration fails with 422. Set it when servers reach the relay under a name that is neither of those |
 | `data-dir` | `DATA_DIR` | `/data` | SQLite volume |
 
@@ -178,7 +178,9 @@ Pushing a `v*` tag does two things: it publishes the semver image tags, and it
 deploys the hosted production server. **A push to `main` does not deploy
 production.** It publishes `latest` and `sha-*` and stops there. This is an
 alarm server, so the copy that wakes people up changes when someone asks for it
-and not before.
+and not before. The deploy also stops unless the tagged commit is already on
+`main`, so a tag pushed on an unmerged branch publishes its image and deploys
+nothing. The script pushes `main` before the tag for that reason.
 
 The deploy writes the released version into the image tag variable on the
 hosting platform, starts the service, then polls `GET /v1/info` until it reports

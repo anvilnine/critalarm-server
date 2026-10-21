@@ -8,6 +8,32 @@ export type TokenKind = (typeof tokenKinds)[number];
 
 export const tokenKindSchema = z.enum(tokenKinds);
 
+// What a push token may look like. The relay puts the token in the APNs
+// request path or the FCM message, so a token of any length or character used
+// to reach the sender as typed. A 70000-character token made the APNs client
+// throw before it sent anything (the HTTP/2 header limit is about 64 KiB).
+//
+// APNs: the app sends Apple's raw token bytes as hex, for the alarm token
+// (ios/Runner/AppDelegate.swift) and for both Live Activity tokens
+// (ios/Shared/Alarm/IncidentActivityCoordinator.swift). A device token is 32
+// bytes today and an activity token about 80. Apple says the length may grow,
+// so up to 256 bytes is allowed.
+//
+// FCM: the token Firebase Messaging hands the Android app. Firebase does not
+// publish a format. Tokens seen so far are about 160 characters of URL-safe
+// base64 with one colon, so this allows the URL-unreserved characters plus the
+// colon, up to 4096.
+export const apnsTokenSchema = z.string().regex(/^[0-9A-Fa-f]{1,512}$/);
+export const fcmTokenSchema = z.string().regex(/^[A-Za-z0-9._~:-]{1,4096}$/);
+
+export function tokenSchemaForKind(kind: TokenKind): z.ZodString {
+  return kind === "fcm" ? fcmTokenSchema : apnsTokenSchema;
+}
+
+export function pushTokenSchemaFor(platform: "ios" | "android"): z.ZodString {
+  return platform === "ios" ? apnsTokenSchema : fcmTokenSchema;
+}
+
 // api.md §4.2. activity_id belongs to la_update and only to it, because an
 // la_update token points at one running Live Activity. The other three kinds
 // are one per device, so they are stored with an empty activity_id.
@@ -19,6 +45,9 @@ export const tokenSchema = z
     incident_id: z.string().min(1).optional(),
   })
   .superRefine((value, context) => {
+    if (!tokenSchemaForKind(value.kind).safeParse(value.token).success) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["token"], message: "not a token of this kind" });
+    }
     if (value.kind === "la_update" && value.activity_id === undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["activity_id"], message: "required for la_update" });
     }
