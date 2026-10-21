@@ -1,11 +1,13 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.21.0
+**Version:** 1.22.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.22.0** writes down what the fixes from the 2026-10-20 security audit changed on the wire. Five changes. First, every relay key needs `topic` on every push, a key issued before 1.20.0 included, and a push without it answers `400 {"error":"invalid request"}` (§4.1). Second, a priority-4 publish on a `relay` or `hosted` server over the account's `caps.p4_daily` answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7), and a relayed `p4` goes only to the accounts still under their cap (§4.1). Third, every route reads its body up to a limit and stops there (§1.8). The publish routes answer `413` for a body, a `?m=` message, a title, tags or a click URL over 4096 bytes, and the JSON routes answer `400 {"error":"invalid request"}` for a body over their limit. Fourth, the client address the rate limits count is the socket peer unless the server setting `behind-proxy` names who may report it, and an IPv6 client counts by its /64 (§1.8). Fifth, the sign-in surface joins a provider to an existing identity by email only when that provider says the address is verified, for Apple as well as Google (§3.7). No route or field is added. A server built for 1.20.0 or later already sends `topic` on every push and sees no change. A server built before 1.20.0 sends none, and its pushes now answer `400` until it is upgraded.
 
 **1.21.0** stops a stranger from working out the hash a phone listens on, for topics on a self-hosted server. Until now the hash was `sha256(base_url + "/" + topic)`, and both parts are known or easy to guess: `base_url` is in the open `GET /v1/info`, and topic names like `prod` are common. Any device registered with the relay may subscribe to any hash (§4.2), so a stranger could subscribe a phone of their own to another server's topic and learn when it fires, and read the title and body when that server runs `relay_content: full`. From this version a `selfhosted` server gives every topic a `relay_name`, 32 random bytes, and returns it on the topic object, which only a management credential can read (§3.1). The app makes the hash from `relay_name` in place of the name when a topic has one. The server pushes that hash and sends `relay_name` in the push's `topic` field (§4.1), so the relay's check from 1.20.0 works unchanged and the relay no longer sees the topic's name on that push. A server in `relay` or `hosted` mode returns no `relay_name` and nothing changes there: it finds devices by account as well as by hash, so a guessed hash reaches nobody. Everything is additive. An app built before this version ignores the new field and keeps subscribing to the hash made from the name. A self-hosted server keeps pushing that hash too, as a second push, until its owner turns it off (`relay-plain-hash`, §4.1). The relay needs no change.
 
-**1.20.0** lets a self-hosted server get a relay key without a secret from the relay's operator, and ties every relay key to one server. Three changes, all in §4.1 and the new §3.8. First, registration carries a `challenge`. The relay calls the server back at its `base_url` and issues a key only when the server answers with the same value, so a key is proof that its holder answers at that `base_url`. Second, a push carries `topic`, the topic's name. The relay works out `sha256(base_url + "/" + topic)` from the `base_url` the key was registered with and refuses a push whose `topic_hash` is anything else, so a key can only ring subscribers of its own server's topics. Until now any key holder could push any hash it could compute, which is why registration was closed to strangers. Third, a server answers `GET /v1/relay-challenge/{challenge}` (§3.8). The relay now sees a topic's name while it checks a push. It does not store it, log it or send it on. The app is untouched: it sends and receives nothing new. A server built for 1.19.0 that holds a key from before this version keeps pushing as it did. A server built for 1.19.0 that asks for a new key without the operator's secret is refused with `400`, because it sends no `challenge`.
+**1.20.0** lets a self-hosted server get a relay key without a secret from the relay's operator, and ties every relay key to one server. Three changes, all in §4.1 and the new §3.8. First, registration carries a `challenge`. The relay calls the server back at its `base_url` and issues a key only when the server answers with the same value, so a key is proof that its holder answers at that `base_url`. Second, a push carries `topic`, the topic's name. The relay works out `sha256(base_url + "/" + topic)` from the `base_url` the key was registered with and refuses a push whose `topic_hash` is anything else, so a key can only ring subscribers of its own server's topics. Until now any key holder could push any hash it could compute, which is why registration was closed to strangers. Third, a server answers `GET /v1/relay-challenge/{challenge}` (§3.8). The relay now sees a topic's name while it checks a push. It does not store it, log it or send it on. The app is untouched: it sends and receives nothing new. A server built for 1.19.0 that holds a key from before this version keeps pushing as it did. 1.22.0 drops that exemption: every key needs `topic`, so such a server has to be upgraded to keep pushing. A server built for 1.19.0 that asks for a new key without the operator's secret is refused with `400`, because it sends no `challenge`.
 
 **1.19.0** moves the weekly check from the `pro` pack to the Hosted tier. A device is sent checks only while its account's tier is `hosted` (§4.5). `free` does not get them, and neither does `relay`, which has the same caps as `hosted` but is not the Hosted plan. Hosted and the `pro` pack are separate and neither includes the other, so holding `pro` no longer gets a device a check and a Hosted account needs no pack for one. `PUT .../check` with `"enabled":true` on any other tier answers `403 {"error":"tier","tier":"hosted"}`, a new error (§1.8), where 1.18.0 answered `{"error":"pack","pack":"pro"}`. The `reason` value `"pack"` becomes `"tier"` in both places it appeared: on `GET .../check` beside `"state":"off"`, and on a round that closed as `skipped`. A phone on a self-hosted server cannot get the weekly check, because no plan is sold there. Packs are untouched: `packs`, `GET /relay/v1/packs`, `POST /relay/v1/packs/refresh` and the `pack` error stay as they were, and no route in this version answers the `pack` error. This version changes what 1.18.0 said and adds no route and no field. An app built for 1.18.0 meets a `403` with no `pack` field and a `reason` it does not know. It reads the first as a switch that failed and the second as no reason, so it shows the check as off and never as working.
 
@@ -154,6 +156,8 @@ Field set and order match ntfy's message object so ntfy client libraries parse i
 | 4 | - | Stored. Forwarded as Time-Sensitive / high. |
 | 1-3 | - | Stored. App polls. Not forwarded to relay. |
 
+**Priority 4 is capped on a `relay` or `hosted` server.** Every priority-4 publish, through any publish route (§1.1, §1.5, §3.5), counts against `caps.p4_daily` (§4.2) of the account that owns the topic, for the current UTC day. A publish over the cap answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent. A `selfhosted` server counts nothing. Priorities 1 to 3 and 5 are never capped.
+
 ### 1.8 Errors
 
 ntfy's shape:
@@ -162,18 +166,41 @@ ntfy's shape:
 {"code":40101,"http":401,"error":"unauthorized"}
 {"code":40001,"http":400,"error":"invalid topic name"}
 {"code":40901,"http":409,"error":"topic already exists"}
-{"code":41301,"http":413,"error":"message too large"}      // body > 4096 bytes
+{"code":41301,"http":413,"error":"message too large"}      // body, ?m=, title, tags or click > 4096 bytes
 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
 Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute.
+
+**Which IP.** The address a rate limit counts is the one that opened the connection, unless the server setting `behind-proxy` (`BEHIND_PROXY`) says who may report the client's address instead:
+
+| Value | Client address |
+|---|---|
+| unset, `false`, `off`, `0` | the socket peer. The default. |
+| `cloudflare` | `CF-Connecting-IP`. Right only when the server accepts connections from Cloudflare alone. |
+| `1` to `10` | that many proxies of the operator's own append to `X-Forwarded-For`, and the client is that many entries from the right. |
+
+A reported value that is not an IP address falls back to the socket peer. `X-Real-IP` and the left-most `X-Forwarded-For` entry are never read. `true`, which earlier servers took, is read as `cloudflare` and logged as a warning. Any other value stops the server at startup. An IPv6 client is counted by its /64 and an IPv4-mapped IPv6 address as its IPv4. The same address is what the relay registration limits count (§4.1).
+
+**Body limits.** A server reads a request body up to the route's limit and stops there. A `Content-Length` over the limit is refused without reading the body.
+
+| Route | Limit | Over the limit |
+|---|---|---|
+| `POST /`, `POST`/`PUT /{topic}` (§1) | 4096 bytes. `?m=`, the title, the tags and the click URL are held to 4096 bytes each too | `413` `41301` |
+| `POST /v1/topics/{name}/send` (§3.5) | 64 KiB, and 4096 bytes of `message` | `413` `41301` |
+| `POST /relay/v1/push` (§4.1) | 64 KiB | `400 {"error":"invalid request"}` |
+| `POST /relay/v1/servers` (§4.1) | 4096 bytes | `400 {"error":"invalid request"}` |
+| `POST /webhooks/revenuecat` (§4.3) | 256 KiB, read only after the secret matched | `400 {"error":"invalid request"}` |
+| `POST /relay/v1/devices/{device_id}/checks/{check_id}/receipt` (§4.5) | 16 KiB | read as a receipt with no notes |
+| `/api/auth/*`, the sign-in surface (§3.7) | 16 KiB | `400 {"error":"invalid request"}` |
+| every other route that takes a JSON body | 16 KiB | `400 {"error":"invalid request"}` |
 
 Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code. The ones a client will meet:
 
 | Body | When |
 |---|---|
 | `{"error":"invalid priority"}` | priority outside 1-5 or an unknown name |
-| `{"error":"invalid request"}` | a malformed body or an unknown enum value in a query filter |
+| `{"error":"invalid request"}` | a malformed body, a body over the route's limit (above), or an unknown enum value in a query filter |
 | `{"error":"incident state conflict"}` | `409` from ack or close against the wrong state (§3.2) |
 | `{"error":"scheduled delivery not supported"}` | `X-Delay`, `At`, `In`, or JSON `delay` (§1.4) |
 | `{"error":"streaming not supported"}` | `501` from `/json` without `poll=1`, `/sse`, `/ws`, `/raw` (§2) |
@@ -410,6 +437,8 @@ For a load balancer, a container health check, or an uptime probe. It touches no
 
 **The credential.** Two things are proven at once: who the person is, and which account this handset brings. One `Authorization` header cannot carry two secrets, so the device token stays in the header exactly as on every other `/v1/` route, and the identity travels in the body. The `identity_token` is issued by the server's own auth surface, not by Apple or Google directly.
 
+**Two providers with one address.** When a person signs in with a provider for the first time and the address it gives matches an identity the server already holds, the auth surface treats the sign-in as that identity, and `POST /v1/account/link` then handles it as any returning identity. It does so only when the provider marks the address as verified (`email_verified`), for Apple and Google alike. An unverified match is refused at the auth surface with `401` and no `identity_token` is issued. Sign in with Apple at Work & School can send `email_verified` false. An address that matches nothing gets a new identity, which `link` adds to the account as described below.
+
 ```
 POST /v1/account/link                                   // sign up, sign in, or add a provider
   Authorization: Bearer dv_...
@@ -562,14 +591,16 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 → 400 {"error":"invalid request"}            // includes a missing or malformed topic
 → 401 {"error":"unauthorized"}               // no key, an unknown key, or a key that was replaced
 → 403 {"error":"topic mismatch"}
-→ 429 {"error":"cap", "cap":"critical_topics"|"devices"|"p4_daily"}
+→ 429 {"error":"cap", "cap":"p4_daily"}      // a p4, and every subscribed account is at its cap
 ```
 
 **A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must have the shape of a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), which a `relay_name` also has, so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
 
 **A topic with a `relay_name` has two hashes, and the server may push both.** The secret hash is `sha256(base_url + "/" + relay_name)`, pushed with `topic` set to the `relay_name`. The plain hash is `sha256(base_url + "/" + name)`, pushed with `topic` set to the name. An app from before 1.21.0 is subscribed to the plain hash, and an app from 1.21.0 on is subscribed to the secret one. The server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`) decides whether the plain push is sent: `on` sends both pushes for every event, `off` sends the secret one only. The default is `on` in this version. Both pushes carry the same `incident_id`, `message_id`, `kind` and `ring_until`. The server works out both hashes from the `BASE_URL` it is running with. While `relay-plain-hash` is `on`, a stranger who guesses the name can still subscribe to the plain hash, so an owner whose phones all run an app from 1.21.0 on turns it `off`. The relay cannot tell the two pushes apart and does not need to: each passes the same check.
 
-A key issued before 1.20.0 has no proven `base_url` behind it. The relay still accepts a push from one without `topic`, and checks `topic` when it is sent. Every key issued from 1.20.0 on needs `topic` on every push.
+**Every key needs `topic` on every push**, including a key issued before 1.20.0. A push without it answers `400 {"error":"invalid request"}`. Until 1.22.0 a key from before 1.20.0 could push without `topic`, and then nothing tied its pushes to one server.
+
+**A `p4` rings only accounts under their cap.** The relay finds every account subscribed to `topic_hash` and sends a `p4` only to those still under `caps.p4_daily` for the current UTC day (§4.2), charging each of them one. An account at its cap gets nothing, even when another account on the same hash is under its own. When every subscribed account is at its cap the relay answers `429 {"error":"cap","cap":"p4_daily"}`. No other kind is capped.
 
 ```
 POST /relay/v1/servers                       // no auth
@@ -665,7 +696,7 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 
 An account can also carry a human identity, which is what §3.7 is for. Signing up on a device writes an identity against the account that device already has, so no topic, token or subscription moves. Signing in on a device whose own account already holds content asks the person to merge or start fresh. Identities are Sign in with Apple and Google. There is no email or password on any tier.
 
-**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
+**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. `caps.p4_daily` counts per UTC day, and a publish on the account's own server (§1.7) and a `p4` relayed to it (§4.1) both count. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
 **`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in two places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
 
