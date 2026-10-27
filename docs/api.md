@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.22.0
+**Version:** 1.23.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.23.0** adds one route, `POST /v1/account/cancel-reason` (§3.9), for the answer to "What made you cancel?". The app calls it when a person whose `hosted` tier will not renew taps a reason, and once more if they write a few words. It is an authenticated write that creates no alert. It takes `reason`, an optional `text` of 500 characters at most, `app_version` and `platform`, and no key: the server keeps at most one answer per account in any rolling 30 days, and every later call in that window is a repeat of it. A repeat never changes the reason, the version or the platform, may fill an empty text once, and never replaces text. Every accepted call answers `204`. Only an account that is on `hosted` now, or was ever moved to it, may send. Only `hosted` takes the route: `selfhosted` and `relay` answer `501` before any credential is checked, an exception to the rule at the top of §3. An answer is kept for 365 days, deleted with the account and its tombstones, and read by the operator with `critalarm cancel-answers` (§4.4). Nothing that exists changed. The route's body limit, 8192 bytes, joins the table in §1.8. An app built for 1.22.0 never calls the route.
 
 **1.22.0** writes down what the fixes from the 2026-10-20 security audit changed on the wire. Five changes. First, every relay key needs `topic` on every push, a key issued before 1.20.0 included, and a push without it answers `400 {"error":"invalid request"}` (§4.1). Second, a priority-4 publish on a `relay` or `hosted` server over the account's `caps.p4_daily` answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7), and a relayed `p4` goes only to the accounts still under their cap (§4.1). Third, every route reads its body up to a limit and stops there (§1.8). The publish routes answer `413` for a body, a `?m=` message, a title, tags or a click URL over 4096 bytes, and the JSON routes answer `400 {"error":"invalid request"}` for a body over their limit. Fourth, the client address the rate limits count is the socket peer unless the server setting `behind-proxy` names who may report it, and an IPv6 client counts by its /64 (§1.8). Fifth, the sign-in surface joins a provider to an existing identity by email only when that provider says the address is verified, for Apple as well as Google (§3.7). No route or field is added. A server built for 1.20.0 or later already sends `topic` on every push and sees no change. A server built before 1.20.0 sends none, and its pushes now answer `400` until it is upgraded.
 
@@ -193,6 +195,7 @@ A reported value that is not an IP address falls back to the socket peer. `X-Rea
 | `POST /webhooks/revenuecat` (§4.3) | 256 KiB, read only after the secret matched | `400 {"error":"invalid request"}` |
 | `POST /relay/v1/devices/{device_id}/checks/{check_id}/receipt` (§4.5) | 16 KiB | read as a receipt with no notes |
 | `/api/auth/*`, the sign-in surface (§3.7) | 16 KiB | `400 {"error":"invalid request"}` |
+| `POST /v1/account/cancel-reason` (§3.9) | 8192 bytes, checked after the credential, the request limit and the tier | `413 {"error":"request too large"}` |
 | every other route that takes a JSON body | 16 KiB | `400 {"error":"invalid request"}` |
 
 Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code. The ones a client will meet:
@@ -212,6 +215,7 @@ Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code.
 | `{"error":"challenge failed"}` | `422` from relay registration when the relay could not confirm the challenge at `base_url` (§4.1) |
 | `{"error":"registration closed"}` | `403` from relay registration when the relay's operator has closed it (§4.1) |
 | `{"error":"topic mismatch"}` | `403` from a relay push whose `topic_hash` is not the hash of `topic` under the key's `base_url` (§4.1) |
+| `{"error":"invalid reason"}`, `{"error":"text too long"}`, `{"error":"request too large"}` | `400` or `413` from the cancel reason route (§3.9) |
 
 ---
 
@@ -536,7 +540,7 @@ An account with no identity is deleted on `dv_` alone. Every device on it holds 
 
 Only an `open` incident blocks. An `acked` one does not: nothing is ringing, and a person must never be stuck unable to leave.
 
-The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, its packs, its devices' weekly check state and rounds, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
+The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, its packs, its devices' weekly check state and rounds, its cancel answers (§3.9) and those of every tombstone that points at it, in the same transaction, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
 
 After `204` every credential of the account is dead: `dv_`, `aj_` and every `tk_`. The app treats it like signing out and registers again with a new `device_id`. The other devices on the account get `401` on their next call and do the same.
 
@@ -564,6 +568,58 @@ The server's half of relay registration (§4.1). A server makes a random `challe
 `relay` is the host part of the server's `relay-url`, lower case. It says which relay the value was made for. A relay issues a key only when `relay` is one of its own public host names, which come from its configuration and never from the request, so a party that is handed a challenge cannot spend it at a different relay.
 
 A server in `relay` or `hosted` mode never asks another relay for a key, so it answers `404` to everything here.
+
+### 3.9 Cancel reason
+
+**Only on `hosted`, and an exception to the credential rule.** The `hosted` tier is sold by a server in `hosted` mode and nowhere else, so only `hosted` mode takes an answer. `selfhosted` and `relay` answer `501` before any credential is checked. That departs from the rule at the top of §3 ("Wrong, missing, or out of scope → 401"), on purpose: the refusal says "this server takes no answer", whoever asks. In `selfhosted` the body is the one §3.7 already uses for its routes. §3.7 does not refuse in `relay` mode, where those routes work, so the `relay` refusal is new to this route. The route is mounted in every mode so a client can tell a refusal from a path typed wrong.
+
+```
+POST /v1/account/cancel-reason
+  Authorization: Bearer dv_...
+  { "reason":"price"|"unused"|"selfhost"|"missing"|"broken"|"other",
+    "text":"Optional. 500 characters at most.",
+    "app_version":"1.0.0+12",
+    "platform":"ios"|"android" }
+→ 204
+→ 400 {"error":"invalid request"}
+→ 400 {"error":"invalid reason"}
+→ 400 {"error":"text too long"}
+→ 401
+→ 403 {"error":"tier","tier":"hosted"}
+→ 413 {"error":"request too large"}
+→ 429 {"error":"rate limited"}
+→ 501 {"error":"not supported in selfhosted mode"} | {"error":"not supported in relay mode"}
+```
+
+**What it is.** One person's answer to "What made you cancel?". The app sends it the first time it opens after it learns that the account's `hosted` tier will not renew: once when the person taps one of the six choices, and a second time if the person also writes a few words. The route creates no alert, sends no push and opens no incident. Only the store knows that a plan is ending, so the client decides when to send and the server never asks.
+
+**The credential, and who may send.** A `dv_` device token, as on every `/v1/` route in `hosted` mode. No sign-in is needed. A missing or wrong token answers `401`. Registration is open and makes a `free` account for anyone, so the route takes an answer only from an account that is on `hosted` now or was ever moved to `hosted`. That includes a trial and a manual grant, and it does not mean the account paid. A cancelled plan that is still running is still `hosted`. The server knows "was ever assigned" from the tier changes it already records (`tier_changes`): the account, or an account merged into it, has a record of moving to `hosted`. Any other account answers `403 {"error":"tier","tier":"hosted"}`, stores nothing, and the client does not retry. A tier set by hand, outside the code paths that record a change, leaves no record, and an account with only such a tier is refused once it is no longer `hosted`. A tier move from before the record existed has no row either.
+
+**One answer per account per 30 days.** The request carries no key. The server keeps at most one answer per account in any rolling 30 days, and the first call in that window creates it. The current answer of an account is the newest one first stored within the last 30 days. Every call from that account while it has a current answer is a repeat of it, whatever phone sent it. So two phones on one account make one answer, and a retry makes none. The window runs from the time the answer was first stored. A repeat does not extend it. A call made 30 days or more after the current answer was first stored has no current answer and creates a new one. A person who cancels, resubscribes and cancels again more than 30 days later gives a second answer. One who does it inside 30 days adds to the first.
+
+**A repeat.** A repeat never changes `reason`, `app_version` or `platform`. If the current answer has no text yet and the repeat carries non-empty text, the text is stored, once. Once text is set it is never replaced. A repeat that differs in any other way stores nothing new. Every accepted call answers `204`, so the client cannot tell a new answer from a repeat and does not need to. This is why the text send after the reason send is safe: whichever arrives first creates the answer, and the text is kept if the other call had none. A retry that carries no text, or older text, changes nothing.
+
+**`text`.** Optional: absent and `null` are both valid. It is trimmed, and empty after trimming means no text. It is at most 500 Unicode characters after trimming, counted as code points, so an emoji counts as one. Stored as plain text and never rendered as markup.
+
+**`app_version` and `platform`.** `app_version` is 1 to 32 characters of letters, digits, `.`, `+`, `_` and `-`, for example `1.0.0+12`. `platform` is one of the two values §4.2 accepts.
+
+**Size.** The body is measured on the raw request bytes, before any parsing, and may be at most 8192 bytes. A valid request always fits: a `text` of 500 characters is at most 6000 bytes when every character is an emoji written as two `\u` escapes (12 bytes each), and the other fields take under 200. Over 8192 bytes answers `413 {"error":"request too large"}`.
+
+**Order of checks.** The route stops at the first that fails, and each refusal has one status and one body:
+
+1. The mode: `501`, in `selfhosted` and `relay`.
+2. The credential: `401`.
+3. The request limit: `429 {"error":"rate limited"}`.
+4. On `hosted` now or ever: `403 {"error":"tier","tier":"hosted"}`.
+5. The size of the raw body: `413 {"error":"request too large"}`.
+6. The body is a JSON object, `reason` is a string, `text` is a string, `null` or absent, `app_version` and `platform` have the right shape: `400 {"error":"invalid request"}`.
+7. `reason` is one of the six: `400 {"error":"invalid reason"}`.
+8. `text` is at most 500 characters after trimming: `400 {"error":"text too long"}`.
+9. Store or repeat: `204`.
+
+**The request limit.** An account may make at most 30 calls to this route in any rolling hour. Every call that passes the credential check counts, whatever its outcome, so repeats and refused calls are limited too. A call the limit itself refuses is not counted. A legitimate client makes at most 16: two phones, each with two first-time calls and three retries of each. The count is kept in memory by the server process and a restart clears it. It is a best-effort brake on a loop, not a quota. What bounds the stored data is the rule of one answer per account per 30 days.
+
+**What is stored, and for how long.** The account id, the time the answer was first stored, the reason, the text, the app version, the platform and the time it last changed. Not stored: topic names, device ids, message content, a sign-in email, an IP address. The request log shows the path and the status and never the body. No route returns an answer. The operator reads answers with `critalarm cancel-answers` (§4.4). An answer is kept for 365 days after it was first stored and is then deleted by the same prune as history, which runs every hour (§4.2). It is deleted with the account: `DELETE /v1/account` and the operator erase (§3.7, §4.4) delete the cancel answers of the surviving account and of every account in its tombstone family, in the same transaction as the account. A merge or a switch leaves an answer on the account it was written on, which is why the erase reaches the tombstones. The text is the person's own words and can name anything. It is never sent to a third party.
 
 ## 4. Relay API
 
@@ -921,7 +977,15 @@ critalarm account delete acc_...              # by account id
 critalarm account delete --email <address>    # by the sign-in email
 ```
 
-It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing.
+It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing. It deletes cancel answers the same way `DELETE /v1/account` does.
+
+**Reading cancel answers.** The answers people send when they cancel (§3.9):
+
+```
+critalarm cancel-answers [--since YYYY-MM-DD]
+```
+
+It prints the number of answers, then a count per reason, busiest first, then every answer that has text, newest first: the UTC date, the reason, the platform, the app version and the text on one line inside JSON quotes. It prints no account id. `--since` keeps answers first stored on or after that UTC date. A bad date exits non-zero and prints the usage line.
 
 ### 4.5 Weekly check
 
