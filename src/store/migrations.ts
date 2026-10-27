@@ -497,6 +497,23 @@ const migrations: Migration[] = [
   // api.md §3.1. The secret half of a topic's relay hash. Null until the server
   // makes one, which only a selfhosted server does.
   `ALTER TABLE topics ADD COLUMN relay_name TEXT;`,
+  // api.md §3.9. The answer to "What made you cancel?". An account has at most
+  // one in any rolling 30 days, so (account_id, created_at) is a key: two rows
+  // of one account are at least 30 days apart. Kept 365 days and deleted with
+  // the account by the cascade, which the erase reaches for every tombstone too.
+  `
+    CREATE TABLE cancel_answers (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      reason TEXT NOT NULL CHECK (reason IN ('price', 'unused', 'selfhost', 'missing', 'broken', 'other')),
+      text TEXT,
+      app_version TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android')),
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, created_at)
+    );
+    CREATE INDEX cancel_answers_created ON cancel_answers(created_at);
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
