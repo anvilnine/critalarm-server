@@ -4,7 +4,11 @@ import { createApp } from "../../index.js";
 import type { Config } from "../../config.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
-import { parseAnswer } from "../cancel-answers.js";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type Database from "better-sqlite3";
+import { parseAnswer, storeAnswer, type AnswerInput } from "../cancel-answers.js";
 
 // api.md §3.9. One answer to "What made you cancel?", sent by the app.
 
@@ -389,6 +393,61 @@ describe("POST /v1/account/cancel-reason", () => {
     for (let index = 0; index < 30; index += 1) await send(app, good(), "dv_a");
     expect((await send(app, good(), "dv_a")).status).toBe(429);
     expect((await send(app, good(), "dv_b")).status).toBe(204);
+  });
+});
+
+describe("two first calls in the same second", () => {
+  const input: AnswerInput = { reason: "price", text: null, appVersion: "1.0.0+12", platform: "ios" };
+
+  it("two phones sending at once make one answer and both hear 204", async () => {
+    const { app, db } = setup();
+    db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_a2', 'a', ?, 'android', 'y', 1)")
+      .run(createHash("sha256").update("dv_a2").digest("hex"));
+    const [first, second] = await Promise.all([
+      send(app, good(), "dv_a"),
+      send(app, { ...good(), platform: "android", text: "from the second phone" }, "dv_a2"),
+    ]);
+    expect([first.status, second.status]).toEqual([204, 204]);
+    expect(rows(db)).toHaveLength(1);
+    expect(rows(db)[0]).toMatchObject({ created_at: START, text: "from the second phone" });
+  });
+
+  it("a second connection to the same file sees the first answer and keeps it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cancel-answers-"));
+    const one = openDatabase(join(dir, "db.sqlite"));
+    const two = openDatabase(join(dir, "db.sqlite"));
+    try {
+      migrate(one);
+      one.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('a', 'hosted', 1)").run();
+      const clock = { now: () => START };
+      expect(storeAnswer(one, clock, "a", input)).toBe("stored");
+      expect(storeAnswer(two, clock, "a", { ...input, reason: "broken", text: "second" })).toBe("kept");
+      expect(two.prepare("SELECT reason, text FROM cancel_answers").all()).toEqual([{ reason: "price", text: "second" }]);
+    } finally {
+      one.close();
+      two.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an insert that meets a row stored in the same second is a repeat, not an error", () => {
+    const { db } = setup();
+    db.prepare("INSERT INTO cancel_answers (account_id, created_at, reason, text, app_version, platform, updated_at) VALUES ('a', ?, 'price', NULL, '1.0.0+12', 'ios', ?)").run(START, START);
+    // Stands in for a writer the read could not see: the lookup of the current
+    // answer finds nothing, so the insert is what meets the existing row.
+    const blind = new Proxy(db, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (sql: string) => sql.startsWith("SELECT created_at AS createdAt FROM cancel_answers")
+            ? { get: () => undefined }
+            : target.prepare(sql);
+        }
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as Database.Database;
+    expect(storeAnswer(blind, { now: () => START }, "a", { ...input, reason: "broken", text: "late text" })).toBe("kept");
+    expect(rows(db)).toMatchObject([{ reason: "price", text: "late text", created_at: START }]);
   });
 });
 

@@ -82,23 +82,35 @@ export function holdsOrHeldHosted(db: Database.Database, accountId: string): boo
 // platform never change, an empty text is filled once, and a text that is set is
 // never replaced. A call with no current answer creates one. The window runs
 // from created_at, so a repeat does not extend it.
+//
+// The read and the write share one IMMEDIATE transaction, so a second
+// connection waits for the first and then sees its row. Should two first calls
+// still land in the same second, the insert yields to the row already there
+// and the call is a repeat of it, never a constraint error.
 export function storeAnswer(db: Database.Database, clock: Clock, accountId: string, input: AnswerInput): "stored" | "kept" {
   return db.transaction((): "stored" | "kept" => {
     const now = clock.now();
+    const fillText = (createdAt: number): void => {
+      if (input.text === null) return;
+      db.prepare("UPDATE cancel_answers SET text = ?, updated_at = ? WHERE account_id = ? AND created_at = ? AND text IS NULL")
+        .run(input.text, now, accountId, createdAt);
+    };
     const current = db
-      .prepare("SELECT created_at AS createdAt, text FROM cancel_answers WHERE account_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 1")
-      .get(accountId, now - ANSWER_WINDOW_S) as { createdAt: number; text: string | null } | undefined;
+      .prepare("SELECT created_at AS createdAt FROM cancel_answers WHERE account_id = ? AND created_at > ? ORDER BY created_at DESC LIMIT 1")
+      .get(accountId, now - ANSWER_WINDOW_S) as { createdAt: number } | undefined;
     if (current !== undefined) {
-      if (current.text === null && input.text !== null) {
-        db.prepare("UPDATE cancel_answers SET text = ?, updated_at = ? WHERE account_id = ? AND created_at = ? AND text IS NULL")
-          .run(input.text, now, accountId, current.createdAt);
-      }
+      fillText(current.createdAt);
       return "kept";
     }
-    db.prepare("INSERT INTO cancel_answers (account_id, created_at, reason, text, app_version, platform, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    const inserted = db
+      .prepare("INSERT INTO cancel_answers (account_id, created_at, reason, text, app_version, platform, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (account_id, created_at) DO NOTHING")
       .run(accountId, now, input.reason, input.text, input.appVersion, input.platform, now);
+    if (inserted.changes === 0) {
+      fillText(now);
+      return "kept";
+    }
     return "stored";
-  })();
+  }).immediate();
 }
 
 // A rolling hour per account, kept in memory by this process: best effort, and
