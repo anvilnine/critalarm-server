@@ -3,6 +3,29 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.24.0 - 2026-10-28
+
+### Changed
+
+- A priority-5 message on a topic whose `critical` switch is off counts
+  against `caps.p4_daily`, the same as a priority 4. Both go out as a
+  heads-up with no incident. Until now only priority 4 counted.
+- On a `relay` or `hosted` server, such a publish over the cap answers
+  `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent, on
+  every publish route (§1.7).
+- `POST /relay/v1/push` treats a `p5` with no `incident_id` like a `p4`. It
+  goes only to the subscribed accounts still under their cap and charges
+  each of them one. The relay answers `429` only when every subscribed
+  account is at its cap (§4.1).
+- §4.2 says which messages count: a heads-up published on the account's own
+  server, and a `p4` or a `p5` with no `incident_id` relayed to it. An alarm
+  never counts. The cap keeps its name.
+- Compatibility. No route or field was added or removed. The app is
+  unaffected. A self-hosted server that sent more priority-5 heads-ups a day
+  than the cap allows now gets `429` past the cap where it used to get
+  `202`, and an integration that did the same on a hosted server gets `429`
+  where it used to get `200`.
+
 ## 1.23.0 - 2026-10-28
 
 ### Added

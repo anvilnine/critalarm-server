@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.23.0
+**Version:** 1.24.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.24.0** closes a gap in `caps.p4_daily`. A priority-5 message on a topic whose `critical` switch is off opens no incident and goes out as the same heads-up push as a priority 4, but until now only priority 4 counted against the cap, so a server could send heads-ups without limit at priority 5. From this version both count. On a `relay` or `hosted` server, a priority-5 publish to a topic with the switch off counts like a priority-4 publish, and over the cap it answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7). On the relay, a `p5` push with no `incident_id` counts like a `p4`: it goes only to the subscribed accounts still under their cap, charges each of them one, and answers `429` only when every subscribed account is at its cap (§4.1). §4.2 says which pushes count. An alarm never counts: priority 5 on a topic with the switch on, and every push that carries an `incident_id`, stay uncapped. No route or field is added. A self-hosted server that sent more heads-ups at priority 5 than the cap allows now gets `429` past it, and its phones stop getting them for the rest of the UTC day.
 
 **1.23.0** adds one route, `POST /v1/account/cancel-reason` (§3.9), for the answer to "What made you cancel?". The app calls it when a person whose `hosted` tier will not renew taps a reason, and once more if they write a few words. It is an authenticated write that creates no alert. It takes `reason`, an optional `text` of 500 characters at most, `app_version` and `platform`, and no key: the server keeps at most one answer per account in any rolling 30 days, and every later call in that window is a repeat of it. A repeat never changes the reason, the version or the platform, may fill an empty text once, and never replaces text. Every accepted call answers `204`. Only an account that is on `hosted` now, or was ever moved to it, may send. Only `hosted` takes the route: `selfhosted` and `relay` answer `501` before any credential is checked, an exception to the rule at the top of §3. An answer is kept for 365 days, deleted with the account and its tombstones, and read by the operator with `critalarm cancel-answers` (§4.4). Nothing that exists changed. The route's body limit, 8192 bytes, joins the table in §1.8. An app built for 1.22.0 never calls the route.
 
@@ -158,7 +160,7 @@ Field set and order match ntfy's message object so ntfy client libraries parse i
 | 4 | - | Stored. Forwarded as Time-Sensitive / high. |
 | 1-3 | - | Stored. App polls. Not forwarded to relay. |
 
-**Priority 4 is capped on a `relay` or `hosted` server.** Every priority-4 publish, through any publish route (§1.1, §1.5, §3.5), counts against `caps.p4_daily` (§4.2) of the account that owns the topic, for the current UTC day. A publish over the cap answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent. A `selfhosted` server counts nothing. Priorities 1 to 3 and 5 are never capped.
+**A heads-up is capped on a `relay` or `hosted` server.** A heads-up is a priority-4 publish, or a priority-5 publish to a topic whose `critical` switch is off: the two rows above that are forwarded without an incident. Every heads-up, through any publish route (§1.1, §1.5, §3.5), counts against `caps.p4_daily` (§4.2) of the account that owns the topic, for the current UTC day. A heads-up over the cap answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent. A `selfhosted` server counts nothing. Priorities 1 to 3, and priority 5 on a topic with the switch on, are never capped.
 
 ### 1.8 Errors
 
@@ -634,7 +636,7 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 {
   "topic_hash": "sha256hex",                 // sha256(base_url + "/" + topic)
   "topic": "prod",                           // what the hash was made from: the topic's relay_name (§3.1), or its name. checked, then dropped
-  "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
+  "incident_id": "inc_9a8b7c",               // null on p4, and on a p5 whose topic has the switch off
   "message_id": "m_7f3k2p9q",
   "priority": 5,
   "kind": "open" | "repeat" | "reopen" | "p4" | "p5"    // p5: priority 5 on a topic whose switch is off
@@ -647,7 +649,7 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 → 400 {"error":"invalid request"}            // includes a missing or malformed topic
 → 401 {"error":"unauthorized"}               // no key, an unknown key, or a key that was replaced
 → 403 {"error":"topic mismatch"}
-→ 429 {"error":"cap", "cap":"p4_daily"}      // a p4, and every subscribed account is at its cap
+→ 429 {"error":"cap", "cap":"p4_daily"}      // a p4, or a p5 with no incident_id, and every subscribed account is at its cap
 ```
 
 **A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must have the shape of a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), which a `relay_name` also has, so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
@@ -656,7 +658,7 @@ Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/s
 
 **Every key needs `topic` on every push**, including a key issued before 1.20.0. A push without it answers `400 {"error":"invalid request"}`. Until 1.22.0 a key from before 1.20.0 could push without `topic`, and then nothing tied its pushes to one server.
 
-**A `p4` rings only accounts under their cap.** The relay finds every account subscribed to `topic_hash` and sends a `p4` only to those still under `caps.p4_daily` for the current UTC day (§4.2), charging each of them one. An account at its cap gets nothing, even when another account on the same hash is under its own. When every subscribed account is at its cap the relay answers `429 {"error":"cap","cap":"p4_daily"}`. No other kind is capped.
+**A heads-up reaches only accounts under their cap.** A heads-up is a `p4`, or a `p5` with no `incident_id`, which is priority 5 on a topic whose switch is off (§1.7). The relay finds every account subscribed to `topic_hash` and sends a heads-up only to those still under `caps.p4_daily` for the current UTC day (§4.2), charging each of them one. An account at its cap gets nothing, even when another account on the same hash is under its own. When every subscribed account is at its cap the relay answers `429 {"error":"cap","cap":"p4_daily"}`. No other push is capped: a `p5` that carries an `incident_id` belongs to an alarm, like `open`, `repeat` and `reopen`.
 
 ```
 POST /relay/v1/servers                       // no auth
@@ -752,7 +754,7 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 
 An account can also carry a human identity, which is what §3.7 is for. Signing up on a device writes an identity against the account that device already has, so no topic, token or subscription moves. Signing in on a device whose own account already holds content asks the person to merge or start fresh. Identities are Sign in with Apple and Google. There is no email or password on any tier.
 
-**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. `caps.p4_daily` counts per UTC day, and a publish on the account's own server (§1.7) and a `p4` relayed to it (§4.1) both count. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
+**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. `caps.p4_daily` counts heads-ups per UTC day. A heads-up is a priority-4 message, or a priority-5 message on a topic whose `critical` switch is off. Two things count: a heads-up published on the account's own server (§1.7), and a `p4`, or a `p5` with no `incident_id`, relayed to it (§4.1). Nothing else counts, so an alarm never does. The cap keeps the name `p4_daily`. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
 **`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in two places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
 
