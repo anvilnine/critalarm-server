@@ -26,8 +26,9 @@ function server(mode: NonNullable<Config["mode"]>, tier: "free" | "hosted" = "fr
   const app = createApp({ config, db, clock, ids: { message: () => `m_${++id}`, incident: () => `inc_${++id}`, timer: () => `tm_${++id}` }, dispatch });
   db.prepare("INSERT INTO accounts (id, tier, created_at) VALUES ('acc_1', ?, 1)").run(tier);
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, last_seen) VALUES ('dev_1', 'acc_1', ?, 'ios', 'ab', 1)").run(sha("dv_1"));
-  for (const [topic, token] of [["prod", "tk_prod"], ["staging", "tk_staging"]] as const) {
-    db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES (?, 'acc_1', ?, 'https://alerts.example.com', ?, 1, 10, 60, 30, 'none', 1)").run(`top_${topic}`, topic, `hash_${topic}`);
+  // "quiet" has the critical switch off, so a priority 5 to it is a heads-up.
+  for (const [topic, token, critical] of [["prod", "tk_prod", 1], ["staging", "tk_staging", 1], ["quiet", "tk_quiet", 0]] as const) {
+    db.prepare("INSERT INTO topics (id, account_id, name, base_url, topic_hash, critical, repeat_interval_s, max_ring_s, desk_timer_s, relay_content, created_at) VALUES (?, 'acc_1', ?, 'https://alerts.example.com', ?, ?, 10, 60, 30, 'none', 1)").run(`top_${topic}`, topic, `hash_${topic}`, critical);
     db.prepare("INSERT INTO topic_tokens (id, topic_id, hash, created_at) VALUES (?, ?, ?, 1)").run(`tok_${topic}`, `top_${topic}`, sha(token));
   }
   // A new client address per call, so the publish rate limit (30 a minute per
@@ -35,9 +36,10 @@ function server(mode: NonNullable<Config["mode"]>, tier: "free" | "hosted" = "fr
   let client = 0;
   const from = () => ({ incoming: { socket: { remoteAddress: `10.0.${Math.floor(++client / 200)}.${client % 200}` } } }) as never;
   const p4 = (topic: "prod" | "staging" = "prod") => app.request(`/${topic}`, { method: "POST", headers: { Authorization: `Bearer tk_${topic}`, Priority: "4" }, body: "disk at 90%" }, from());
+  const p5 = (topic: "prod" | "quiet") => app.request(`/${topic}`, { method: "POST", headers: { Authorization: `Bearer tk_${topic}`, Priority: "5" }, body: "down" }, from());
   const usage = () => db.prepare("SELECT count FROM relay_p4_usage WHERE account_id = 'acc_1' AND day_start = ?").get(DAY_START);
   const messages = () => (db.prepare("SELECT COUNT(*) AS count FROM messages").get() as { count: number }).count;
-  return { app, db, dispatch, p4, usage, messages, from };
+  return { app, db, dispatch, p4, p5, usage, messages, from };
 }
 
 describe("p4_daily on a direct publish", () => {
@@ -68,6 +70,38 @@ describe("p4_daily on a direct publish", () => {
     expect(usage()).toEqual({ count: 50 });
   });
 
+  it.each(["hosted", "relay"] as const)("%s mode: a priority 5 to a topic with Critical off counts like a priority 4", async (mode) => {
+    const { app, db, dispatch, p4, p5, usage, messages, from } = server(mode);
+    for (let n = 0; n < 25; n += 1) expect((await p4()).status).toBe(200);
+    for (let n = 0; n < 25; n += 1) expect((await p5("quiet")).status).toBe(200);
+    expect(usage()).toEqual({ count: 50 });
+    const over = await p5("quiet");
+    expect(over.status).toBe(429);
+    expect(await over.json()).toEqual({ error: "cap", cap: "p4_daily" });
+    expect(messages()).toBe(50);
+    expect(dispatch).toHaveBeenCalledTimes(50);
+    expect(usage()).toEqual({ count: 50 });
+
+    // The other publish routes answer the same, and a priority 4 is capped by the same count.
+    const json = await app.request("/", { method: "POST", headers: { Authorization: "Bearer tk_quiet", "content-type": "application/json" }, body: JSON.stringify({ topic: "quiet", message: "x", priority: 5 }) }, from());
+    expect(json.status).toBe(429);
+    const send = await app.request("/v1/topics/quiet/send", { method: "POST", headers: { Authorization: "Bearer dv_1", "content-type": "application/json" }, body: JSON.stringify({ message: "x", priority: 5 }) });
+    expect(send.status).toBe(429);
+    expect(await send.json()).toEqual({ error: "cap", cap: "p4_daily" });
+    expect((await p4()).status).toBe(429);
+    expect(messages()).toBe(50);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM incidents").get()).toEqual({ count: 0 });
+  });
+
+  it("never charges a priority 5 to a topic with Critical on, even at the cap", async () => {
+    const { db, p5, usage, messages } = server("hosted");
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_1', ?, 50)").run(DAY_START);
+    expect((await p5("prod")).status).toBe(200);
+    expect(messages()).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM incidents").get()).toEqual({ count: 1 });
+    expect(usage()).toEqual({ count: 50 });
+  });
+
   it("uses the tier's own cap", async () => {
     const { db, p4 } = server("hosted", "hosted");
     db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_1', ?, 999)").run(DAY_START);
@@ -78,6 +112,14 @@ describe("p4_daily on a direct publish", () => {
   it("counts nothing and caps nothing on a self-hosted server", async () => {
     const { p4, usage } = server("selfhosted");
     for (let n = 0; n < 51; n += 1) expect((await p4()).status).toBe(200);
+    expect(usage()).toBeUndefined();
+  });
+
+  it("counts nothing for a priority 5 on a self-hosted server, with Critical on or off", async () => {
+    const { p5, usage, messages } = server("selfhosted");
+    for (let n = 0; n < 51; n += 1) expect((await p5("quiet")).status).toBe(200);
+    expect((await p5("prod")).status).toBe(200);
+    expect(messages()).toBe(52);
     expect(usage()).toBeUndefined();
   });
 });
@@ -97,7 +139,7 @@ describe("p4_daily on a relayed push", () => {
     db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_capped', ?, 50)").run(DAY_START);
     const rung: string[] = [];
     const app = createRelayRouter(db, async (event) => { rung.push(event.accountId ?? ""); return { delivered: 1 }; }, new Counters(db, { now: () => NOW }), { clock: { now: () => NOW } });
-    const push = () => app.request("/relay/v1/push", { method: "POST", headers: { Authorization: "Bearer rk_test" }, body: JSON.stringify({ topic_hash: hash, topic: "prod", incident_id: null, message_id: "m_1", priority: 4, kind: "p4" }) });
+    const push = (payload: { kind: "p4" | "p5"; priority: 4 | 5; incident_id: string | null } = { kind: "p4", priority: 4, incident_id: null }) => app.request("/relay/v1/push", { method: "POST", headers: { Authorization: "Bearer rk_test" }, body: JSON.stringify({ topic_hash: hash, topic: "prod", message_id: "m_1", ...payload }) });
     const usage = (account: string) => db.prepare("SELECT count FROM relay_p4_usage WHERE account_id = ?").get(account);
     return { db, push, rung, usage };
   }
@@ -117,5 +159,43 @@ describe("p4_daily on a relayed push", () => {
     expect(response.status).toBe(429);
     expect(await response.json()).toEqual({ error: "cap", cap: "p4_daily" });
     expect(rung).toEqual([]);
+  });
+
+  const heads = { kind: "p5", priority: 5, incident_id: null } as const;
+
+  it("treats a p5 with no incident_id like a p4: rings only accounts under their cap and charges only those", async () => {
+    const { push, rung, usage } = relay();
+    for (let n = 0; n < 3; n += 1) expect((await push(heads)).status).toBe(202);
+    expect(rung).toEqual(["acc_open", "acc_open", "acc_open"]);
+    expect(usage("acc_capped")).toEqual({ count: 50 });
+    expect(usage("acc_open")).toEqual({ count: 3 });
+  });
+
+  it("counts p4 and a heads-up p5 together toward the same cap", async () => {
+    const { db, push, rung, usage } = relay();
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_open', ?, 49)").run(DAY_START);
+    expect((await push()).status).toBe(202);
+    expect((await push(heads)).status).toBe(429);
+    expect(rung).toEqual(["acc_open"]);
+    expect(usage("acc_open")).toEqual({ count: 50 });
+  });
+
+  it("answers 429 and rings nobody when every subscribed account is at its cap for a p5 with no incident_id", async () => {
+    const { db, push, rung } = relay();
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_open', ?, 50)").run(DAY_START);
+    const response = await push(heads);
+    expect(response.status).toBe(429);
+    expect(await response.json()).toEqual({ error: "cap", cap: "p4_daily" });
+    expect(rung).toEqual([]);
+  });
+
+  it("never charges or refuses a p5 that carries an incident_id, even when every account is at its cap", async () => {
+    const { db, push, rung, usage } = relay();
+    db.prepare("INSERT INTO relay_p4_usage (account_id, day_start, count) VALUES ('acc_open', ?, 50)").run(DAY_START);
+    const response = await push({ kind: "p5", priority: 5, incident_id: "inc_1" });
+    expect(response.status).toBe(202);
+    expect(rung).toEqual(["acc_capped", "acc_open"]);
+    expect(usage("acc_capped")).toEqual({ count: 50 });
+    expect(usage("acc_open")).toEqual({ count: 50 });
   });
 });
