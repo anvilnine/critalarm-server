@@ -6,8 +6,9 @@ import { rotateAdminToken, showAdminToken } from "./admin/credentials.js";
 import { relayKeyHash } from "./relay/client.js";
 import { Counters } from "./stats/counters.js";
 import { deleteAccount, findAccount } from "./v1/accounts.js";
+import { parseSinceDate, reportCancelAnswers } from "./admin/cancel-answers-report.js";
 
-const usage = "usage: critalarm token show|rotate\n       critalarm stats zero-key <relay_key>\n       critalarm account delete <acc_id>|--email <address>";
+const usage = "usage: critalarm token show|rotate\n       critalarm stats zero-key <relay_key>\n       critalarm account delete <acc_id>|--email <address>\n       critalarm cancel-answers [--since YYYY-MM-DD]";
 const config = loadConfig(process.env);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
 migrate(db);
@@ -43,6 +44,16 @@ if (process.argv[2] === "account" && process.argv[3] === "delete") {
     const key = given.startsWith("rk_") ? relayKeyHash(given) : given;
     const rows = new Counters(db, { now: () => Math.floor(Date.now() / 1000) }).zeroKey(key);
     console.log(`zeroed ${key} (${rows} counter rows kept, excluded from totals)`);
+  }
+} else if (process.argv[2] === "cancel-answers") {
+  // api.md §4.4. Nothing, or `--since` and one real date, and nothing after it.
+  const rest = process.argv.slice(3);
+  const since = rest.length === 2 && rest[0] === "--since" ? parseSinceDate(rest[1] ?? "") : undefined;
+  if (rest.length !== 0 && since === undefined) {
+    console.error(usage);
+    process.exitCode = 2;
+  } else {
+    console.log(reportCancelAnswers(db, since));
   }
 } else {
   const command = process.argv[2] === "token" ? process.argv[3] : process.argv[2];
