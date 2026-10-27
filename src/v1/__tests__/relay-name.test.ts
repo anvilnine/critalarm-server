@@ -6,7 +6,7 @@ import { ensureSelfHostedIdentity } from "../../admin/credentials.js";
 import type { Config } from "../../config.js";
 import type { DeliveryEvent } from "../../incident/types.js";
 import { openDatabase } from "../../store/database.js";
-import { migrate, migrationCount } from "../../store/migrations.js";
+import { migrate } from "../../store/migrations.js";
 
 // api.md §3.1, 1.21.0. A selfhosted server gives every topic a relay_name and
 // returns it on the topic object. A relay or hosted server does neither.
@@ -76,7 +76,8 @@ describe("a topic that exists before the migration", () => {
   function upgraded() {
     const db = openDatabase(":memory:");
     databases.push(db);
-    migrate(db, migrationCount - 1);
+    // The relay name column is version 23, so this stops just before it.
+    migrate(db, 22);
     db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES ('acc_old','free',1)").run();
     const insert = db.prepare("INSERT INTO topics (id,account_id,name,base_url,topic_hash,critical,repeat_interval_s,max_ring_s,desk_timer_s,relay_content,created_at) VALUES (?,?,?,?,?,0,30,60,30,'none',1)");
     insert.run("t1", "acc_old", "old-one", "https://alerts.example.com", "h1");
