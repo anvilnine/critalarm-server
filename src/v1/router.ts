@@ -10,6 +10,7 @@ import { PublishService } from "../ingress/service.js";
 import type { TopicRecord } from "../ingress/types.js";
 import { requireDevice, type V1Env } from "./auth.js";
 import { mountAccountRoutes } from "./accounts.js";
+import { mountCancelAnswerRoute } from "./cancel-answers.js";
 import { sessionIdentityResolver, type IdentityResolver } from "../auth/identity.js";
 import { providerTokenRevoker, type TokenRevoker } from "../auth/revoke.js";
 import { addToken, createTopic, deleteToken, deleteTopic, listTokens, listTopics, ownedTopic, patchTopic, renameToken, view } from "./topics.js";
@@ -33,6 +34,8 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
   // because selfhosted has to answer 501 rather than the 404 an unmounted
   // router produces.
   mountAccountRoutes(r, auth, { db: deps.db, clock: deps.clock, identities: deps.identities ?? sessionIdentityResolver(deps.db, deps.clock), revoke: deps.revoke ?? providerTokenRevoker(deps.db, deps.config.auth, deps.clock), mode: deps.config.mode ?? "hosted", ...(deps.reconcileAccount === undefined ? {} : { reconcileAccount: deps.reconcileAccount }) });
+  // api.md §3.9. Mounted in every mode: only `hosted` takes an answer.
+  mountCancelAnswerRoute(r, auth, { db: deps.db, clock: deps.clock, mode: deps.config.mode ?? "hosted" });
   r.get("/v1/topics",c=>c.json(listTopics(deps.db,deps.config,c.get("account").accountId)));
   r.post("/v1/topics",async c=>{let b:unknown;try{b=await jsonBody(c.req.raw)}catch{return c.json({error:"invalid request"},400)}const t=createTopic(deps.db,deps.config,deps.clock,c.get("account").accountId,typeof b==="object"&&b!==null&&typeof (b as {name?:unknown}).name==="string"?(b as {name:string}).name:"",typeof b==="object"&&b!==null&&(b as {critical?:unknown}).critical===true,typeof b==="object"&&b!==null?(b as {token_name?:unknown}).token_name:undefined);if(t==="duplicate")return c.json({code:40901,http:409,error:"topic already exists"},409);if(t==="cap")return c.json({error:"cap",cap:"critical_topics"},429);return t===null?c.json({error:"invalid request"},400):c.json(t,201)});
   r.get("/v1/topics/:name/tokens",c=>{const t=listTokens(deps.db,c.get("account").accountId,c.req.param("name"));return t===undefined?c.json({error:"not found"},404):c.json(t)});

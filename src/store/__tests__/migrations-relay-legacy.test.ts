@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
 import { openDatabase } from "../database.js";
-import { migrate, migrationCount } from "../migrations.js";
+import { migrate } from "../migrations.js";
 
 const databases: Database.Database[] = [];
 afterEach(() => { while (databases.length > 0) databases.pop()?.close(); });
@@ -13,8 +13,8 @@ describe("the relay key legacy migration", () => {
   function before() {
     const db = openDatabase(":memory:");
     databases.push(db);
-    // The legacy migration is the one before the relay name column.
-    migrate(db, migrationCount - 2);
+    // The legacy migration is version 22, so this stops just before it.
+    migrate(db, 21);
     return db;
   }
 

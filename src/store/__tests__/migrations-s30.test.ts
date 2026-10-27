@@ -44,14 +44,15 @@ function indexesOn(db: ReturnType<typeof openDatabase>, table: string) {
 }
 
 describe("migration 15", () => {
-  // Later versions landed after this one. The newest is 23, which adds relay_name.
+  // Later versions landed after this one. The newest is 24, which adds
+  // cancel_answers. Migration 23 adds relay_name.
   // Migration 22 marks existing relay keys legacy.
-  it("the list is twenty-three long", () => {
-    expect(migrationCount).toBe(23);
+  it("the list is twenty-four long", () => {
+    expect(migrationCount).toBe(24);
     const db = openDatabase(":memory:");
     databases.push(db);
     migrate(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 23 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
   });
 
   it("carries every row across the rebuild with the same user_id and account_id", () => {
@@ -139,6 +140,6 @@ describe("migration 15", () => {
     migrate(db, 14);
     migrate(db);
     expect(identityRows(db)).toEqual([]);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 23 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
   });
 });
