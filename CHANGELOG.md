@@ -3,6 +3,41 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.23.0 - 2026-10-28
+
+### Added
+
+- `POST /v1/account/cancel-reason` (§3.9). The answer to "What made you cancel?":
+  a reason from a list of six, an optional text of 500 characters at most, the
+  app version and the platform. `204` on success, then `400`, `401`, `403`,
+  `413`, `429` and `501`.
+- One answer per account per rolling 30 days, with no client key. The first call
+  in the window creates it and every later call in the window is a repeat. A
+  repeat never changes the reason, version or platform, may fill an empty text
+  once, and never replaces text. Every accepted call answers `204`.
+- Only an account that is on `hosted` now, or was ever moved to it (a trial
+  or a manual grant included), may send. Any other account answers
+  `403 {"error":"tier","tier":"hosted"}`.
+- A request limit of 30 calls per account per rolling hour, every call counted,
+  kept in memory by the server process and reset on restart.
+- `critalarm cancel-answers [--since YYYY-MM-DD]` (§4.4), for the operator to
+  read the answers.
+- A row for the route in the body limit table (§1.8): 8192 bytes, over it
+  `413 {"error":"request too large"}`. A row in the error table for
+  `invalid reason`, `text too long` and `request too large`.
+
+### Changed
+
+- The account erase (§3.7) and the operator erase (§4.4) also delete the
+  account's cancel answers, and those of every tombstone that points at it, in
+  the same transaction.
+- Only `hosted` takes the route. `selfhosted` and `relay` answer `501` before
+  any credential is checked, an exception to the credential rule at the top of
+  §3. `selfhosted` uses the body §3.7 uses. `relay` has no §3.7 precedent: §3.7
+  works in `relay` mode.
+- Compatibility. No route, field, header or push payload that exists changed.
+  An app built for 1.22.0 never calls the new route.
+
 ## 1.22.0 - 2026-10-21
 
 ### Added
