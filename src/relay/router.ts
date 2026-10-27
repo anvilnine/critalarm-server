@@ -14,10 +14,15 @@ import { topicHash } from "./hash.js";
 import { readJson } from "../body-limit.js";
 
 // A p5 with no incident is a priority-5 message on a topic whose switch is off.
-// It is a plain notification and never rings. Every other kind keeps the rule
-// the relay always had.
+// It is a plain notification and never rings, and it counts against
+// caps.p4_daily like a p4.
+function isHeadsUp(body: RelayPayload): boolean {
+  return body.kind === "p5" && !body.incident_id;
+}
+
+// Every other kind keeps the rule the relay always had.
 function isCritical(body: RelayPayload): boolean {
-  if (body.kind === "p5" && !body.incident_id) return false;
+  if (isHeadsUp(body)) return false;
   return body.priority === 5;
 }
 
@@ -172,12 +177,14 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
     // server-wide, so a stranger can compute a hosted account's topic_hash from
     // the topic name, and a push for it is dropped rather than rung.
     const subscribed = db.prepare("SELECT DISTINCT d.account_id FROM subscriptions s JOIN devices d ON d.id = s.device_id WHERE s.topic_hash = ? AND NOT EXISTS (SELECT 1 FROM topics t WHERE t.account_id = d.account_id AND t.topic_hash = s.topic_hash)").all(body.topic_hash) as { account_id: string }[];
-    // api.md §4.2. A p4 goes only to the accounts still under caps.p4_daily,
-    // and each of those is charged one. An account at its cap gets nothing,
-    // even when another account on the same hash is under it. Only when every
-    // subscribed account is at its cap is the push refused.
-    const accounts = body.kind === "p4" ? subscribed.filter((account) => chargeP4(db, clock, account.account_id)) : subscribed;
-    if (body.kind === "p4" && subscribed.length > 0 && accounts.length === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
+    // api.md §4.2. A heads-up is a p4, or a p5 with no incident_id. It goes
+    // only to the accounts still under caps.p4_daily, and each of those is
+    // charged one. An account at its cap gets nothing, even when another
+    // account on the same hash is under it. Only when every subscribed account
+    // is at its cap is the push refused. An alarm is never counted.
+    const headsUp = body.kind === "p4" || isHeadsUp(body);
+    const accounts = headsUp ? subscribed.filter((account) => chargeP4(db, clock, account.account_id)) : subscribed;
+    if (headsUp && subscribed.length > 0 && accounts.length === 0) return c.json({ error: "cap", cap: "p4_daily" }, 429);
     const event: DeliveryEvent = { kind: body.kind, topicHash: body.topic_hash, topic: "", incidentId: body.incident_id, messageId: body.message_id, priority: body.priority, maxRingS: 1800, ringUntil: body.ring_until ?? null, server: "", title: body.title ?? "Crit Alarm", body: body.body ?? "Critical alert", critical: isCritical(body) };
     let delivered = 0;
     for (const account of accounts) {
