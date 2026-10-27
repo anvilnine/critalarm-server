@@ -4,7 +4,7 @@ import { relayKeyHash } from "../client.js";
 import { topicHash } from "../hash.js";
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
-import { migrate, migrationCount } from "../../store/migrations.js";
+import { migrate } from "../../store/migrations.js";
 import { PushDispatcher } from "../../push/dispatcher.js";
 import type { PushSender } from "../../push/types.js";
 
@@ -277,8 +277,8 @@ describe("a key issued before 1.20.0", () => {
   it("is what the migration makes of every row that existed before it, even rows sharing a base_url", () => {
     const db = openDatabase(":memory:");
     try {
-      // The legacy migration is the one before the relay name column.
-      migrate(db, migrationCount - 2);
+      // The legacy migration is version 22, so this stops just before it.
+      migrate(db, 21);
       const insert = db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES (?,?,'1',?,1)");
       insert.run("r1", A, "k1");
       insert.run("r2", A, "k2");
