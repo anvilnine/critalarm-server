@@ -56,6 +56,16 @@ export function pruneCheckRounds(db: Database.Database, clock: Clock, mode: Serv
   return db.prepare("DELETE FROM check_rounds WHERE result IS NOT NULL AND opened_at < ?").run(clock.now() - ROUND_RETENTION_S).changes;
 }
 
+// api.md §3.9. A cancel answer is kept for 365 days after it was first stored,
+// whatever changed on it later. Only a hosted server takes answers, so only a
+// hosted server has any to delete.
+export const CANCEL_ANSWER_RETENTION_S = 365 * day;
+
+export function pruneCancelAnswers(db: Database.Database, clock: Clock, mode: ServerMode): number {
+  if (mode !== "hosted") return 0;
+  return db.prepare("DELETE FROM cancel_answers WHERE created_at < ?").run(clock.now() - CANCEL_ANSWER_RETENTION_S).changes;
+}
+
 // Its own timer, next to the incident timer scanner and slower than it: the
 // window moves by a day, so once an hour is plenty. The first run waits a
 // minute so a boot is not competing with it.
@@ -78,6 +88,11 @@ export function startHistoryPrune(
       pruneCheckRounds(db, clock, mode);
     } catch (error: unknown) {
       console.error("check round prune failed", error);
+    }
+    try {
+      pruneCancelAnswers(db, clock, mode);
+    } catch (error: unknown) {
+      console.error("cancel answer prune failed", error);
     }
   };
   const first = setTimeout(() => {
