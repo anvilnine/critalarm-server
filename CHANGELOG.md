@@ -3,6 +3,27 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.25.0 - 2026-10-29
+
+### Added
+
+- Device platform `macos` for the Crit Alarm app on the Mac (§4.2). Its
+  alarm token is kind `apns`, and `push_token` on registration and `PATCH`
+  is stored as `apns`.
+- Alarm pushes to a Mac are the iOS alert of §5.1, unchanged, to the same
+  bundle id.
+- State kinds (`ack`, `close`, `expire`) reach a Mac as an APNs background
+  push with `content-available` only (§5.1). An iPhone never gets it.
+- `platform: "macos"` is accepted on a cancel answer (§3.9).
+
+### Changed
+
+- A `macos` device holds no Live Activity tokens. `POST /tokens` with
+  `la_start` or `la_update` for one answers `400 {"error":"invalid request"}`.
+- Compatibility. No route was added or removed, and iOS and Android see no
+  change. A server built before 1.25.0 refuses `platform: "macos"` with
+  `400`, and the Mac app reads that answer as "server too old for the Mac".
+
 ## 1.24.0 - 2026-10-28
 
 ### Changed
