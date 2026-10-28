@@ -1,3 +1,4 @@
+import { usesApns } from "../platform.js";
 import type { CheckAnswer, CheckSender } from "../push/check.js";
 import type { AlarmNotes } from "./device-hooks.js";
 import type { CheckStore, PlannedCheck } from "./store.js";
@@ -8,6 +9,8 @@ import type { CheckStore, PlannedCheck } from "./store.js";
 // It has its own senders and its own loop. The alarm dispatcher does not call
 // it, wait for it or read anything it writes.
 
+// `ios` is the APNs check sender and `android` the FCM one. A Mac holds an
+// apns token, so its check goes to the `ios` sender (api.md §4.5, §5.4).
 export interface CheckSenders {
   ios?: CheckSender;
   android?: CheckSender;
@@ -85,7 +88,7 @@ export class CheckScheduler {
   }
 
   private async send(planned: PlannedCheck): Promise<CheckAnswer> {
-    const sender = this.senders[planned.platform];
+    const sender = usesApns(planned.platform) ? this.senders.ios : this.senders.android;
     // No provider configured for this platform. 501, as the alarm path says
     // for the same case.
     if (sender === undefined) return { outcome: "failed", status: 501 };
