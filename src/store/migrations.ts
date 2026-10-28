@@ -514,6 +514,9 @@ const migrations: Migration[] = [
     );
     CREATE INDEX cancel_answers_created ON cancel_answers(created_at);
   `,
+  // api.md §4.2 and §3.9, contract 1.25.0. A third platform, macos, in both
+  // tables that name one.
+  { foreignKeysOff: true, up: rebuildPlatformChecksWithMacos },
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the
@@ -719,6 +722,91 @@ function rebuildCheckRoundsWithTierReason(db: Database.Database): void {
   if (lost.length > 0) throw new Error(`check_rounds rebuild left ${lost.join(", ")} pointing at something else`);
   const violations = db.pragma("foreign_key_check") as unknown[];
   if (violations.length > 0) throw new Error(`check_rounds rebuild broke foreign keys: ${JSON.stringify(violations)}`);
+}
+
+// api.md §4.2 and §3.9, contract 1.25.0. devices.platform and
+// cancel_answers.platform each carry a CHECK listing ios and android, and
+// SQLite cannot change a constraint in place, so both tables are rebuilt with
+// macos added to the list. No row changes.
+//
+// devices is a parent: subscriptions, device_tokens, device_checks and
+// check_rounds all name it with ON DELETE CASCADE. So this entry carries
+// foreignKeysOff, for the reason migration 21 gives: with enforcement on, DROP
+// TABLE devices would delete every one of those rows first. cancel_answers is
+// a child of accounts and nothing names it.
+//
+// The same steps for each table, the way migration 21 rebuilds check_rounds:
+//
+//   1. Create <table>_s50_new with the same columns in the same order. The
+//      three columns later migrations added to devices are written into the
+//      CREATE, where ALTER TABLE ADD COLUMN had put them.
+//   2. Copy every row across, column by column.
+//   3. Drop the old table. Enforcement is off, so nothing cascades. Its
+//      indexes go with it.
+//   4. Rename the new table into place. Nothing names a _s50_new table in a
+//      REFERENCES clause, so no clause moves, and the children's clauses
+//      still read devices and resolve to the new table.
+//   5. Recreate the indexes: devices_by_account and cancel_answers_created.
+//      The primary keys and the UNIQUE on device_token_hash come with the
+//      table definition. Neither table has a trigger.
+//   6. Check it. Every row of both tables and of the four children has to
+//      still be there, the tables that referenced devices before have to
+//      reference it again, and PRAGMA foreign_key_check has to come back
+//      empty. Any of them failing throws, and the transaction rolls all of it
+//      back.
+function rebuildPlatformChecksWithMacos(db: Database.Database): void {
+  const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+  const carried = ["devices", "cancel_answers", "subscriptions", "device_tokens", "device_checks", "check_rounds", "check_attempts"];
+  const before = new Map(carried.map((table) => [table, count(table)]));
+  const referencing = referencingTables(db, "devices");
+  db.exec(`
+    CREATE TABLE devices_s50_new (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      device_token_hash TEXT NOT NULL UNIQUE,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android', 'macos')),
+      push_token TEXT NOT NULL,
+      last_seen INTEGER NOT NULL,
+      app_version TEXT,
+      apns_environment TEXT,
+      last_alarm_push_at INTEGER
+    );
+
+    INSERT INTO devices_s50_new (id, account_id, device_token_hash, platform, push_token, last_seen, app_version, apns_environment, last_alarm_push_at)
+      SELECT id, account_id, device_token_hash, platform, push_token, last_seen, app_version, apns_environment, last_alarm_push_at FROM devices;
+
+    DROP TABLE devices;
+    ALTER TABLE devices_s50_new RENAME TO devices;
+
+    CREATE INDEX devices_by_account ON devices(account_id);
+
+    CREATE TABLE cancel_answers_s50_new (
+      account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      created_at INTEGER NOT NULL,
+      reason TEXT NOT NULL CHECK (reason IN ('price', 'unused', 'selfhost', 'missing', 'broken', 'other')),
+      text TEXT,
+      app_version TEXT NOT NULL,
+      platform TEXT NOT NULL CHECK (platform IN ('ios', 'android', 'macos')),
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (account_id, created_at)
+    );
+
+    INSERT INTO cancel_answers_s50_new (account_id, created_at, reason, text, app_version, platform, updated_at)
+      SELECT account_id, created_at, reason, text, app_version, platform, updated_at FROM cancel_answers;
+
+    DROP TABLE cancel_answers;
+    ALTER TABLE cancel_answers_s50_new RENAME TO cancel_answers;
+
+    CREATE INDEX cancel_answers_created ON cancel_answers(created_at);
+  `);
+
+  for (const table of carried) {
+    if (count(table) !== before.get(table)) throw new Error(`platform rebuild left ${count(table)} of ${before.get(table)} rows in ${table}`);
+  }
+  const lost = referencing.filter((name) => !referencingTables(db, "devices").includes(name));
+  if (lost.length > 0) throw new Error(`devices rebuild left ${lost.join(", ")} pointing at something else`);
+  const violations = db.pragma("foreign_key_check") as unknown[];
+  if (violations.length > 0) throw new Error(`platform rebuild broke foreign keys: ${JSON.stringify(violations)}`);
 }
 
 export const migrationCount = migrations.length;
