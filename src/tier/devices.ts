@@ -5,15 +5,16 @@ import { capsFor } from "./caps.js";
 import { sweepDeviceIntoTopics } from "./subscriptions.js";
 import type { AccountContext, TierDependencies } from "./types.js";
 import { checkDueAfterNewToken } from "../check/device-hooks.js";
+import { platforms, type Platform } from "../platform.js";
 
 const deviceId = z.string().regex(/^dev_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 // The shape a token must have depends on the platform (device-tokens.ts). A
 // registration names its platform, so it is checked here. An update does not,
 // so it gets the wider of the two shapes here and the device's own platform
-// in updateDevice.
+// in updateDevice. A Mac takes the APNs shape, as an iPhone does.
 export const registrationSchema = z.object({
   device_id: deviceId,
-  platform: z.enum(["ios", "android"]),
+  platform: z.enum(platforms),
   push_token: z.string().min(1),
   app_version: z.string().min(1),
 }).superRefine((value, context) => {
@@ -100,15 +101,15 @@ export function deleteDevice(deps: TierDependencies, deviceIdValue: string): voi
   })();
 }
 
-export function updateDevice(deps: TierDependencies, deviceIdValue: string, input: z.infer<typeof deviceUpdateSchema>, bearer: string | undefined, platform?: "ios" | "android"): DeviceAccountRow | null {
+export function updateDevice(deps: TierDependencies, deviceIdValue: string, input: z.infer<typeof deviceUpdateSchema>, bearer: string | undefined, platform?: Platform): DeviceAccountRow | null {
   const context = authenticateDevice(deps.db, bearer);
   if (context === null) return null;
   if (context.deviceId !== deviceIdValue) return null;
-  const before = deps.db.prepare("SELECT push_token, platform FROM devices WHERE id = ?").get(deviceIdValue) as { push_token: string; platform: "ios" | "android" } | undefined;
+  const before = deps.db.prepare("SELECT push_token, platform FROM devices WHERE id = ?").get(deviceIdValue) as { push_token: string; platform: Platform } | undefined;
   // Throws a ZodError, which the routes answer with 400 before anything is written.
   if (before !== undefined) pushTokenSchemaFor(platform ?? before.platform).parse(input.push_token);
   deps.db.prepare("UPDATE devices SET push_token = ?, app_version = ?, last_seen = ?, platform = COALESCE(?, platform) WHERE id = ?").run(input.push_token, input.app_version, deps.clock.now(), platform ?? null, deviceIdValue);
-  const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceIdValue) as { platform: "ios" | "android" } | undefined;
+  const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceIdValue) as { platform: Platform } | undefined;
   if (device !== undefined) setAlarmToken(deps.db, deps.clock, deviceIdValue, device.platform, input.push_token);
   // api.md §4.5. A new push token on a device with missed checks makes it due
   // at once.
