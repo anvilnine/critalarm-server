@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.24.0
+**Version:** 1.25.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.25.0** adds a third device platform, `macos`, for the Crit Alarm app on the Mac (§4.2). A Mac registers like an iPhone: its alarm token is kind `apns` and its alarm pushes are the iOS alert of §5.1, sent to the same bundle id. A Mac holds no Live Activity tokens, and `POST /tokens` with `la_start` or `la_update` from a Mac answers `400 {"error":"invalid request"}`. A Mac also gets the state kinds (`ack`, `close`, `expire`) as a background push (§5.1), because nothing else tells a running Mac app to stop ringing when the incident is handled on another device. A Mac counts against `caps.devices` like any device, can enrol in the weekly check (§4.5, sent as the APNs check of §5.4), and may send `platform: "macos"` with a cancel answer (§3.9). No route is added. A server built before 1.25.0 refuses `platform: "macos"` with `400 {"error":"invalid request"}`. `version` in `GET /v1/info` (§3.4) is the server binary's version, not this contract's, so a Mac app cannot tell an old server in advance: it treats that `400` on registration as "this server is too old for the Mac app" and says so.
 
 **1.24.0** closes a gap in `caps.p4_daily`. A priority-5 message on a topic whose `critical` switch is off opens no incident and goes out as the same heads-up push as a priority 4, but until now only priority 4 counted against the cap, so a server could send heads-ups without limit at priority 5. From this version both count. On a `relay` or `hosted` server, a priority-5 publish to a topic with the switch off counts like a priority-4 publish, and over the cap it answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7). On the relay, a `p5` push with no `incident_id` counts like a `p4`: it goes only to the subscribed accounts still under their cap, charges each of them one, and answers `429` only when every subscribed account is at its cap (§4.1). §4.2 says which pushes count. An alarm never counts: priority 5 on a topic with the switch on, and every push that carries an `incident_id`, stay uncapped. No route or field is added. A self-hosted server that sent more heads-ups at priority 5 than the cap allows now gets `429` past it, and its phones stop getting them for the rest of the UTC day.
 
@@ -581,7 +583,7 @@ POST /v1/account/cancel-reason
   { "reason":"price"|"unused"|"selfhost"|"missing"|"broken"|"other",
     "text":"Optional. 500 characters at most.",
     "app_version":"1.0.0+12",
-    "platform":"ios"|"android" }
+    "platform":"ios"|"android"|"macos" }
 → 204
 → 400 {"error":"invalid request"}
 → 400 {"error":"invalid reason"}
@@ -603,7 +605,7 @@ POST /v1/account/cancel-reason
 
 **`text`.** Optional: absent and `null` are both valid. It is trimmed, and empty after trimming means no text. It is at most 500 Unicode characters after trimming, counted as code points, so an emoji counts as one. Stored as plain text and never rendered as markup.
 
-**`app_version` and `platform`.** `app_version` is 1 to 32 characters of letters, digits, `.`, `+`, `_` and `-`, for example `1.0.0+12`. `platform` is one of the two values §4.2 accepts.
+**`app_version` and `platform`.** `app_version` is 1 to 32 characters of letters, digits, `.`, `+`, `_` and `-`, for example `1.0.0+12`. `platform` is one of the values §4.2 accepts: `ios`, `android` or `macos`.
 
 **Size.** The body is measured on the raw request bytes, before any parsing, and may be at most 8192 bytes. A valid request always fits: a `text` of 500 characters is at most 6000 bytes when every character is an emoji written as two `\u` escapes (12 bytes each), and the other fields take under 200. Over 8192 bytes answers `413 {"error":"request too large"}`.
 
@@ -686,7 +688,7 @@ A server that cannot get a key retries with growing gaps between attempts, never
 
 ```
 POST /relay/v1/devices                                  // registration. no auth
-  { "device_id":"dev_<uuid>", "platform":"ios"|"android", "push_token":"...", "app_version":"1.0.0" }
+  { "device_id":"dev_<uuid>", "platform":"ios"|"android"|"macos", "push_token":"...", "app_version":"1.0.0" }
 → 201 { "device_token":"dv_...",                        // returned ONCE, on first registration only
         "account_join_token":"aj_...",                  // create path only. absent on a join
         "account_id":"acc_...",
@@ -738,11 +740,11 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 → 429 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
-**A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android has no Live Activity tokens.
+**A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform: `apns` on `ios` and `macos`, `fcm` on `android`. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android and macOS have no Live Activity tokens. A `POST` of `la_start` or `la_update` for a `macos` device answers `400 {"error":"invalid request"}`.
 
 `POST` is a replace, not an append. A second `POST` with the same `kind` and `activity_id` overwrites the stored token and its `incident_id`. Since `apns`, `fcm` and `la_start` have no `activity_id`, a device can only ever hold one of each.
 
-**Backward compatible.** `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still take `push_token` and still work unchanged. The server stores that token as kind `apns` on an iOS device and kind `fcm` on an Android one. An app that never calls `/tokens` behaves exactly as it did in 1.1.0 and gets alarm pushes with no Live Activity.
+**Backward compatible.** `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still take `push_token` and still work unchanged. The server stores that token as kind `apns` on an iOS or macOS device and kind `fcm` on an Android one. An app that never calls `/tokens` behaves exactly as it did in 1.1.0 and gets alarm pushes with no Live Activity.
 
 `incident_id` on an `la_update` token is how the server finds the right activity when an incident changes state. Without it the server can still start activities but cannot update or end them, so send it.
 
@@ -1125,6 +1127,28 @@ payload (relay_content: none):
 `relay_content: full` puts the real title/body in `alert` and drops `mutable-content`.
 
 Category `INCIDENT` registers one action: `ACK` ("I'm up"), which calls `POST /v1/incidents/{id}/ack`.
+
+**macOS gets the same alert.** A `macos` device's alarm pushes are this payload, byte for byte, to the same `apns-topic` (the bundle id the iPhone app uses). On a Mac the notification sound plays once and nothing in the payload changes that: the running Mac app plays the alarm itself when the push reaches it. No Live Activity push (§5.3) is ever sent to a `macos` device.
+
+**State kinds reach macOS as a background push.** When an incident is acknowledged, closed or expires, a `macos` device gets:
+
+```
+headers:
+  apns-push-type:   background
+  apns-priority:    5
+  apns-collapse-id: <incident_id>
+  apns-expiration:  <now + 60>
+
+payload:
+{
+  "aps": { "content-available": 1 },
+  "incident_id": "inc_9a8b7c",
+  "server": "https://alerts.example.com",
+  "kind": "ack"|"close"|"expire"
+}
+```
+
+It shows nothing and never rings. The Mac app stops any ringing for that incident and updates its menu-bar item. Apple may delay or drop a background push, so a Mac app that is ringing also reads the incident (§3.2) while it rings, and stops when the read says the incident is no longer open. An iPhone never gets this push: it hears state through the Live Activity update (§5.3).
 
 ### 5.2 FCM (Android)
 
