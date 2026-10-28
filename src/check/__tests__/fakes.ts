@@ -7,6 +7,7 @@ import type { CheckAnswer, CheckPush, CheckSender, CheckTarget } from "../../pus
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
+import type { Platform } from "../../platform.js";
 import { AlarmNotes, alarmNoteWriter } from "../device-hooks.js";
 import { CheckScheduler } from "../scheduler.js";
 import type { StoreReads, Tier } from "../../tier/types.js";
@@ -73,7 +74,7 @@ export function grantPack(db: TestDatabase, accountId: string): void {
 }
 
 // The device's dv_ token is `dv_` plus the part of its id after `dev_`.
-export function addDevice(db: TestDatabase, id: string, accountId: string, platform: "ios" | "android" = "ios", pushToken = `push-${id}`): string {
+export function addDevice(db: TestDatabase, id: string, accountId: string, platform: Platform = "ios", pushToken = `push-${id}`): string {
   const token = `dv_${id.slice(4)}`;
   db.prepare("INSERT INTO devices (id, account_id, device_token_hash, platform, push_token, app_version, last_seen) VALUES (?, ?, ?, ?, ?, '1.0.0', 1)")
     .run(id, accountId, createHash("sha256").update(token).digest("hex"), platform, pushToken);
