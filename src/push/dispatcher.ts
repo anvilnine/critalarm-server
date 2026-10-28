@@ -1,12 +1,13 @@
 import type Database from "better-sqlite3";
 import { isStateKind, type DeliveryEvent, type DispatchResult } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
+import { alarmTokenKindSql, usesApns, type Platform } from "../platform.js";
 import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PushDevice, PushResult, PushSender } from "./types.js";
 
 type DeviceRow = {
   id: string;
   account_id: string;
-  platform: "ios" | "android";
+  platform: Platform;
   push_token: string;
   apns_environment: ApnsEnvironment | null;
 };
@@ -65,11 +66,12 @@ export class PushDispatcher {
 
   // Returns how many pushes the provider accepted. A refused push is not
   // counted, so a run of 500s or 410s never shows up as delivery. A state kind
-  // goes to Android only (api.md §5.2): it stops a phone that is still ringing,
-  // and iOS gets the same news as a Live Activity update instead.
+  // goes to Android (api.md §5.2) and to macOS (§5.1, as a background push):
+  // it stops a device that is still ringing. iOS gets the same news as a Live
+  // Activity update instead.
   private async sendToDevices(event: DeliveryEvent, accountId: string, tally: Tally): Promise<void> {
     const devices = this.subscribedDevices(event.topicHash, accountId)
-      .filter((device) => !isStateKind(event.kind) || device.platform === "android");
+      .filter((device) => !isStateKind(event.kind) || device.platform === "android" || device.platform === "macos");
     for (const device of devices) {
       let result: PushResult;
       try {
@@ -81,7 +83,7 @@ export class PushDispatcher {
       }
       this.rememberApnsEnvironment(device, result);
       if (result.status >= 200 && result.status < 300 && !result.stale) tally.delivered += 1;
-      if (device.platform === "ios" && result.stale) {
+      if (usesApns(device.platform) && result.stale) {
         this.db
           .prepare("UPDATE devices SET push_token = '' WHERE id = ? AND push_token = ?")
           .run(device.id, device.pushToken);
@@ -97,7 +99,7 @@ export class PushDispatcher {
   // remembering: a token both hosts refused is a bad token, and writing down
   // the host that happened to be tried last would be a lie.
   private rememberApnsEnvironment(device: PushDevice, result: PushResult): void {
-    if (device.platform !== "ios" || result.apnsEnvironment === undefined) return;
+    if (!usesApns(device.platform) || result.apnsEnvironment === undefined) return;
     if (result.status < 200 || result.status >= 300) return;
     if (result.apnsEnvironment === device.apnsEnvironment) return;
     this.db.prepare("UPDATE devices SET apns_environment = ? WHERE id = ?").run(result.apnsEnvironment, device.id);
@@ -140,7 +142,9 @@ export class PushDispatcher {
 
   // A start goes to the push-to-start token of every device subscribed to the
   // topic. An update or an end goes to the update token of the activity that is
-  // already running for this incident, wherever it is.
+  // already running for this incident, wherever it is. A Mac has no Live
+  // Activity (api.md §5.1), so a token row on one is never used, however it
+  // got there.
   private liveActivityTokens(action: "start" | "update" | "end", event: DeliveryEvent, accountId: string): LiveActivityTarget[] {
     if (action === "start") {
       const deviceIds = this.subscribedDevices(event.topicHash, accountId).map((device) => device.id);
@@ -148,13 +152,13 @@ export class PushDispatcher {
       return this.db
         .prepare(
           `SELECT t.token, d.apns_environment FROM device_tokens t JOIN devices d ON d.id = t.device_id
-           WHERE t.kind = 'la_start' AND t.device_id IN (${deviceIds.map(() => "?").join(", ")})`,
+           WHERE t.kind = 'la_start' AND d.platform <> 'macos' AND t.device_id IN (${deviceIds.map(() => "?").join(", ")})`,
         )
         .all(...deviceIds) as LiveActivityTarget[];
     }
     return this.db
       .prepare(
-        "SELECT t.token, d.apns_environment FROM device_tokens t JOIN devices d ON d.id = t.device_id WHERE t.kind = 'la_update' AND t.incident_id = ? AND d.account_id = ?",
+        "SELECT t.token, d.apns_environment FROM device_tokens t JOIN devices d ON d.id = t.device_id WHERE t.kind = 'la_update' AND d.platform <> 'macos' AND t.incident_id = ? AND d.account_id = ?",
       )
       .all(event.incidentId, accountId) as LiveActivityTarget[];
   }
@@ -184,7 +188,7 @@ export class PushDispatcher {
            COALESCE(alarm.token, d.push_token) AS push_token
          FROM devices d JOIN subscriptions s ON s.device_id = d.id
          LEFT JOIN device_tokens alarm ON alarm.device_id = d.id AND alarm.activity_id = ''
-           AND alarm.kind = CASE d.platform WHEN 'ios' THEN 'apns' ELSE 'fcm' END
+           AND alarm.kind = ${alarmTokenKindSql("d.platform")}
          WHERE s.topic_hash = ? AND COALESCE(alarm.token, d.push_token) <> '' AND d.account_id = ?`,
       )
       .all(topicHash, accountId) as DeviceRow[];
@@ -198,7 +202,7 @@ export class PushDispatcher {
   }
 
   private senderFor(device: PushDevice): PushSender {
-    return device.platform === "ios" ? this.senders.apns : this.senders.fcm;
+    return usesApns(device.platform) ? this.senders.apns : this.senders.fcm;
   }
 }
 

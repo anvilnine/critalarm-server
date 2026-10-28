@@ -1,5 +1,5 @@
 import { connect, constants, type ClientHttp2Session } from "node:http2";
-import type { DeliveryEvent } from "../domain-events.js";
+import { isStateKind, type DeliveryEvent } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
 import { ApnsProviderToken } from "./apns-token.js";
 import type { ApnsEnvironment, LiveActivityPush, LiveActivitySender, PrivateKey, PushDevice, PushResult, PushSender } from "./types.js";
@@ -47,6 +47,7 @@ export class ApnsSender implements PushSender, LiveActivitySender {
 
   async send(device: PushDevice, event: DeliveryEvent): Promise<PushResult> {
     const now = this.options.clock.now();
+    if (device.platform === "macos" && isStateKind(event.kind)) return this.sendBackground(device, event, now);
     return this.push(
       device.apnsEnvironment ?? this.options.environment,
       `/3/device/${encodeURIComponent(device.pushToken)}`,
@@ -60,6 +61,28 @@ export class ApnsSender implements PushSender, LiveActivitySender {
         "content-type": "application/json",
       },
       JSON.stringify(apnsPayload(event)),
+    );
+  }
+
+  // api.md §5.1. An ack, a close or an expire reaches a Mac as a background
+  // push, so a Mac app that is still ringing stops. It shows nothing, so it
+  // goes at priority 5 and lives 60 seconds: a stop that arrives later than
+  // that is no use. It goes to the same bundle id as the alarm, and finds the
+  // device's Apple host the same way.
+  private async sendBackground(device: PushDevice, event: DeliveryEvent, now: number): Promise<PushResult> {
+    return this.push(
+      device.apnsEnvironment ?? this.options.environment,
+      `/3/device/${encodeURIComponent(device.pushToken)}`,
+      {
+        authorization: `bearer ${this.authorization(now)}`,
+        "apns-topic": this.options.bundleId,
+        "apns-push-type": "background",
+        "apns-priority": "5",
+        "apns-collapse-id": event.incidentId ?? event.messageId,
+        "apns-expiration": String(now + 60),
+        "content-type": "application/json",
+      },
+      JSON.stringify(backgroundPayload(event)),
     );
   }
 
@@ -342,6 +365,18 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
     // api.md §5.1. The phone re-arms a silenced alarm up to this second and no
     // later. A push with no incident behind it has no window, so it has none.
     ...(event.ringUntil === null ? {} : { ring_until: event.ringUntil }),
+  };
+}
+
+// api.md §5.1. content-available and nothing else in aps, then the incident,
+// the server and the kind. No title, body or ring_until, whatever the topic's
+// relay_content: nothing here may ring or show.
+function backgroundPayload(event: DeliveryEvent): Record<string, unknown> {
+  return {
+    aps: { "content-available": 1 },
+    ...(event.incidentId === null ? {} : { incident_id: event.incidentId }),
+    server: event.server,
+    kind: event.kind,
   };
 }
 

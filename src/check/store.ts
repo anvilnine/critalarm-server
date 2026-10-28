@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
+import { alarmTokenKindSql, type Platform } from "../platform.js";
 import type { ApnsEnvironment } from "../push/types.js";
 import { Counters, LOCAL_KEY } from "../stats/counters.js";
 import type { Tier } from "../tier/types.js";
@@ -61,7 +62,7 @@ export interface PlannedCheck {
   roundId: string;
   attempt: number;
   checkId: string;
-  platform: "ios" | "android";
+  platform: Platform;
   pushToken: string;
   apnsEnvironment?: ApnsEnvironment;
 }
@@ -83,7 +84,7 @@ type RoundRow = RoundView & { device_id: string };
 
 type DeviceRow = {
   account_id: string;
-  platform: "ios" | "android";
+  platform: Platform;
   apns_environment: ApnsEnvironment | null;
   last_alarm_push_at: number | null;
   push_token: string;
@@ -488,7 +489,7 @@ export class CheckStore {
            COALESCE(alarm.token, d.push_token) AS push_token
          FROM devices d
          LEFT JOIN device_tokens alarm ON alarm.device_id = d.id AND alarm.activity_id = ''
-           AND alarm.kind = CASE d.platform WHEN 'ios' THEN 'apns' ELSE 'fcm' END
+           AND alarm.kind = ${alarmTokenKindSql("d.platform")}
          WHERE d.id = ?`,
       )
       .get(deviceId) as DeviceRow | undefined;

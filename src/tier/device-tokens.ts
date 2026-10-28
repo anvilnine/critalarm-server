@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
+import { alarmTokenKind, usesApns, type Platform } from "../platform.js";
 import type { TierDependencies } from "./types.js";
 
 export const tokenKinds = ["apns", "fcm", "la_start", "la_update"] as const;
@@ -30,8 +31,8 @@ export function tokenSchemaForKind(kind: TokenKind): z.ZodString {
   return kind === "fcm" ? fcmTokenSchema : apnsTokenSchema;
 }
 
-export function pushTokenSchemaFor(platform: "ios" | "android"): z.ZodString {
-  return platform === "ios" ? apnsTokenSchema : fcmTokenSchema;
+export function pushTokenSchemaFor(platform: Platform): z.ZodString {
+  return usesApns(platform) ? apnsTokenSchema : fcmTokenSchema;
 }
 
 // api.md §4.2. activity_id belongs to la_update and only to it, because an
@@ -61,7 +62,16 @@ export const tokenSchema = z
 
 export type TokenInput = z.infer<typeof tokenSchema>;
 
+// api.md §4.2. A Mac holds no Live Activity token. Refused as a ZodError, which
+// the route answers with 400 {"error":"invalid request"}, before anything is
+// written.
+const liveActivityKinds: ReadonlySet<TokenKind> = new Set(["la_start", "la_update"]);
+
 export function putDeviceToken(deps: TierDependencies, deviceId: string, input: TokenInput): void {
+  const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceId) as { platform: Platform } | undefined;
+  if (device?.platform === "macos" && liveActivityKinds.has(input.kind)) {
+    throw new z.ZodError([{ code: z.ZodIssueCode.custom, path: ["kind"], message: "a macos device holds no Live Activity token" }]);
+  }
   deps.db
     .prepare(
       `INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at)
@@ -89,10 +99,10 @@ export function setAlarmToken(
   db: Database.Database,
   clock: Clock,
   deviceId: string,
-  platform: "ios" | "android",
+  platform: Platform,
   token: string,
 ): void {
-  const kind: TokenKind = platform === "ios" ? "apns" : "fcm";
+  const kind: TokenKind = alarmTokenKind(platform);
   db.prepare("DELETE FROM device_tokens WHERE device_id = ? AND kind IN ('apns', 'fcm')").run(deviceId);
   db.prepare(
     "INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at) VALUES (?, ?, '', NULL, ?, ?)",

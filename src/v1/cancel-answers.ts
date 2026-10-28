@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { Hono, MiddlewareHandler } from "hono";
 import { readBytes } from "../body-limit.js";
 import type { Clock } from "../incident/types.js";
+import { platforms, type Platform } from "../platform.js";
 import { tierRequired } from "../tier/caps.js";
 import type { V1Env } from "./auth.js";
 
@@ -25,7 +26,7 @@ export type AnswerInput = {
   reason: CancelReason;
   text: string | null;
   appVersion: string;
-  platform: "ios" | "android";
+  platform: Platform;
 };
 
 export type ParseResult =
@@ -33,6 +34,10 @@ export type ParseResult =
   | { ok: false; error: "invalid request" | "invalid reason" | "text too long" };
 
 const invalid: ParseResult = { ok: false, error: "invalid request" };
+
+function isPlatform(value: unknown): value is Platform {
+  return (platforms as readonly unknown[]).includes(value);
+}
 
 function isReason(value: string): value is CancelReason {
   return (CANCEL_REASONS as readonly string[]).includes(value);
@@ -46,7 +51,7 @@ export function parseAnswer(body: unknown): ParseResult {
   if (typeof reason !== "string") return invalid;
   if (text !== undefined && text !== null && typeof text !== "string") return invalid;
   if (typeof appVersion !== "string" || !/^[A-Za-z0-9.+_-]{1,32}$/.test(appVersion)) return invalid;
-  if (platform !== "ios" && platform !== "android") return invalid;
+  if (!isPlatform(platform)) return invalid;
   if (!isReason(reason)) return { ok: false, error: "invalid reason" };
   let cleaned: string | null = null;
   if (typeof text === "string") {
