@@ -3,11 +3,11 @@ import { authenticateDevice, bearerFromHeader } from "../tier/auth.js";
 import type { AccountContext } from "../tier/types.js";
 import type Database from "better-sqlite3";
 import { showAdminToken } from "../admin/credentials.js";
+import { bearerSecretMatches } from "../bearer.js";
 export type V1Env = { Variables: { account: AccountContext } };
 export function authenticateManagement(db: Database.Database, authorization: string | undefined, mode: "selfhosted" | "relay" | "hosted"): AccountContext | null {
   if (mode === "selfhosted") {
-    const token = /^Bearer (ad_[A-Za-z0-9_-]+)$/.exec(authorization ?? "")?.[1];
-    return token !== undefined && token === showAdminToken(db)
+    return /^Bearer ad_[A-Za-z0-9_-]+$/.test(authorization ?? "") && bearerSecretMatches(authorization, showAdminToken(db) ?? "")
       ? { accountId: "acc_selfhosted", deviceId: "admin" }
       : null;
   }

@@ -20,8 +20,10 @@ import { createAuthHandler } from "./auth/better-auth.js";
 import { createBilling } from "./tier/billing-startup.js";
 import { createChecks } from "./check/startup.js";
 import { loggedPath } from "./request-log.js";
+import { warnRelayPlainHash } from "./startup-warnings.js";
 
 const config = loadConfig(process.env);
+warnRelayPlainHash(config);
 const db = openDatabase(join(config.dataDir, "critalarm.sqlite"));
 migrate(db);
 const identity = (config.mode ?? "relay") === "selfhosted" ? ensureSelfHostedIdentity(db) : undefined;
