@@ -35,7 +35,7 @@ describe("rate limiter behind the real @hono/node-server", () => {
   beforeAll(async () => {
     const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
     app.get("/who", (c) => c.json({ peer: clientIp(c, false), key: clientKey(clientIp(c, false)) }));
-    app.use("/limited", makeRateLimiter(undefined, 1, false));
+    app.use("/limited", makeRateLimiter(1, false));
     app.get("/limited", (c) => c.text("ok"));
     await new Promise<void>((resolve) => {
       server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info: AddressInfo) => { port = info.port; resolve(); });
