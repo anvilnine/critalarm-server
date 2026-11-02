@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { z } from "zod";
 import type { Clock } from "../incident/types.js";
-import { highestEntitledTier, isHigherTier } from "./revenuecat.js";
+import { accountTierAfter, highestEntitledTier, isHigherTier } from "./revenuecat.js";
 import type { Tier } from "./types.js";
 
 // Guard 4 of planning/accounts-plan.md section 8: read entitlements back from
@@ -138,9 +138,12 @@ function applyTier(deps: LiveDependencies, appUserId: string, tier: Tier): void 
     }
     const current = deps.db.prepare("SELECT tier FROM accounts WHERE id = ?").get(link.account_id) as { tier: Tier } | undefined;
     if (current === undefined) return;
-    // The same ranking the webhook uses, never a second one: an account can
-    // hold several subscriptions and one lapsing must not take the others down.
-    const next = highestEntitledTier(deps, link.account_id);
+    // The same ranking and the same rule the webhook uses, never a second one:
+    // an account can hold several subscriptions and one lapsing must not take
+    // the others down, and an id that did not pay for the account's tier must
+    // not take it away. The sweep comes back to every id every day, so without
+    // the rule a tier set by hand would last until the next run.
+    const next = accountTierAfter({ current: current.tier, highest: highestEntitledTier(deps, link.account_id), rowBefore: link.entitled_tier, rowAfter: tier });
     if (next === current.tier) return;
     deps.db.prepare("UPDATE accounts SET tier = ? WHERE id = ?").run(next, link.account_id);
     // Guard 5. event_id is null because no webhook caused this, and the reason

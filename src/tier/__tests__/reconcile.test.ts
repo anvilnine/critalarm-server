@@ -268,6 +268,65 @@ describe("an account holding several subscriptions", () => {
   });
 });
 
+// A tier set by hand (a comp, a gift, a test account) sits on the account and on
+// no billing row. The sweep reads every linked id on every run, so a row that
+// never paid for the tier must not be what takes it away.
+describe("an account whose tier no billing row carries", () => {
+  it("stays hosted when its one linked id is at free and the store lists nothing", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, deps } = setup([{ status: 200, body: { items: [] } }], "hosted", "free");
+
+    await reconcileAll(deps);
+    await reconcileAll(deps);
+
+    expect(tierOf(db)).toBe("hosted");
+    expect(changes(db)).toEqual([]);
+    expect(logged(log)).toEqual([]);
+  });
+
+  it("stays hosted when a relay subscription on it lapses", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, deps } = setup([{ status: 200, body: { items: [] } }], "hosted", "relay");
+
+    await reconcileAll(deps);
+
+    expect(tierOf(db)).toBe("hosted");
+    expect((db.prepare("SELECT entitled_tier FROM account_billing_ids WHERE app_user_id = 'acc_1'").get() as { entitled_tier: Tier }).entitled_tier).toBe("free");
+    expect(changes(db)).toEqual([]);
+  });
+
+  it("is still raised when the store lists a higher tier for its id", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, deps } = setup([{ status: 200, body: { items: [entitlement("crit_hosted", null)] } }], "relay", "free");
+
+    await reconcileAll(deps);
+
+    expect(tierOf(db)).toBe("hosted");
+  });
+});
+
+describe("an account that pays through the store", () => {
+  it("drops to free when the store lists nothing for the id that paid for its tier", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, deps } = setup([{ status: 200, body: { items: [] } }], "hosted", "hosted");
+
+    await reconcileAll(deps);
+
+    expect(tierOf(db)).toBe("free");
+    expect(changes(db)).toEqual([{ account_id: "acc_1", from_tier: "hosted", to_tier: "free", reason: "revenuecat reconcile for acc_1", event_id: null, changed_at: NOW }]);
+  });
+
+  it("drops only as far as its other ids still pay for", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { db, deps } = setup((url) => (url.includes("acc_2") ? { status: 200, body: { items: [entitlement("crit_relay", null)] } } : { status: 200, body: { items: [] } }), "hosted", "hosted");
+    db.prepare("INSERT INTO account_billing_ids (app_user_id, account_id, linked_at, last_event_at, entitled_tier) VALUES ('acc_2', 'acc_1', 1, NULL, 'relay')").run();
+
+    await reconcileAll(deps);
+
+    expect(tierOf(db)).toBe("relay");
+  });
+});
+
 describe("a customer whose entitlements span more than one page", () => {
   it("follows next_page before deciding anything", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
