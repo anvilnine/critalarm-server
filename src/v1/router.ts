@@ -18,8 +18,9 @@ import { version } from "../version.js";
 import { relayHost } from "../relay/host.js";
 import { BodyTooLarge, jsonBody } from "../body-limit.js";
 import { CapError } from "../tier/devices.js";
+import { makeRateLimiter, type PublishLimiter } from "../rate-limit.js";
 const MAX_SEND_BYTES = 65_536;
-type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>;identities?:IdentityResolver;revoke?:TokenRevoker;reconcileAccount?:(accountId:string)=>void;relayChallenge?:(value:string)=>boolean};
+type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>;identities?:IdentityResolver;revoke?:TokenRevoker;reconcileAccount?:(accountId:string)=>void;relayChallenge?:(value:string)=>boolean;publishLimiter?:PublishLimiter};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,updated_at:i.updatedAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS, relay_content AS relayContent FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
 export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=requireDevice(deps.db,deps.config.mode ?? "hosted");const service=new PublishService({...deps,incidents:deps.incidents,mode:deps.config.mode ?? "hosted"});r.get("/v1/info",c=>c.json({name:"critalarm",version,base_url:deps.config.baseUrl,relay_url:deps.config.relayUrl,relay_content:deps.config.relayContent,mode:deps.config.mode ?? "hosted"}));
@@ -29,6 +30,11 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
   // It names the relay it was made for, so a relay that is handed a challenge
   // cannot spend it at another relay.
   r.get("/v1/relay-challenge/:challenge",c=>{const value=c.req.param("challenge");const relay=relayHost(deps.config.relayUrl);return (deps.config.mode ?? "hosted")==="selfhosted"&&relay!==undefined&&deps.relayChallenge?.(value)===true?c.json({challenge:value,relay}):c.json({error:"not found"},404)});
+  // api.md §1.8. send and test count in the publish window of POST /{topic},
+  // by client address, so the limiter runs ahead of the credential check as
+  // it does there.
+  const publishLimit=deps.publishLimiter??makeRateLimiter(30,deps.config.behindProxy,deps.clock);
+  r.post("/v1/topics/:name/send",publishLimit);r.post("/v1/test",publishLimit);
   r.use("/v1/topics*",auth);r.use("/v1/incidents*",auth);r.use("/v1/test",auth);
   // api.md §3.7. These live in the v1 router, which is mounted in every mode,
   // because selfhosted has to answer 501 rather than the 404 an unmounted

@@ -66,11 +66,9 @@ function pollSince(value: string | undefined, now: number): { timestamp: number;
 export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv> {
   const router = new Hono<IngressEnv>();
   const service = new PublishService(deps);
-  const publishLimit = makeRateLimiter(
-    (c) => c.json(numericError(42901, 429, "rate limited"), 429),
-    deps.publishLimit ?? 30,
-    deps.behindProxy ?? false,
-  );
+  // The bucket POST /v1/topics/{name}/send and POST /v1/test share (api.md
+  // §1.8). createApp builds it once and hands it to both routers.
+  const publishLimit = deps.publishLimiter ?? makeRateLimiter(deps.publishLimit ?? 30, deps.behindProxy ?? false, deps.clock);
 
   const publish = async (c: Context<IngressEnv, "/:topic">) => {
     const name = c.req.param("topic");

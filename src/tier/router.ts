@@ -7,7 +7,7 @@ import { CapError, deleteDevice, deviceUpdateSchema, registerDevice, registratio
 import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from "./device-tokens.js";
 import { applyRevenueCatEvent, parseRevenueCatEvent, resolveAccount } from "./revenuecat.js";
 import { bearerSecretMatches } from "../bearer.js";
-import { RollingLimit } from "./account-limit.js";
+import { clientIp, clientKey, DailyLimit, RATE_LIMITED, RollingLimit } from "../rate-limit.js";
 import { packsCheckedAt, packsFor, type PackRules } from "./packs.js";
 import { namedCustomers, parseReadTrigger, queueReadsForEvent } from "./revenuecat-trigger.js";
 import type { Tier, TierDependencies } from "./types.js";
@@ -76,9 +76,21 @@ export function createTierRouter(deps: TierDependencies): Hono {
   const packs = (accountId: string) => packsFor(deps.db, deps.clock, accountId, packRules);
   // api.md §4.2: 6 requests per 60 seconds per account.
   const refreshLimit = new RollingLimit(deps.clock, 6, 60);
+  // api.md §4.2: a POST /relay/v1/devices with no Authorization header creates
+  // an anonymous account. 20 per rolling 60 seconds and 200 per UTC day per
+  // client address (§1.8 says which address). A call with a dv_ or an aj_ is
+  // not counted.
+  const createMinute = new RollingLimit(deps.clock, 20, 60);
+  const createDay = new DailyLimit(deps.clock, 200);
 
   router.post("/relay/v1/devices", async (c) => {
     try {
+      if (c.req.header("authorization") === undefined) {
+        const client = clientKey(clientIp(c, deps.behindProxy ?? false));
+        if (!createMinute.allowed(client) || !createDay.allowed(client)) return c.json(RATE_LIMITED, 429);
+        createMinute.record(client);
+        createDay.record(client);
+      }
       const input = registrationSchema.parse(await requestJson(c.req.raw));
       const authorization = c.req.header("authorization");
       const bearer = bearerFromHeader(authorization);

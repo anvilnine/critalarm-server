@@ -5,7 +5,7 @@ import { clientIp, makeRateLimiter, type ProxyTrust } from "../rate-limit.js";
 
 function app(trust: ProxyTrust) {
   const server = new Hono();
-  server.use("*", makeRateLimiter(undefined, 1, trust));
+  server.use("*", makeRateLimiter(1, trust));
   server.get("/", (c) => c.text("ok"));
   return server;
 }

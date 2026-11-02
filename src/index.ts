@@ -19,6 +19,7 @@ import type { StoreReads } from "./tier/types.js";
 import { createCheckRouter } from "./check/router.js";
 import { CheckStore } from "./check/store.js";
 import { boundedRequest, SMALL_JSON_BYTES } from "./body-limit.js";
+import { makeRateLimiter } from "./rate-limit.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -41,7 +42,10 @@ export function createApp(deps: AppDependencies): Hono {
   // api.md §3.1. A topic made before the upgrade gets its relay name before the
   // first request.
   if (deps.config.mode === "selfhosted") ensureRelayNames(deps.db);
-  const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
+  const app = new Hono();
+  // api.md §1.8. One publish bucket for POST /{topic}, POST /v1/topics/{name}/send and POST /v1/test.
+  const publishLimiter = makeRateLimiter(30, deps.config.behindProxy, deps.clock);
+  const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
   // api.md §3.7. better-auth's OAuth surface, gated twice: main.ts builds the
   // handler only when Apple or Google credentials are configured, and it is
@@ -62,7 +66,7 @@ export function createApp(deps: AppDependencies): Hono {
       return handler(request);
     });
   }
-  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }), behindProxy: deps.config.behindProxy }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
   // key, so it counts under LOCAL_KEY. Forwarded pushes are counted in the
   // relay router instead, where the pushing server's key is known.
@@ -77,12 +81,12 @@ export function createApp(deps: AppDependencies): Hono {
   // so a self-hosted server does not carry them either. The check goes
   // by the account's tier, which the store reads from the database itself.
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
-  app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
+  app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch, publishLimiter }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
     app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy, publicHosts: relayPublicHosts(deps.config) }));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
-  app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+  app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, publishLimiter, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
 }
 
 // api.md §4.1. The names this relay answers to, from configuration only: the

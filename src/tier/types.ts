@@ -4,6 +4,7 @@ import type { Clock } from "../incident/types.js";
 import type { BillingReads } from "./billing-reads.js";
 import type { ShadowReads } from "./billing-shadow.js";
 import type { PackIncludes } from "./packs.js";
+import type { ProxyTrust } from "../rate-limit.js";
 
 export type Tier = "free" | "relay" | "hosted";
 
@@ -43,6 +44,8 @@ export interface TierDependencies {
   storeReads?: StoreReads;
   // Packs the configuration attaches to a tier. Absent means none.
   packIncludes?: PackIncludes;
+  // Who may name the client's address (api.md §1.8). Absent means the socket peer.
+  behindProxy?: ProxyTrust;
 }
 
 // `on`: the read is the only writer of the tier and the packs, and an event

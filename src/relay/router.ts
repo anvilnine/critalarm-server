@@ -7,7 +7,7 @@ import type { RelayPayload } from "./types.js";
 import type { Clock, DeliveryEvent } from "../incident/types.js";
 import type { DispatchResult } from "../domain-events.js";
 import type { Counters } from "../stats/counters.js";
-import { clientIp, clientKey, type ProxyTrust } from "../rate-limit.js";
+import { clientIp, clientKey, RATE_LIMITED, RollingLimit, type ProxyTrust } from "../rate-limit.js";
 import { parseBaseUrl } from "./base-url.js";
 import { confirmChallenge, type ChallengeConfirmer } from "./challenge.js";
 import { topicHash } from "./hash.js";
@@ -33,7 +33,6 @@ const REGISTRATION_DAILY_CAP = 20;
 const MAX_CONFIRMATIONS_IN_FLIGHT = 4;
 // Confirmations started per window, across all clients.
 const GLOBAL_STARTS = { limit: 60, windowS: 60 };
-const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
 
 // Largest body each route reads. A registration is a URL, a version and a
 // challenge. A push may carry a title and a body of 4096 bytes each, and JSON escaping can turn one
@@ -61,31 +60,12 @@ export function createRelayRouter(db: Database.Database, dispatch: (event: Deliv
   const publicHosts = options.publicHosts ?? [];
   let inFlight = 0;
 
-  // A rolling window kept in memory. `allowed` only looks, and `record` counts,
-  // so a call that another limit turns away is not charged to this one.
-  function slidingWindow(limit: number, windowS: number) {
-    const hits = new Map<string, number[]>();
-    let sweptAt = 0;
-    const live = (key: string, now: number): number[] => (hits.get(key) ?? []).filter((time) => time > now - windowS);
-    return {
-      allowed(key: string): boolean {
-        const now = clock.now();
-        // Drop idle keys once per window so the table follows the traffic.
-        if (now - sweptAt >= windowS) { sweptAt = now; for (const [other, times] of hits) if (!times.some((time) => time > now - windowS)) hits.delete(other); }
-        return live(key, now).length < limit;
-      },
-      record(key: string): void {
-        const now = clock.now();
-        hits.set(key, [...live(key, now), now]);
-      },
-    };
-  }
-  const clientWindow = slidingWindow(REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
+  const clientWindow = new RollingLimit(clock, REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
   // Wrong operator secrets, counted per client on their own, so a guess at the
   // secret is limited at any speed and a right guess is not charged.
-  const secretWindow = slidingWindow(REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
+  const secretWindow = new RollingLimit(clock, REGISTRATION_RATE.limit, REGISTRATION_RATE.windowS);
   // Confirmations started, across all clients.
-  const startedWindow = slidingWindow(GLOBAL_STARTS.limit, GLOBAL_STARTS.windowS);
+  const startedWindow = new RollingLimit(clock, GLOBAL_STARTS.limit, GLOBAL_STARTS.windowS);
   const GLOBAL = "all";
 
   function dailyAllowed(client: string): boolean {
