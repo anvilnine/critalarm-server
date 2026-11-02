@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type Database from "better-sqlite3";
+import type { Context } from "hono";
 import type { AccountContext, Tier } from "./types.js";
 
 type DeviceRow = { id: string; account_id: string; device_token_hash: string };
@@ -41,4 +42,18 @@ export function authenticateDevice(db: Database.Database, bearer: string | undef
   const stored = Buffer.from(row.device_token_hash, "hex");
   if (supplied.length !== stored.length || !timingSafeEqual(supplied, stored)) return null;
   return { accountId: row.account_id, deviceId: row.id };
+}
+
+// api.md §4.2, §4.5. The caller's own device, or the response that says why
+// not. 401 when the dv_ is missing or unknown, 404 when it is a real device's
+// token but the :deviceId in the path is another device, including another
+// device on the same account. Authentication comes first, so a wrong token on
+// another device's path answers 401. Callers return the response as it is:
+//   const context = ownDevice(c, db);
+//   if (context instanceof Response) return context;
+export function ownDevice(c: Context, db: Database.Database): AccountContext | Response {
+  const context = authenticateDevice(db, bearerFromHeader(c.req.header("authorization")));
+  if (context === null) return c.json({ error: "unauthorized" }, 401);
+  if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+  return context;
 }

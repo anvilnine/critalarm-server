@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { authenticateDevice, bearerFromHeader, joinBearerFromHeader } from "./auth.js";
+import { authenticateDevice, bearerFromHeader, joinBearerFromHeader, ownDevice } from "./auth.js";
 import { capsFor } from "./caps.js";
 import { CapError, deleteDevice, deviceUpdateSchema, registerDevice, registrationSchema, subscribeDevice, subscriptionSchema, unsubscribeDevice, updateDevice } from "./devices.js";
 import { deleteDeviceTokens, putDeviceToken, tokenKindSchema, tokenSchema } from "./device-tokens.js";
@@ -114,11 +114,9 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.patch("/relay/v1/devices/:deviceId", async (c) => {
     try {
       const input = deviceUpdateSchema.parse(await requestJson(c.req.raw));
-      const bearer = bearerFromHeader(c.req.header("authorization"));
-      const context = authenticateDevice(deps.db, bearer);
-      if (context === null) return c.json({ error: "unauthorized" }, 401);
-      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
-      const account = updateDevice(deps, c.req.param("deviceId"), input, bearer);
+      const context = ownDevice(c, deps.db);
+      if (context instanceof Response) return context;
+      const account = updateDevice(deps, context.deviceId, input, bearerFromHeader(c.req.header("authorization")));
       if (account === null) return c.json({ error: "not found" }, 404);
       return c.json({ account_id: account.account_id, tier: account.tier, caps: capsFor(account.tier), packs: packs(account.account_id) });
     } catch (error: unknown) {
@@ -145,9 +143,8 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.post("/relay/v1/devices/:deviceId/subscriptions", async (c) => {
     try {
       const input = subscriptionSchema.parse(await requestJson(c.req.raw));
-      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
-      if (context === null) return c.json({ error: "unauthorized" }, 401);
-      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      const context = ownDevice(c, deps.db);
+      if (context instanceof Response) return context;
       subscribeDevice(deps, context, input.topic_hash);
       return c.body(null, 204);
     } catch (error: unknown) {
@@ -160,9 +157,8 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.delete("/relay/v1/devices/:deviceId/subscriptions/:topicHash", (c) => {
     try {
       const topicHash = subscriptionSchema.shape.topic_hash.parse(c.req.param("topicHash"));
-      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
-      if (context === null) return c.json({ error: "unauthorized" }, 401);
-      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      const context = ownDevice(c, deps.db);
+      if (context instanceof Response) return context;
       unsubscribeDevice(deps, context, topicHash);
       return c.body(null, 204);
     } catch (error: unknown) {
@@ -174,9 +170,8 @@ export function createTierRouter(deps: TierDependencies): Hono {
   router.post("/relay/v1/devices/:deviceId/tokens", async (c) => {
     try {
       const input = tokenSchema.parse(await requestJson(c.req.raw));
-      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
-      if (context === null) return c.json({ error: "unauthorized" }, 401);
-      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      const context = ownDevice(c, deps.db);
+      if (context instanceof Response) return context;
       putDeviceToken(deps, context.deviceId, input);
       return c.body(null, 204);
     } catch (error: unknown) {
@@ -188,9 +183,8 @@ export function createTierRouter(deps: TierDependencies): Hono {
   const deleteToken = (c: Context) => {
     try {
       const kind = tokenKindSchema.parse(c.req.param("kind"));
-      const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
-      if (context === null) return c.json({ error: "unauthorized" }, 401);
-      if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
+      const context = ownDevice(c, deps.db);
+      if (context instanceof Response) return context;
       deleteDeviceTokens(deps, context.deviceId, kind, c.req.param("activityId"));
       return c.body(null, 204);
     } catch (error: unknown) {

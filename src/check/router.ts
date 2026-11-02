@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
-import { authenticateDevice, bearerFromHeader } from "../tier/auth.js";
+import { ownDevice } from "../tier/auth.js";
 import { tierRequired } from "../tier/caps.js";
 import type { AccountContext } from "../tier/types.js";
 import { CHECK_TIER, type CheckStore } from "./store.js";
@@ -26,12 +26,7 @@ export function createCheckRouter(deps: CheckRouterDependencies): Hono {
   const router = new Hono();
 
   // The caller's own device, or the response that says why not.
-  const own = (c: Context): AccountContext | Response => {
-    const context = authenticateDevice(deps.db, bearerFromHeader(c.req.header("authorization")));
-    if (context === null) return c.json({ error: "unauthorized" }, 401);
-    if (context.deviceId !== c.req.param("deviceId")) return c.json({ error: "not found" }, 404);
-    return context;
-  };
+  const own = (c: Context): AccountContext | Response => ownDevice(c, deps.db);
 
   router.put("/relay/v1/devices/:deviceId/check", async (c) => {
     const context = own(c);
