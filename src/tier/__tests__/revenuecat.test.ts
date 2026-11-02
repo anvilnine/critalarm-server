@@ -79,7 +79,7 @@ describe("RevenueCat webhook", () => {
 
     expect([unauthenticated.status, guessed.status]).toEqual([404, 404]);
     expect((await unset.request("/webhooks/revenuecat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(event()) })).status).toBe(404);
-    expect((await unset.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "p", app_version: "1.0.0" }) })).status).toBe(201);
+    expect((await unset.request("/relay/v1/devices", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device_id: `dev_${randomUUID()}`, platform: "ios", push_token: "ab", app_version: "1.0.0" }) })).status).toBe(201);
     db.close();
   });
 

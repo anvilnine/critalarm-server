@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRelayRouter } from "../router.js";
 import { relayKeyHash } from "../client.js";
+import { topicHash as hashOf } from "../hash.js";
 import { Counters } from "../../stats/counters.js";
 import { openDatabase } from "../../store/database.js";
 import { migrate } from "../../store/migrations.js";
@@ -8,8 +9,10 @@ import type { DeliveryEvent } from "../../incident/types.js";
 import { PushDispatcher } from "../../push/dispatcher.js";
 import type { PushSender } from "../../push/types.js";
 
-const remoteHash = "a".repeat(64);
-const localHash = "b".repeat(64);
+// Every relay key gets the topic check now, so each hash is made from a name
+// under the key's base_url, and every push sends that name.
+const remoteHash = hashOf("https://alerts.example.com", "remote");
+const localHash = hashOf("https://alerts.example.com", "local");
 
 // Two accounts, both subscribed to the same topic_hash. One holds a topic this
 // relay serves itself; the other only subscribed to a remote one.
@@ -19,7 +22,7 @@ function setup() {
   for (const id of ["acc_1", "acc_2"]) db.prepare("INSERT INTO accounts (id,tier,created_at) VALUES (?,'hosted',1)").run(id);
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_1','acc_1','h1','ios','t1',1)").run();
   db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_2','acc_2','h2','ios','t2',1)").run();
-  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES ('rly_1','https://alerts.example.com','1',?,1)").run(relayKeyHash("rk_test"));
+  db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('rly_1','https://alerts.example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
   const events: DeliveryEvent[] = [];
   const app = createRelayRouter(db, async (event) => { events.push(event); }, new Counters(db, { now: () => 1 }));
   return { db, app, events };
@@ -29,7 +32,7 @@ function push(app: ReturnType<typeof createRelayRouter>, topicHash: string) {
   return app.request("/relay/v1/push", {
     method: "POST",
     headers: { Authorization: "Bearer rk_test", "content-type": "application/json" },
-    body: JSON.stringify({ topic_hash: topicHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "open" }),
+    body: JSON.stringify({ topic_hash: topicHash, topic: topicHash === localHash ? "local" : "remote", incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "open" }),
   });
 }
 
@@ -72,7 +75,7 @@ describe("relayed push accounts", () => {
       db.prepare("INSERT INTO devices (id,account_id,device_token_hash,platform,push_token,last_seen) VALUES ('dev_2','acc_2','h2','ios','token-2',1)").run();
       db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_1',?)").run(remoteHash);
       db.prepare("INSERT INTO subscriptions (device_id, topic_hash) VALUES ('dev_2',?)").run(remoteHash);
-      db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at) VALUES ('rly_1','https://alerts.example.com','1',?,1)").run(relayKeyHash("rk_test"));
+      db.prepare("INSERT INTO relay_servers (id,base_url,version,relay_key_hash,created_at,legacy) VALUES ('rly_1','https://alerts.example.com','1',?,1,1)").run(relayKeyHash("rk_test"));
       const sent: { device: string; account: string | undefined }[] = [];
       const sender: PushSender = { send: async (device, event) => { sent.push({ device: device.id, account: event.accountId }); return { status: 200, stale: false }; } };
       const dispatcher = new PushDispatcher(db, { apns: sender, fcm: sender });
@@ -107,7 +110,7 @@ describe("relayed push accounts", () => {
         const response = await app.request("/relay/v1/push", {
           method: "POST",
           headers: { Authorization: "Bearer rk_test", "content-type": "application/json" },
-          body: JSON.stringify({ topic_hash: remoteHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind }),
+          body: JSON.stringify({ topic_hash: remoteHash, topic: "remote", incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind }),
         });
         expect(response.status).toBe(202);
       }
@@ -122,7 +125,7 @@ describe("relayed push accounts", () => {
       const response = await app.request("/relay/v1/push", {
         method: "POST",
         headers: { Authorization: "Bearer rk_test", "content-type": "application/json" },
-        body: JSON.stringify({ topic_hash: remoteHash, incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "nonsense" }),
+        body: JSON.stringify({ topic_hash: remoteHash, topic: "remote", incident_id: "inc_remote", message_id: "m_remote", priority: 5, kind: "nonsense" }),
       });
       expect(response.status).toBe(400);
     } finally { db.close(); }

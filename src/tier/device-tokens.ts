@@ -1,12 +1,39 @@
 import { z } from "zod";
 import type Database from "better-sqlite3";
 import type { Clock } from "../incident/types.js";
+import { alarmTokenKind, usesApns, type Platform } from "../platform.js";
 import type { TierDependencies } from "./types.js";
 
 export const tokenKinds = ["apns", "fcm", "la_start", "la_update"] as const;
 export type TokenKind = (typeof tokenKinds)[number];
 
 export const tokenKindSchema = z.enum(tokenKinds);
+
+// What a push token may look like. The relay puts the token in the APNs
+// request path or the FCM message, so a token of any length or character used
+// to reach the sender as typed. A 70000-character token made the APNs client
+// throw before it sent anything (the HTTP/2 header limit is about 64 KiB).
+//
+// APNs: the app sends Apple's raw token bytes as hex, for the alarm token
+// (ios/Runner/AppDelegate.swift) and for both Live Activity tokens
+// (ios/Shared/Alarm/IncidentActivityCoordinator.swift). A device token is 32
+// bytes today and an activity token about 80. Apple says the length may grow,
+// so up to 256 bytes is allowed.
+//
+// FCM: the token Firebase Messaging hands the Android app. Firebase does not
+// publish a format. Tokens seen so far are about 160 characters of URL-safe
+// base64 with one colon, so this allows the URL-unreserved characters plus the
+// colon, up to 4096.
+export const apnsTokenSchema = z.string().regex(/^[0-9A-Fa-f]{1,512}$/);
+export const fcmTokenSchema = z.string().regex(/^[A-Za-z0-9._~:-]{1,4096}$/);
+
+export function tokenSchemaForKind(kind: TokenKind): z.ZodString {
+  return kind === "fcm" ? fcmTokenSchema : apnsTokenSchema;
+}
+
+export function pushTokenSchemaFor(platform: Platform): z.ZodString {
+  return usesApns(platform) ? apnsTokenSchema : fcmTokenSchema;
+}
 
 // api.md §4.2. activity_id belongs to la_update and only to it, because an
 // la_update token points at one running Live Activity. The other three kinds
@@ -19,6 +46,9 @@ export const tokenSchema = z
     incident_id: z.string().min(1).optional(),
   })
   .superRefine((value, context) => {
+    if (!tokenSchemaForKind(value.kind).safeParse(value.token).success) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["token"], message: "not a token of this kind" });
+    }
     if (value.kind === "la_update" && value.activity_id === undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["activity_id"], message: "required for la_update" });
     }
@@ -32,7 +62,16 @@ export const tokenSchema = z
 
 export type TokenInput = z.infer<typeof tokenSchema>;
 
+// api.md §4.2. A Mac holds no Live Activity token. Refused as a ZodError, which
+// the route answers with 400 {"error":"invalid request"}, before anything is
+// written.
+const liveActivityKinds: ReadonlySet<TokenKind> = new Set(["la_start", "la_update"]);
+
 export function putDeviceToken(deps: TierDependencies, deviceId: string, input: TokenInput): void {
+  const device = deps.db.prepare("SELECT platform FROM devices WHERE id = ?").get(deviceId) as { platform: Platform } | undefined;
+  if (device?.platform === "macos" && liveActivityKinds.has(input.kind)) {
+    throw new z.ZodError([{ code: z.ZodIssueCode.custom, path: ["kind"], message: "a macos device holds no Live Activity token" }]);
+  }
   deps.db
     .prepare(
       `INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at)
@@ -60,10 +99,10 @@ export function setAlarmToken(
   db: Database.Database,
   clock: Clock,
   deviceId: string,
-  platform: "ios" | "android",
+  platform: Platform,
   token: string,
 ): void {
-  const kind: TokenKind = platform === "ios" ? "apns" : "fcm";
+  const kind: TokenKind = alarmTokenKind(platform);
   db.prepare("DELETE FROM device_tokens WHERE device_id = ? AND kind IN ('apns', 'fcm')").run(deviceId);
   db.prepare(
     "INSERT INTO device_tokens (device_id, kind, activity_id, incident_id, token, updated_at) VALUES (?, ?, '', NULL, ?, ?)",

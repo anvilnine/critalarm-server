@@ -55,7 +55,7 @@ describe("the RevenueCat secret API key", () => {
 });
 
 describe("the relay registration secret", () => {
-  it("is absent when unset or empty, so POST /relay/v1/servers is not mounted", () => {
+  it("is absent when unset or empty, so every registration proves its base_url", () => {
     expect(loadConfig(env()).relayRegistrationSecret).toBeUndefined();
     expect(loadConfig(env({ RELAY_REGISTRATION_SECRET: "" })).relayRegistrationSecret).toBeUndefined();
   });
@@ -185,5 +185,42 @@ describe("Google client IDs", () => {
       AUTH_GOOGLE_CLIENT_ID: ",",
       AUTH_GOOGLE_CLIENT_SECRET: "google-secret",
     }))).toThrow("invalid configuration: AUTH_GOOGLE sign-in credentials");
+  });
+});
+
+describe("RELAY_REGISTRATION", () => {
+  it("is open when unset or empty", () => {
+    expect(loadConfig(env()).relayRegistration).toBe("open");
+    expect(loadConfig(env({ RELAY_REGISTRATION: "" })).relayRegistration).toBe("open");
+  });
+
+  it("is read when it is open or closed", () => {
+    expect(loadConfig(env({ RELAY_REGISTRATION: "open" })).relayRegistration).toBe("open");
+    expect(loadConfig(env({ RELAY_REGISTRATION: "closed" })).relayRegistration).toBe("closed");
+  });
+
+  it("stops startup on any other value", () => {
+    expect(() => loadConfig(env({ RELAY_REGISTRATION: "off" }))).toThrow("invalid configuration: RELAY_REGISTRATION");
+  });
+});
+
+describe("RELAY_PUBLIC_HOSTS", () => {
+  it("is absent when unset or empty", () => {
+    expect(loadConfig(env()).relayPublicHosts).toBeUndefined();
+    expect(loadConfig(env({ RELAY_PUBLIC_HOSTS: " , ," })).relayPublicHosts).toBeUndefined();
+  });
+
+  it("is split on commas, trimmed, lower-cased, with empty entries ignored and the default port dropped", () => {
+    expect(loadConfig(env({ RELAY_PUBLIC_HOSTS: " Relay.Example.COM, ,api.example.com:443,push.example.com:8443," })).relayPublicHosts).toEqual(["relay.example.com", "api.example.com", "push.example.com:8443"]);
+  });
+
+  it("stops startup on an entry that is not a host name", () => {
+    expect(() => loadConfig(env({ RELAY_PUBLIC_HOSTS: "relay.example.com/path" }))).toThrow("invalid configuration: RELAY_PUBLIC_HOSTS");
+  });
+
+  it("joins the hosts of BASE_URL and RELAY_URL in the list the relay router gets", async () => {
+    const { relayPublicHosts } = await import("../index.js");
+    const config = loadConfig(env({ BASE_URL: "https://Relay.Example.com", RELAY_URL: "https://relay.critalarm.app", RELAY_PUBLIC_HOSTS: "edge.example.com,relay.critalarm.app" }));
+    expect(relayPublicHosts(config)).toEqual(["relay.example.com", "relay.critalarm.app", "edge.example.com"]);
   });
 });

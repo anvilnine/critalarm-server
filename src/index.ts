@@ -1,3 +1,4 @@
+import { ensureRelayNames } from "./v1/topics.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { Config } from "./config.js";
@@ -7,6 +8,7 @@ import { createIngressRouter } from "./ingress/router.js";
 import { createTierRouter } from "./tier/router.js";
 import { createV1Router } from "./v1/router.js";
 import { createRelayRouter } from "./relay/router.js";
+import { relayHost } from "./relay/host.js";
 import { createStatsRouter } from "./stats/router.js";
 import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
@@ -16,6 +18,7 @@ import type { TokenRevoker } from "./auth/revoke.js";
 import type { StoreReads } from "./tier/types.js";
 import { createCheckRouter } from "./check/router.js";
 import { CheckStore } from "./check/store.js";
+import { boundedRequest, SMALL_JSON_BYTES } from "./body-limit.js";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -31,17 +34,33 @@ export type Variables = Record<string, never>;
 // Runs on plain Node via src/server-node.ts. One long-lived process, because the
 // incident repeat loop is a timer scan over database rows.
 
-export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads; }
+export interface AppDependencies { config: Config; db: Database.Database; clock: Clock; ids: IdGenerator; dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>; identities?: IdentityResolver; revoke?: TokenRevoker; authHandler?: AuthHandler; reconcileAccount?: (accountId: string) => void; storeReads?: StoreReads;
+  // api.md §3.8. True for the relay challenge in flight. Only a selfhosted server with a relay client supplies it.
+  relayChallenge?: (value: string) => boolean; }
 export function createApp(deps: AppDependencies): Hono {
+  // api.md §3.1. A topic made before the upgrade gets its relay name before the
+  // first request.
+  if (deps.config.mode === "selfhosted") ensureRelayNames(deps.db);
   const app = new Hono(); const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
   app.get("/v1/health", c => c.json({ ok: true }));
   // api.md §3.7. better-auth's OAuth surface, gated twice: main.ts builds the
   // handler only when Apple or Google credentials are configured, and it is
   // mounted only outside selfhosted mode. A self-hosted server must not carry
   // the sign-in routes at all.
+  //
+  // better-auth reads the body itself, so it goes through the bounded reader
+  // first and better-auth gets a copy of what was read. The biggest body here
+  // is an ID token sign-in or Apple's form_post callback (code, id_token,
+  // state, user), a few KB each. Over the limit answers 400
+  // {"error":"invalid request"}, as every other JSON route does, and
+  // better-auth never sees the request.
   if (deps.authHandler !== undefined && (deps.config.mode ?? "relay") !== "selfhosted") {
     const handler = deps.authHandler;
-    app.on(["POST", "GET"], "/api/auth/*", c => handler(c.req.raw));
+    app.on(["POST", "GET"], "/api/auth/*", async c => {
+      const request = await boundedRequest(c.req.raw, SMALL_JSON_BYTES);
+      if (request === "too large") return c.json({ error: "invalid request" }, 400);
+      return handler(request);
+    });
   }
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
   // api.md §4.4. Work this relay does for its own hosted accounts has no relay
@@ -55,12 +74,21 @@ export function createApp(deps: AppDependencies): Hono {
     return result;
   };
   // api.md §4.5. The weekly check routes sit beside the other device routes,
-  // so a self-hosted server does not carry them either.
-  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, clock: deps.clock, store: new CheckStore(deps.db, deps.clock, counters, deps.config.packIncludes ?? {}), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }) }));
+  // so a self-hosted server does not carry them either. The check goes
+  // by the account's tier, which the store reads from the database itself.
+  if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createCheckRouter({ db: deps.db, store: new CheckStore(deps.db, deps.clock, counters) }));
   app.route("/", createV1Router({ ...deps, incidents, dispatch: localDispatch }));
   if ((deps.config.mode ?? "relay") !== "selfhosted") {
-    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, deps.config.relayRegistrationSecret));
+    app.route("/", createRelayRouter(deps.db, async (event) => deps.dispatch([event]), counters, { ...(deps.config.relayRegistrationSecret === undefined ? {} : { registrationSecret: deps.config.relayRegistrationSecret }), registration: deps.config.relayRegistration ?? "open", behindProxy: deps.config.behindProxy, publicHosts: relayPublicHosts(deps.config) }));
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+}
+
+// api.md §4.1. The names this relay answers to, from configuration only: the
+// hosts of its base-url and relay-url, plus RELAY_PUBLIC_HOSTS. The same
+// function builds the `relay` value a server sends, so the default-port and
+// case rules match on both sides.
+export function relayPublicHosts(config: Config): string[] {
+  return [...new Set([relayHost(config.baseUrl), relayHost(config.relayUrl), ...(config.relayPublicHosts ?? [])].filter((host): host is string => host !== undefined))];
 }
