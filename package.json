@@ -23,14 +23,13 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@sentry/node": "^9",
-    "better-auth": "^1.7.5",
+    "better-auth": "^1.7.14",
     "better-sqlite3": "^13.0.3",
     "hono": "^4.12.12",
     "hono-rate-limiter": "^0.4.2",
     "tsx": "^4.19.2",
     "yaml": "^2.9.0",
-    "zod": "^4"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
