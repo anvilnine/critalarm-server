@@ -1,4 +1,11 @@
 import type { PublishInput } from "./types.js";
+import { readBytes } from "../body-limit.js";
+
+// api.md §1.8: a body over 4096 bytes is 413 {"code":41301}. The same limit holds
+// for the message when it comes in ?m=, and for the title, the tags and the
+// click URL, which can come in a header or the query string and were bounded
+// only by Node's header limit.
+export const MAX_MESSAGE_BYTES = 4096;
 
 export class ParseError extends Error {
   constructor(
@@ -62,6 +69,9 @@ function normalize(fields: {
   click?: unknown;
   markdown?: unknown;
 }): ParsedPublish {
+  for (const value of [fields.message, fields.title, fields.click, Array.isArray(fields.tags) ? fields.tags.map(String).join(",") : fields.tags]) {
+    if (typeof value === "string" && Buffer.byteLength(value) > MAX_MESSAGE_BYTES) throw new ParseError(413, "message too large");
+  }
   return {
     message: typeof fields.message === "string" && fields.message.length > 0 ? fields.message : "triggered",
     ...(typeof fields.title === "string" ? { title: fields.title } : {}),
@@ -74,8 +84,8 @@ function normalize(fields: {
 
 export async function parsePublishRequest(request: Request): Promise<ParsedPublish> {
   rejectDelayHeaders(request.headers);
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > 4096) {
+  const bytes = await readBytes(request, MAX_MESSAGE_BYTES);
+  if (bytes === "too large") {
     throw new ParseError(413, "message too large");
   }
   const query = new URL(request.url).searchParams;

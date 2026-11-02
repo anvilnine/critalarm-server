@@ -12,7 +12,8 @@ import { CheckStore } from "./store.js";
 // api.md §4.5. Whether this process sends weekly checks, and the pieces it
 // needs when it does. A relay or a hosted server sends them unless
 // WEEKLY_CHECKS=off. A self-hosted server never does: it holds no accounts and
-// no packs, and its phones are checked by the relay they registered with.
+// sells no plan. Which devices are sent a check is decided by the tier of
+// their account on the relay they registered with.
 
 export interface Checks {
   // False means nothing below does anything.
@@ -47,7 +48,9 @@ export function createChecks(config: Config, deps: ChecksDependencies): Checks {
     ...(apns === undefined ? {} : { ios: apns }),
     ...(config.fcm === undefined ? {} : { android: new FcmCheckSender({ ...config.fcm, clock: deps.clock, fetch: deps.fetch }) }),
   };
-  const store = new CheckStore(deps.db, deps.clock, undefined, config.packIncludes ?? {});
+  // The store reads the account's tier from the database each time it needs
+  // it, so it is told nothing about billing here.
+  const store = new CheckStore(deps.db, deps.clock);
   const notes = new AlarmNotes(alarmNoteWriter(deps.db));
   const scheduler = new CheckScheduler(store, senders, { notes });
   return {

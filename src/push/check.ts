@@ -1,4 +1,5 @@
 import type { Clock } from "../incident/types.js";
+import type { Platform } from "../platform.js";
 import { apnsEndpoint, Http2ApnsTransport, type ApnsTransport } from "./apns.js";
 import { ApnsProviderToken } from "./apns-token.js";
 import { signJwt } from "./jwt.js";
@@ -17,7 +18,7 @@ import type { ApnsEnvironment, PrivateKey, PushFetch } from "./types.js";
 // time is a failed attempt, and the scan moves on.
 
 export interface CheckTarget {
-  platform: "ios" | "android";
+  platform: Platform;
   pushToken: string;
   // The Apple host the device is known to be on, when it is known.
   apnsEnvironment?: ApnsEnvironment;

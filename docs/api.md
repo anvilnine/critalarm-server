@@ -1,7 +1,21 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.18.0
+**Version:** 1.25.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.25.0** adds a third device platform, `macos`, for the Crit Alarm app on the Mac (§4.2). A Mac registers like an iPhone: its alarm token is kind `apns` and its alarm pushes are the iOS alert of §5.1, sent to the same bundle id. A Mac holds no Live Activity tokens, and `POST /tokens` with `la_start` or `la_update` from a Mac answers `400 {"error":"invalid request"}`. A Mac also gets the state kinds (`ack`, `close`, `expire`) as a background push (§5.1), because nothing else tells a running Mac app to stop ringing when the incident is handled on another device. A Mac counts against `caps.devices` like any device, can enrol in the weekly check (§4.5, sent as the APNs check of §5.4), and may send `platform: "macos"` with a cancel answer (§3.9). No route is added. A server built before 1.25.0 refuses `platform: "macos"` with `400 {"error":"invalid request"}`. `version` in `GET /v1/info` (§3.4) is the server binary's version, not this contract's, so a Mac app cannot tell an old server in advance: it treats that `400` on registration as "this server is too old for the Mac app" and says so.
+
+**1.24.0** closes a gap in `caps.p4_daily`. A priority-5 message on a topic whose `critical` switch is off opens no incident and goes out as the same heads-up push as a priority 4, but until now only priority 4 counted against the cap, so a server could send heads-ups without limit at priority 5. From this version both count. On a `relay` or `hosted` server, a priority-5 publish to a topic with the switch off counts like a priority-4 publish, and over the cap it answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7). On the relay, a `p5` push with no `incident_id` counts like a `p4`: it goes only to the subscribed accounts still under their cap, charges each of them one, and answers `429` only when every subscribed account is at its cap (§4.1). §4.2 says which pushes count. An alarm never counts: priority 5 on a topic with the switch on, and every push that carries an `incident_id`, stay uncapped. No route or field is added. A self-hosted server that sent more heads-ups at priority 5 than the cap allows now gets `429` past it, and its phones stop getting them for the rest of the UTC day.
+
+**1.23.0** adds one route, `POST /v1/account/cancel-reason` (§3.9), for the answer to "What made you cancel?". The app calls it when a person whose `hosted` tier will not renew taps a reason, and once more if they write a few words. It is an authenticated write that creates no alert. It takes `reason`, an optional `text` of 500 characters at most, `app_version` and `platform`, and no key: the server keeps at most one answer per account in any rolling 30 days, and every later call in that window is a repeat of it. A repeat never changes the reason, the version or the platform, may fill an empty text once, and never replaces text. Every accepted call answers `204`. Only an account that is on `hosted` now, or was ever moved to it, may send. Only `hosted` takes the route: `selfhosted` and `relay` answer `501` before any credential is checked, an exception to the rule at the top of §3. An answer is kept for 365 days, deleted with the account and its tombstones, and read by the operator with `critalarm cancel-answers` (§4.4). Nothing that exists changed. The route's body limit, 8192 bytes, joins the table in §1.8. An app built for 1.22.0 never calls the route.
+
+**1.22.0** writes down what the fixes from the 2026-10-20 security audit changed on the wire. Five changes. First, every relay key needs `topic` on every push, a key issued before 1.20.0 included, and a push without it answers `400 {"error":"invalid request"}` (§4.1). Second, a priority-4 publish on a `relay` or `hosted` server over the account's `caps.p4_daily` answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent (§1.7), and a relayed `p4` goes only to the accounts still under their cap (§4.1). Third, every route reads its body up to a limit and stops there (§1.8). The publish routes answer `413` for a body, a `?m=` message, a title, tags or a click URL over 4096 bytes, and the JSON routes answer `400 {"error":"invalid request"}` for a body over their limit. Fourth, the client address the rate limits count is the socket peer unless the server setting `behind-proxy` names who may report it, and an IPv6 client counts by its /64 (§1.8). Fifth, the sign-in surface joins a provider to an existing identity by email only when that provider says the address is verified, for Apple as well as Google (§3.7). No route or field is added. A server built for 1.20.0 or later already sends `topic` on every push and sees no change. A server built before 1.20.0 sends none, and its pushes now answer `400` until it is upgraded.
+
+**1.21.0** stops a stranger from working out the hash a phone listens on, for topics on a self-hosted server. Until now the hash was `sha256(base_url + "/" + topic)`, and both parts are known or easy to guess: `base_url` is in the open `GET /v1/info`, and topic names like `prod` are common. Any device registered with the relay may subscribe to any hash (§4.2), so a stranger could subscribe a phone of their own to another server's topic and learn when it fires, and read the title and body when that server runs `relay_content: full`. From this version a `selfhosted` server gives every topic a `relay_name`, 32 random bytes, and returns it on the topic object, which only a management credential can read (§3.1). The app makes the hash from `relay_name` in place of the name when a topic has one. The server pushes that hash and sends `relay_name` in the push's `topic` field (§4.1), so the relay's check from 1.20.0 works unchanged and the relay no longer sees the topic's name on that push. A server in `relay` or `hosted` mode returns no `relay_name` and nothing changes there: it finds devices by account as well as by hash, so a guessed hash reaches nobody. Everything is additive. An app built before this version ignores the new field and keeps subscribing to the hash made from the name. A self-hosted server keeps pushing that hash too, as a second push, until its owner turns it off (`relay-plain-hash`, §4.1). The relay needs no change.
+
+**1.20.0** lets a self-hosted server get a relay key without a secret from the relay's operator, and ties every relay key to one server. Three changes, all in §4.1 and the new §3.8. First, registration carries a `challenge`. The relay calls the server back at its `base_url` and issues a key only when the server answers with the same value, so a key is proof that its holder answers at that `base_url`. Second, a push carries `topic`, the topic's name. The relay works out `sha256(base_url + "/" + topic)` from the `base_url` the key was registered with and refuses a push whose `topic_hash` is anything else, so a key can only ring subscribers of its own server's topics. Until now any key holder could push any hash it could compute, which is why registration was closed to strangers. Third, a server answers `GET /v1/relay-challenge/{challenge}` (§3.8). The relay now sees a topic's name while it checks a push. It does not store it, log it or send it on. The app is untouched: it sends and receives nothing new. A server built for 1.19.0 that holds a key from before this version keeps pushing as it did. 1.22.0 drops that exemption: every key needs `topic`, so such a server has to be upgraded to keep pushing. A server built for 1.19.0 that asks for a new key without the operator's secret is refused with `400`, because it sends no `challenge`.
+
+**1.19.0** moves the weekly check from the `pro` pack to the Hosted tier. A device is sent checks only while its account's tier is `hosted` (§4.5). `free` does not get them, and neither does `relay`, which has the same caps as `hosted` but is not the Hosted plan. Hosted and the `pro` pack are separate and neither includes the other, so holding `pro` no longer gets a device a check and a Hosted account needs no pack for one. `PUT .../check` with `"enabled":true` on any other tier answers `403 {"error":"tier","tier":"hosted"}`, a new error (§1.8), where 1.18.0 answered `{"error":"pack","pack":"pro"}`. The `reason` value `"pack"` becomes `"tier"` in both places it appeared: on `GET .../check` beside `"state":"off"`, and on a round that closed as `skipped`. A phone on a self-hosted server cannot get the weekly check, because no plan is sold there. Packs are untouched: `packs`, `GET /relay/v1/packs`, `POST /relay/v1/packs/refresh` and the `pack` error stay as they were, and no route in this version answers the `pack` error. This version changes what 1.18.0 said and adds no route and no field. An app built for 1.18.0 meets a `403` with no `pack` field and a `reason` it does not know. It reads the first as a switch that failed and the second as no reason, so it shows the check as off and never as working.
 
 **1.18.0** adds packs and a weekly delivery check. A pack is an add-on an account holds beside its tier, and the only one is `pro`. `packs` appears on every registration response and on `GET /relay/v1/packs`, and `POST /relay/v1/packs/refresh` asks the relay to read the store again and says whether it could (§4.2). A relay that reads the store now works out the tier and the packs together from one read of the customer's active entitlements, and a webhook event only triggers that read. A relay that does not read the store applies events to the tier as before and gives no pack for a purchase (§4.3). The weekly check is a push that shows nothing: the relay sends it to a device that asked for it, the app answers with a receipt, and the relay reports whether the last rounds were answered (§4.5, §5.4). An answered check shows that a push reached the holder of the device's credential. It does not show that an alarm would ring. Everything is additive on the wire. A client that knows none of it sees one new field on a registration response and nothing else. No route lets an app create an alert, and a check shows nothing on the phone.
 
@@ -148,6 +162,8 @@ Field set and order match ntfy's message object so ntfy client libraries parse i
 | 4 | - | Stored. Forwarded as Time-Sensitive / high. |
 | 1-3 | - | Stored. App polls. Not forwarded to relay. |
 
+**A heads-up is capped on a `relay` or `hosted` server.** A heads-up is a priority-4 publish, or a priority-5 publish to a topic whose `critical` switch is off: the two rows above that are forwarded without an incident. Every heads-up, through any publish route (§1.1, §1.5, §3.5), counts against `caps.p4_daily` (§4.2) of the account that owns the topic, for the current UTC day. A heads-up over the cap answers `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent. A `selfhosted` server counts nothing. Priorities 1 to 3, and priority 5 on a topic with the switch on, are never capped.
+
 ### 1.8 Errors
 
 ntfy's shape:
@@ -156,24 +172,54 @@ ntfy's shape:
 {"code":40101,"http":401,"error":"unauthorized"}
 {"code":40001,"http":400,"error":"invalid topic name"}
 {"code":40901,"http":409,"error":"topic already exists"}
-{"code":41301,"http":413,"error":"message too large"}      // body > 4096 bytes
+{"code":41301,"http":413,"error":"message too large"}      // body, ?m=, title, tags or click > 4096 bytes
 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
 Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute.
+
+**Which IP.** The address a rate limit counts is the one that opened the connection, unless the server setting `behind-proxy` (`BEHIND_PROXY`) says who may report the client's address instead:
+
+| Value | Client address |
+|---|---|
+| unset, `false`, `off`, `0` | the socket peer. The default. |
+| `cloudflare` | `CF-Connecting-IP`. Right only when the server accepts connections from Cloudflare alone. |
+| `1` to `10` | that many proxies of the operator's own append to `X-Forwarded-For`, and the client is that many entries from the right. |
+
+A reported value that is not an IP address falls back to the socket peer. `X-Real-IP` and the left-most `X-Forwarded-For` entry are never read. `true`, which earlier servers took, is read as `cloudflare` and logged as a warning. Any other value stops the server at startup. An IPv6 client is counted by its /64 and an IPv4-mapped IPv6 address as its IPv4. The same address is what the relay registration limits count (§4.1).
+
+**Body limits.** A server reads a request body up to the route's limit and stops there. A `Content-Length` over the limit is refused without reading the body.
+
+| Route | Limit | Over the limit |
+|---|---|---|
+| `POST /`, `POST`/`PUT /{topic}` (§1) | 4096 bytes. `?m=`, the title, the tags and the click URL are held to 4096 bytes each too | `413` `41301` |
+| `POST /v1/topics/{name}/send` (§3.5) | 64 KiB, and 4096 bytes of `message` | `413` `41301` |
+| `POST /relay/v1/push` (§4.1) | 64 KiB | `400 {"error":"invalid request"}` |
+| `POST /relay/v1/servers` (§4.1) | 4096 bytes | `400 {"error":"invalid request"}` |
+| `POST /webhooks/revenuecat` (§4.3) | 256 KiB, read only after the secret matched | `400 {"error":"invalid request"}` |
+| `POST /relay/v1/devices/{device_id}/checks/{check_id}/receipt` (§4.5) | 16 KiB | read as a receipt with no notes |
+| `/api/auth/*`, the sign-in surface (§3.7) | 16 KiB | `400 {"error":"invalid request"}` |
+| `POST /v1/account/cancel-reason` (§3.9) | 8192 bytes, checked after the credential, the request limit and the tier | `413 {"error":"request too large"}` |
+| every other route that takes a JSON body | 16 KiB | `400 {"error":"invalid request"}` |
 
 Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code. The ones a client will meet:
 
 | Body | When |
 |---|---|
 | `{"error":"invalid priority"}` | priority outside 1-5 or an unknown name |
-| `{"error":"invalid request"}` | a malformed body or an unknown enum value in a query filter |
+| `{"error":"invalid request"}` | a malformed body, a body over the route's limit (above), or an unknown enum value in a query filter |
 | `{"error":"incident state conflict"}` | `409` from ack or close against the wrong state (§3.2) |
 | `{"error":"scheduled delivery not supported"}` | `X-Delay`, `At`, `In`, or JSON `delay` (§1.4) |
 | `{"error":"streaming not supported"}` | `501` from `/json` without `poll=1`, `/sse`, `/ws`, `/raw` (§2) |
 | `{"error":"not found"}` | `404`, including a row owned by another account |
 | `{"error":"cap","cap":"..."}` | `429` from a cap (§4.2) |
-| `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2, §4.5) |
+| `{"error":"pack","pack":"..."}` | `403` from a route that needs a pack the account does not hold (§4.2). No route answers it in 1.19.0 |
+| `{"error":"tier","tier":"..."}` | `403` from a route that needs a tier the account is not on. `tier` names the tier the route needs (§4.5) |
+| `{"error":"invalid base_url"}` | `400` from relay registration when `base_url` breaks the rules in §4.1 |
+| `{"error":"challenge failed"}` | `422` from relay registration when the relay could not confirm the challenge at `base_url` (§4.1) |
+| `{"error":"registration closed"}` | `403` from relay registration when the relay's operator has closed it (§4.1) |
+| `{"error":"topic mismatch"}` | `403` from a relay push whose `topic_hash` is not the hash of `topic` under the key's `base_url` (§4.1) |
+| `{"error":"invalid reason"}`, `{"error":"text too long"}`, `{"error":"request too large"}` | `400` or `413` from the cancel reason route (§3.9) |
 
 ---
 
@@ -236,7 +282,8 @@ Wrong, missing, or out of scope → `401`.
 
 ```
 GET    /v1/topics
-→ 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":... }]
+→ 200 [{ "name":"prod", "critical":true, "repeat_interval_s":30, "max_ring_s":1800, "desk_timer_s":600, "relay_content":"none", "created_at":...,
+           "relay_name":"<43 characters of [A-Za-z0-9_-]>" }]   // relay_name: selfhosted mode only
 
 POST   /v1/topics
   { "name":"prod", "critical":false, "token_name":"CI server" }   // critical and token_name optional
@@ -273,6 +320,10 @@ DELETE /v1/topics/{name}/tokens/{token_id}
 `critical` defaults to `false` on creation. A topic that rings has to be switched on deliberately, so the default stays `false`.
 
 `relay_content` is read-only here; it is server config.
+
+**`relay_name` is the secret half of a topic's hash.** A server in `selfhosted` mode makes one for every topic: 32 random bytes written as 43 characters of base64url. It is on every topic object the server returns (`GET`, `POST`, `PATCH`), it never changes for the life of the topic, and no request can set it. A topic that existed before the server was upgraded gets one at the upgrade. No route without a management credential returns it, and it is never written to a log. A server in `relay` or `hosted` mode leaves the field out.
+
+**The app picks the hash from the topic object.** A topic with a `relay_name` is subscribed as `sha256(base_url + "/" + relay_name)`. A topic without one is subscribed as `sha256(base_url + "/" + name)`, as before. `base_url` is the one from `GET /v1/info` in both cases. An app that learns a `relay_name` for a topic it had subscribed by name adds the new subscription first and removes the old one after the relay has answered `204`, so there is no moment with neither. Between the two calls the device holds both, and a server that still pushes the plain hash (§4.1) reaches it twice for one event. A push to a device carries no `message_id` (§5), so the app cannot tell the second push from the first. It handles the second as it handles any push for an incident it already knows, which can start the ring for that incident again. No alarm is missed. This lasts only for the time between the two calls.
 
 **A token name is optional on the way in and always present on the way out.** `token_name` on topic creation and `name` on `POST .../tokens` may be left off; `name` on the `PATCH` may not. A name is trimmed and then cut to 40 characters, so a longer one is shortened rather than refused. A name that is empty after trimming counts as missing, and a missing name becomes `Token N`, where N is the topic's current token count plus one. Names are not unique inside a topic, so two tokens may carry the same one. That has a visible edge: delete `Token 2` of three and mint another, and the topic holds two rows called `Token 3` until somebody renames one. Making that impossible needs a per-topic counter that survives deletes, which is more state than the problem is worth.
 
@@ -394,6 +445,8 @@ For a load balancer, a container health check, or an uptime probe. It touches no
 
 **The credential.** Two things are proven at once: who the person is, and which account this handset brings. One `Authorization` header cannot carry two secrets, so the device token stays in the header exactly as on every other `/v1/` route, and the identity travels in the body. The `identity_token` is issued by the server's own auth surface, not by Apple or Google directly.
 
+**Two providers with one address.** When a person signs in with a provider for the first time and the address it gives matches an identity the server already holds, the auth surface treats the sign-in as that identity, and `POST /v1/account/link` then handles it as any returning identity. It does so only when the provider marks the address as verified (`email_verified`), for Apple and Google alike. An unverified match is refused at the auth surface with `401` and no `identity_token` is issued. Sign in with Apple at Work & School can send `email_verified` false. An address that matches nothing gets a new identity, which `link` adds to the account as described below.
+
 ```
 POST /v1/account/link                                   // sign up, sign in, or add a provider
   Authorization: Bearer dv_...
@@ -491,7 +544,7 @@ An account with no identity is deleted on `dv_` alone. Every device on it holds 
 
 Only an `open` incident blocks. An `acked` one does not: nothing is ringing, and a person must never be stuck unable to leave.
 
-The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, its packs, its devices' weekly check state and rounds, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
+The erase covers the account, every tombstone that points at it, its devices and their push tokens, its topics with their tokens, messages and incidents, its billing ids, its packs, its devices' weekly check state and rounds, its cancel answers (§3.9) and those of every tombstone that points at it, in the same transaction, and every sign-in identity on it with their sessions and provider tokens. Billing events stay as the dedup log with their account reference cleared, so a late webhook still finds its event id and applies nothing (§4.3). Before erasing, the server asks Apple and Google to revoke the provider tokens it holds. That call is best effort and never blocks the delete.
 
 After `204` every credential of the account is dead: `dv_`, `aj_` and every `tk_`. The app treats it like signing out and registers again with a new `device_id`. The other devices on the account get `401` on their next call and do the same.
 
@@ -505,6 +558,73 @@ Doing it any other way bricks the handset. Clearing `dv_` while keeping `device_
 
 One constraint does go, on purpose. `account_identities.account_id` stops being unique, because an account holding two identities is the whole point of 1.14.0. `user_id` stays the primary key: one sign-in identity still points at exactly one account, and that is what makes `linked` and `already_linked` tell apart.
 
+### 3.8 Relay challenge
+
+```
+GET /v1/relay-challenge/{challenge}          // no auth
+→ 200 { "challenge":"<the same value>",
+        "relay":"relay.critalarm.app" }      // host of the relay this server is asking, with its port if it names one
+→ 404 {"error":"not found"}
+```
+
+The server's half of relay registration (§4.1). A server makes a random `challenge` just before it asks a relay for a key, and answers `200` for that value only, and only until the registration call returns or 60 seconds pass, whichever is first. Every other value answers `404`, including one the server made earlier. The route needs no auth because the relay holds no credential for the server yet, and it gives nothing away: a caller learns only whether a value it already knows is the one in flight.
+
+`relay` is the host part of the server's `relay-url`, lower case. It says which relay the value was made for. A relay issues a key only when `relay` is one of its own public host names, which come from its configuration and never from the request, so a party that is handed a challenge cannot spend it at a different relay.
+
+A server in `relay` or `hosted` mode never asks another relay for a key, so it answers `404` to everything here.
+
+### 3.9 Cancel reason
+
+**Only on `hosted`, and an exception to the credential rule.** The `hosted` tier is sold by a server in `hosted` mode and nowhere else, so only `hosted` mode takes an answer. `selfhosted` and `relay` answer `501` before any credential is checked. That departs from the rule at the top of §3 ("Wrong, missing, or out of scope → 401"), on purpose: the refusal says "this server takes no answer", whoever asks. In `selfhosted` the body is the one §3.7 already uses for its routes. §3.7 does not refuse in `relay` mode, where those routes work, so the `relay` refusal is new to this route. The route is mounted in every mode so a client can tell a refusal from a path typed wrong.
+
+```
+POST /v1/account/cancel-reason
+  Authorization: Bearer dv_...
+  { "reason":"price"|"unused"|"selfhost"|"missing"|"broken"|"other",
+    "text":"Optional. 500 characters at most.",
+    "app_version":"1.0.0+12",
+    "platform":"ios"|"android"|"macos" }
+→ 204
+→ 400 {"error":"invalid request"}
+→ 400 {"error":"invalid reason"}
+→ 400 {"error":"text too long"}
+→ 401
+→ 403 {"error":"tier","tier":"hosted"}
+→ 413 {"error":"request too large"}
+→ 429 {"error":"rate limited"}
+→ 501 {"error":"not supported in selfhosted mode"} | {"error":"not supported in relay mode"}
+```
+
+**What it is.** One person's answer to "What made you cancel?". The app sends it the first time it opens after it learns that the account's `hosted` tier will not renew: once when the person taps one of the six choices, and a second time if the person also writes a few words. The route creates no alert, sends no push and opens no incident. Only the store knows that a plan is ending, so the client decides when to send and the server never asks.
+
+**The credential, and who may send.** A `dv_` device token, as on every `/v1/` route in `hosted` mode. No sign-in is needed. A missing or wrong token answers `401`. Registration is open and makes a `free` account for anyone, so the route takes an answer only from an account that is on `hosted` now or was ever moved to `hosted`. That includes a trial and a manual grant, and it does not mean the account paid. A cancelled plan that is still running is still `hosted`. The server knows "was ever assigned" from the tier changes it already records (`tier_changes`): the account, or an account merged into it, has a record of moving to `hosted`. Any other account answers `403 {"error":"tier","tier":"hosted"}`, stores nothing, and the client does not retry. A tier set by hand, outside the code paths that record a change, leaves no record, and an account with only such a tier is refused once it is no longer `hosted`. A tier move from before the record existed has no row either.
+
+**One answer per account per 30 days.** The request carries no key. The server keeps at most one answer per account in any rolling 30 days, and the first call in that window creates it. The current answer of an account is the newest one first stored within the last 30 days. Every call from that account while it has a current answer is a repeat of it, whatever phone sent it. So two phones on one account make one answer, and a retry makes none. The window runs from the time the answer was first stored. A repeat does not extend it. A call made 30 days or more after the current answer was first stored has no current answer and creates a new one. A person who cancels, resubscribes and cancels again more than 30 days later gives a second answer. One who does it inside 30 days adds to the first.
+
+**A repeat.** A repeat never changes `reason`, `app_version` or `platform`. If the current answer has no text yet and the repeat carries non-empty text, the text is stored, once. Once text is set it is never replaced. A repeat that differs in any other way stores nothing new. Every accepted call answers `204`, so the client cannot tell a new answer from a repeat and does not need to. This is why the text send after the reason send is safe: whichever arrives first creates the answer, and the text is kept if the other call had none. A retry that carries no text, or older text, changes nothing.
+
+**`text`.** Optional: absent and `null` are both valid. It is trimmed, and empty after trimming means no text. It is at most 500 Unicode characters after trimming, counted as code points, so an emoji counts as one. Stored as plain text and never rendered as markup.
+
+**`app_version` and `platform`.** `app_version` is 1 to 32 characters of letters, digits, `.`, `+`, `_` and `-`, for example `1.0.0+12`. `platform` is one of the values §4.2 accepts: `ios`, `android` or `macos`.
+
+**Size.** The body is measured on the raw request bytes, before any parsing, and may be at most 8192 bytes. A valid request always fits: a `text` of 500 characters is at most 6000 bytes when every character is an emoji written as two `\u` escapes (12 bytes each), and the other fields take under 200. Over 8192 bytes answers `413 {"error":"request too large"}`.
+
+**Order of checks.** The route stops at the first that fails, and each refusal has one status and one body:
+
+1. The mode: `501`, in `selfhosted` and `relay`.
+2. The credential: `401`.
+3. The request limit: `429 {"error":"rate limited"}`.
+4. On `hosted` now or ever: `403 {"error":"tier","tier":"hosted"}`.
+5. The size of the raw body: `413 {"error":"request too large"}`.
+6. The body is a JSON object, `reason` is a string, `text` is a string, `null` or absent, `app_version` and `platform` have the right shape: `400 {"error":"invalid request"}`.
+7. `reason` is one of the six: `400 {"error":"invalid reason"}`.
+8. `text` is at most 500 characters after trimming: `400 {"error":"text too long"}`.
+9. Store or repeat: `204`.
+
+**The request limit.** An account may make at most 30 calls to this route in any rolling hour. Every call that passes the credential check counts, whatever its outcome, so repeats and refused calls are limited too. A call the limit itself refuses is not counted. A legitimate client makes at most 16: two phones, each with two first-time calls and three retries of each. The count is kept in memory by the server process and a restart clears it. It is a best-effort brake on a loop, not a quota. What bounds the stored data is the rule of one answer per account per 30 days.
+
+**What is stored, and for how long.** The account id, the time the answer was first stored, the reason, the text, the app version, the platform and the time it last changed. Not stored: topic names, device ids, message content, a sign-in email, an IP address. The request log shows the path and the status and never the body. No route returns an answer. The operator reads answers with `critalarm cancel-answers` (§4.4). An answer is kept for 365 days after it was first stored and is then deleted by the same prune as history, which runs every hour (§4.2). It is deleted with the account: `DELETE /v1/account` and the operator erase (§3.7, §4.4) delete the cancel answers of the surviving account and of every account in its tombstone family, in the same transaction as the account. A merge or a switch leaves an answer on the account it was written on, which is why the erase reaches the tombstones. The text is the person's own words and can name anything. It is never sent to a third party.
+
 ## 4. Relay API
 
 Only served when push credentials are configured (relay and hosted modes).
@@ -513,11 +633,12 @@ Only served when push credentials are configured (relay and hosted modes).
 
 ```
 POST /relay/v1/push
-Authorization: Bearer rk_...                 // relay key. issued anonymously on first call to POST /relay/v1/servers
+Authorization: Bearer rk_...                 // relay key, from POST /relay/v1/servers below
 
 {
   "topic_hash": "sha256hex",                 // sha256(base_url + "/" + topic)
-  "incident_id": "inc_9a8b7c",               // null for priority-4 forwards
+  "topic": "prod",                           // what the hash was made from: the topic's relay_name (§3.1), or its name. checked, then dropped
+  "incident_id": "inc_9a8b7c",               // null on p4, and on a p5 whose topic has the switch off
   "message_id": "m_7f3k2p9q",
   "priority": 5,
   "kind": "open" | "repeat" | "reopen" | "p4" | "p5"    // p5: priority 5 on a topic whose switch is off
@@ -527,20 +648,47 @@ Authorization: Bearer rk_...                 // relay key. issued anonymously on
   "body": "..."                              // only when relay_content: full
 }
 → 202
-→ 429 {"error":"cap", "cap":"critical_topics"|"devices"|"p4_daily"}
+→ 400 {"error":"invalid request"}            // includes a missing or malformed topic
+→ 401 {"error":"unauthorized"}               // no key, an unknown key, or a key that was replaced
+→ 403 {"error":"topic mismatch"}
+→ 429 {"error":"cap", "cap":"p4_daily"}      // a p4, or a p5 with no incident_id, and every subscribed account is at its cap
 ```
 
+**A key pushes only its own server's topics.** The relay keeps the `base_url` a key was registered with. On every push it works out `sha256(base_url + "/" + topic)` and compares it with `topic_hash`. Equal, the push goes on. Different, the relay answers `403 {"error":"topic mismatch"}` and rings nobody. `topic` must have the shape of a topic name (§1.1, `[-_A-Za-z0-9]{1,64}`), which a `relay_name` also has, so the last `/` of the hashed string always sits between the `base_url` and the name and no other `base_url` can produce the same string. The relay uses `topic` for this check and nothing else: it does not store it, write it to a log or put it in a push.
+
+**A topic with a `relay_name` has two hashes, and the server may push both.** The secret hash is `sha256(base_url + "/" + relay_name)`, pushed with `topic` set to the `relay_name`. The plain hash is `sha256(base_url + "/" + name)`, pushed with `topic` set to the name. An app from before 1.21.0 is subscribed to the plain hash, and an app from 1.21.0 on is subscribed to the secret one. The server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`) decides whether the plain push is sent: `on` sends both pushes for every event, `off` sends the secret one only. The default is `on` in this version. Both pushes carry the same `incident_id`, `message_id`, `kind` and `ring_until`. The server works out both hashes from the `BASE_URL` it is running with. While `relay-plain-hash` is `on`, a stranger who guesses the name can still subscribe to the plain hash, so an owner whose phones all run an app from 1.21.0 on turns it `off`. The relay cannot tell the two pushes apart and does not need to: each passes the same check.
+
+**Every key needs `topic` on every push**, including a key issued before 1.20.0. A push without it answers `400 {"error":"invalid request"}`. Until 1.22.0 a key from before 1.20.0 could push without `topic`, and then nothing tied its pushes to one server.
+
+**A heads-up reaches only accounts under their cap.** A heads-up is a `p4`, or a `p5` with no `incident_id`, which is priority 5 on a topic whose switch is off (§1.7). The relay finds every account subscribed to `topic_hash` and sends a heads-up only to those still under `caps.p4_daily` for the current UTC day (§4.2), charging each of them one. An account at its cap gets nothing, even when another account on the same hash is under its own. When every subscribed account is at its cap the relay answers `429 {"error":"cap","cap":"p4_daily"}`. No other push is capped: a `p5` that carries an `incident_id` belongs to an alarm, like `open`, `repeat` and `reopen`.
+
 ```
-POST /relay/v1/servers
-  { "base_url":"https://alerts.example.com", "version":"0.1.0" }
+POST /relay/v1/servers                       // no auth
+  { "base_url":"https://alerts.example.com", "version":"0.5.0",
+    "challenge":"<32 to 128 characters of [A-Za-z0-9_-]>" }
 → 201 { "relay_key":"rk_..." }
+→ 400 {"error":"invalid request"}            // a missing field, or a challenge of the wrong shape
+→ 400 {"error":"invalid base_url"}
+→ 403 {"error":"registration closed"}
+→ 422 {"error":"challenge failed"}
+→ 429 {"code":42901,"http":429,"error":"rate limited"}
 ```
+
+**Registration proves the server answers at `base_url`.** Before it answers, the relay sends `GET {base_url}/v1/relay-challenge/{challenge}` (§3.8) and issues a key only for a `200` whose `challenge` is the same value and whose `relay` is one of this relay's own public host names. The relay takes those from its configuration (the hosts of its `base-url` and `relay-url`, plus any its operator adds) and never from the request. Anything else, a timeout, a redirect or a body that does not match is `422 {"error":"challenge failed"}`. A stranger who registers somebody else's `base_url` fails here, because that server answers `404` to a value it did not make. The server makes a fresh random `challenge` for every attempt, at least 32 characters from a cryptographic source.
+
+`base_url` rules. It is the server's own `base_url`, the same string `GET /v1/info` reports and the app hashes with. It must be `https`, name a host and not an IP address, carry no user name, password, query or fragment, not end in `/`, and be at most 200 characters. The host has at least two labels and is not under a name kept for local use (`localhost`, `.local`, `.internal`, `.lan`, `.home.arpa`). The port is 443, which is the default, or 8443. A path is allowed: segments of `[A-Za-z0-9._~-]`, none of them `.` or `..`. The host must resolve to public addresses only: the relay does not call a loopback, private, link-local or otherwise reserved address, and does not follow redirects. A `base_url` that breaks a rule is `400 {"error":"invalid base_url"}`. So a server that only answers on a home network or a private overlay cannot get a key this way.
+
+**One key per `base_url`.** A registration that passes the challenge for a `base_url` that already has a key gets a new key, and the old one answers `401` from then on. This is how a server that lost its database gets back on the relay. A server that gets `401` on a push throws its key away and registers again.
+
+The relay limits how often one client address may call this route, and how many challenges it confirms at once, and answers `429` over a limit. Its operator can close registration, and then every call answers `403 {"error":"registration closed"}`. An operator can also give out a registration secret: a call that carries it as `Authorization: Bearer <secret>` skips the challenge and the address rules, for a server the operator runs on a private network. The key it gets is tied to its `base_url` like any other, and needs `topic` on every push. Nothing checks that a holder of the secret answers at the `base_url` it names, so the secret is for the operator's own servers and is never handed to a stranger.
+
+A server that cannot get a key retries with growing gaps between attempts, never on every forward, and writes to its log what failed and what to check.
 
 ### 4.2 App → relay
 
 ```
 POST /relay/v1/devices                                  // registration. no auth
-  { "device_id":"dev_<uuid>", "platform":"ios"|"android", "push_token":"...", "app_version":"1.0.0" }
+  { "device_id":"dev_<uuid>", "platform":"ios"|"android"|"macos", "push_token":"...", "app_version":"1.0.0" }
 → 201 { "device_token":"dv_...",                        // returned ONCE, on first registration only
         "account_join_token":"aj_...",                  // create path only. absent on a join
         "account_id":"acc_...",
@@ -555,7 +703,7 @@ PATCH  /relay/v1/devices/{device_id}                     // re-register: new pus
 
 POST   /relay/v1/devices/{device_id}/subscriptions
   Authorization: Bearer dv_...
-  { "topic_hash":"sha256hex" }
+  { "topic_hash":"sha256hex" }                         // which hash: §3.1
 → 204
 
 DELETE /relay/v1/devices/{device_id}/subscriptions/{topic_hash}
@@ -592,11 +740,11 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 → 429 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
-**A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android has no Live Activity tokens.
+**A device has a list of tokens, not one.** `apns` and `fcm` are the alarm token, one per device, chosen by the device's platform: `apns` on `ios` and `macos`, `fcm` on `android`. `la_start` is the iOS push-to-start token for Live Activities, one per device. `la_update` is the update token of one running Live Activity, so there is one per `activity_id`. Android and macOS have no Live Activity tokens. A `POST` of `la_start` or `la_update` for a `macos` device answers `400 {"error":"invalid request"}`.
 
 `POST` is a replace, not an append. A second `POST` with the same `kind` and `activity_id` overwrites the stored token and its `incident_id`. Since `apns`, `fcm` and `la_start` have no `activity_id`, a device can only ever hold one of each.
 
-**Backward compatible.** `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still take `push_token` and still work unchanged. The server stores that token as kind `apns` on an iOS device and kind `fcm` on an Android one. An app that never calls `/tokens` behaves exactly as it did in 1.1.0 and gets alarm pushes with no Live Activity.
+**Backward compatible.** `POST /relay/v1/devices` and `PATCH /relay/v1/devices/{device_id}` still take `push_token` and still work unchanged. The server stores that token as kind `apns` on an iOS or macOS device and kind `fcm` on an Android one. An app that never calls `/tokens` behaves exactly as it did in 1.1.0 and gets alarm pushes with no Live Activity.
 
 `incident_id` on an `la_update` token is how the server finds the right activity when an incident changes state. Without it the server can still start activities but cannot update or end them, so send it.
 
@@ -608,7 +756,7 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 
 An account can also carry a human identity, which is what §3.7 is for. Signing up on a device writes an identity against the account that device already has, so no topic, token or subscription moves. Signing in on a device whose own account already holds content asks the person to merge or start fresh. Identities are Sign in with Apple and Google. There is no email or password on any tier.
 
-**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
+**Caps are per account, not per device.** `caps.devices` is how many handsets the account may register. `caps.critical_topics` and `caps.p4_daily` are counted across the whole account. `caps.p4_daily` counts heads-ups per UTC day. A heads-up is a priority-4 message, or a priority-5 message on a topic whose `critical` switch is off. Two things count: a heads-up published on the account's own server (§1.7), and a `p4`, or a `p5` with no `incident_id`, relayed to it (§4.1). Nothing else counts, so an alarm never does. The cap keeps the name `p4_daily`. A registration that would exceed `caps.devices` returns `429 {"error":"cap","cap":"devices"}` and issues no token.
 
 **`critical_topics` counts topics with the critical switch on.** Not subscriptions, not topics in total. It is enforced in two places, each answering `429 {"error":"cap","cap":"critical_topics"}`:
 
@@ -646,7 +794,7 @@ These are launch guesses, set by gut and adjusted from relay metrics after 30 da
 
 **Ring until acked has no cap field.** The app offers the "no limit" option when `tier != "free"` and disables it otherwise. The ring ceiling itself is the server's `max_ring_s` config, which the account holder owns.
 
-**Packs.** A pack is an add-on an account holds beside its tier. `packs` lists the packs the account holds at the moment of the response, and is `[]` when it holds none. `id` is the pack's name. `expires_at` is epoch seconds, or `null` when the pack has no end date. A client reads `packs` and never infers a pack from `tier`. It treats an `id` it does not know as absent. The only pack in 1.18.0 is `pro`, which the weekly check (§4.5) asks for.
+**Packs.** A pack is an add-on an account holds beside its tier. `packs` lists the packs the account holds at the moment of the response, and is `[]` when it holds none. `id` is the pack's name. `expires_at` is epoch seconds, or `null` when the pack has no end date. A client reads `packs` and never infers a pack from `tier`. It treats an `id` it does not know as absent. The only pack is `pro`. No route in this contract asks for it: the weekly check (§4.5) goes by the tier, and the app reads `packs` to unlock features that are built into the app.
 
 A pack belongs to the account, so every device on it holds the pack. Nothing in this contract says how a pack is bought, what it costs or how long it lasts. A pack can reach an account from a store purchase (§4.3), from a grant by the relay's operator, or from the relay's own configuration, and `packs` reports the result without saying which.
 
@@ -833,7 +981,15 @@ critalarm account delete acc_...              # by account id
 critalarm account delete --email <address>    # by the sign-in email
 ```
 
-It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing.
+It prints what it removed as counts. It does not check for a live incident, because the operator is acting on a written request. An unknown id or address exits non-zero and deletes nothing. It deletes cancel answers the same way `DELETE /v1/account` does.
+
+**Reading cancel answers.** The answers people send when they cancel (§3.9):
+
+```
+critalarm cancel-answers [--since YYYY-MM-DD]
+```
+
+It prints the number of answers, then a count per reason, busiest first, then every answer that has text, newest first: the UTC date, the reason, the platform, the app version and the text on one line inside JSON quotes. It prints no account id. `--since` keeps answers first stored on or after that UTC date. A bad date exits non-zero and prints the usage line.
 
 ### 4.5 Weekly check
 
@@ -842,14 +998,14 @@ PUT    /relay/v1/devices/{device_id}/check
   Authorization: Bearer dv_...
   { "enabled":true }
 → 200 { ...check }
-→ 403 {"error":"pack","pack":"pro"}                     // enabling without the pack
+→ 403 {"error":"tier","tier":"hosted"}                  // enabling on a tier that does not get the check
 
 GET    /relay/v1/devices/{device_id}/check
   Authorization: Bearer dv_...
 → 200 { "enabled":true,
         "state":"waiting"|"received"|"missed_once"|"missed_repeatedly"
                |"token_refused"|"no_token"|"off",
-        "reason":null|"pack"|"disabled",
+        "reason":null|"tier"|"disabled",
         "misses":0,
         "last_sent_at":1759800000, "last_received_at":1759800004,
         "next_due_at":1760404800, "notice_after":1761096000 }
@@ -873,9 +1029,13 @@ Once a week the relay sends an enrolled device a push that shows nothing (§5.4)
 
 All four routes take the device's own `dv_`, and each reaches that one device's data. Another device's token answers `404`, as on every device route, including another device on the same account.
 
-**What a counted receipt shows, and what it does not.** It shows that something holding this device's `dv_` received this round's push and reached the relay while the round was open. So the push token was live and the push provider accepted a push for it. It does not show that the app was woken in the background: the relay cannot see what state the app was in. It does not show that an alarm would ring. An alarm travels as an alert, at a higher priority, with a sound, and depends on notification permission and on settings the check never touches. It does not show that the user's server can reach the relay either: the relay sends the check straight to the phone, so for a phone on a self-hosted server that leg is not exercised at all. Only a real publish covers those, and `POST /v1/test` (§3.3) is one. A client must not present an answered check as proof that alarms work.
+**What a counted receipt shows, and what it does not.** It shows that something holding this device's `dv_` received this round's push and reached the relay while the round was open. So the push token was live and the push provider accepted a push for it. It does not show that the app was woken in the background: the relay cannot see what state the app was in. It does not show that an alarm would ring. An alarm travels as an alert, at a higher priority, with a sound, and depends on notification permission and on settings the check never touches. It does not show that a publish reaches the relay either: the relay starts the check itself and sends it straight to the phone, so nothing on the publishing side is exercised. Only a real publish covers those, and `POST /v1/test` (§3.3) is one. A client must not present an answered check as proof that alarms work.
 
-**Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account holds the `pro` pack (§4.2). `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
+**Enrolling.** A device is sent checks only after `PUT` with `"enabled":true`, and only while its account's tier is `hosted` (§4.2). `free` does not get the check. Neither does `relay`: it has the same caps as `hosted`, but it is not the Hosted plan. No pack is needed and no pack is enough: an account on `free` that holds `pro` gets no check. `PUT` with `"enabled":true` on any tier but `hosted` answers `403 {"error":"tier","tier":"hosted"}` and changes nothing, including for a device that is already enrolled. A client decides whether to offer the check from `tier` and never from `packs`. `"enabled":false` stops them and always answers `200`. A device that never calls this route is never sent a check. The first round opens within 24 hours of enrolling.
+
+**When the tier changes.** The relay reads the account's tier each time a push of a round comes due, and once more just before it sends. From the moment the account is not `hosted`, no check push is sent to its devices. The device stays enrolled: `GET .../check` answers `"enabled":true` with `state` `off` and `reason` `"tier"`, and `misses`, `last_sent_at` and `last_received_at` keep their values. A round that was open is not closed at that moment, and a receipt for it still counts. If the round has a push left to send, the relay closes it as `skipped` with `reason` `"tier"` when that push comes due. If it has none left, it closes as it would have anyway. While the account stays off `hosted`, each round that comes due is written as `skipped` with `reason` `"tier"` and nothing is sent. When the account is `hosted` again the device needs no new `PUT`: its rounds go on from the next one due, on the schedule it already had. The tier is the one §4.3 last wrote. A store read that fails lowers no tier, and a payment that is being retried is not an expiry, so neither stops a check.
+
+**A phone on a self-hosted server gets no weekly check.** The check goes by the tier of the phone's account on the relay, `hosted` is the only tier that gets it, and no plan is sold for a self-hosted server (§4.2). Holding the `pro` pack changes nothing. The relay cannot see which server a phone is connected to, so the app keeps its half of the rule: while it is connected to a self-hosted server it does not offer the check and does not send `"enabled":true`.
 
 **A round.** A round opens when the relay reaches the device, and at that moment the relay fixes the round's close time: 24 hours later, by the relay's clock. It is returned as `closes_at` and never changes. A round is up to three pushes: one when it opens, one 6 hours later and one 18 hours later. They carry the same `check_id` and an `attempt` of 1, 2 or 3. The first counted receipt ends the round and no further push is sent. After its first round each device has a fixed moment in the week, which the relay derives from the `device_id` to spread its load, and rounds are 7 days apart. The second round opens at the device's first fixed moment that is at least 3 days after the first round opened, so the gap between the first two rounds is 3 to 10 days. Two devices may have the same moment. `next_due_at` is when the next round is due.
 
@@ -896,7 +1056,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | `received` | a receipt reached the relay while the round was open |
 | `missed` | APNs or FCM accepted at least one push of the round, and it closed with no receipt |
 | `refused` | APNs or FCM refused the device's push token. No receipt was possible |
-| `skipped` | the round ended without an answer being owed: `reason` is `"pack"`, `"no_token"`, `"disabled"`, `"held"` or `"unsent"`. With the first three, the pack, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. `"unsent"` means the relay could not hand any push of the round to APNs or FCM, because the provider was failing or the relay was not running. Not counted as a miss |
+| `skipped` | the round ended without an answer being owed: `reason` is `"tier"`, `"no_token"`, `"disabled"`, `"held"` or `"unsent"`. With the first three, the `hosted` tier, the push token or the enrolment went away before the round could finish, and pushes may already have gone out (`attempts` says how many). `"held"` means every push of the round was held back because alarms were going to the device, so none was sent. `"unsent"` means the relay could not hand any push of the round to APNs or FCM, because the provider was failing or the relay was not running. Not counted as a miss. A round that a relay closed before 1.19.0 may carry `"pack"`, and it stays as written |
 
 **`state`.** It reports what happened to the last rounds and makes no claim about the phone.
 
@@ -908,9 +1068,11 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 | `missed_repeatedly` | the last two or more closed rounds were `missed` or `refused` |
 | `token_refused` | the last closed round was `refused`, and the one before it was not |
 | `no_token` | the relay holds no push token for the device |
-| `off` | not enrolled (`reason` `"disabled"`), or the account no longer holds the pack (`reason` `"pack"`) |
+| `off` | not enrolled (`reason` `"disabled"`), or enrolled on an account whose tier is not `hosted` (`reason` `"tier"`) |
 
 `misses` is how many closed rounds in a row were `missed` or `refused`. `skipped` rounds change nothing.
+
+**A `reason` a client does not know is no reason.** `off` is still off and `skipped` is still skipped, and the client shows nothing more for it. 1.18.0 sent `"pack"` where this version sends `"tier"`.
 
 **Fields with nothing to report are `null`.** `last_sent_at` and `last_received_at` are `null` until there is one. `next_due_at` and `notice_after` are `null` while `state` is `off`. When `misses` is already 2 or more, `notice_after` is the second at which the run of misses reached two, which is in the past.
 
@@ -924,7 +1086,7 @@ All four routes take the device's own `dv_`, and each reaches that one device's 
 
 **Checks and alarms.** Three things the relay does. It never delays, reorders or alters an alarm push because of a check. It does not start a check for a device within 30 minutes after APNs or FCM accepted an `open`, `repeat` or `reopen` for that device. An alarm push the provider refused or that failed holds nothing. And it sends a check with no collapse id or collapse key, asks APNs not to store it, and gives it at most 6 hours to live on FCM (§5.4). This contract makes no promise about what APNs or FCM do with a check and an alarm that reach them together. The 30 minutes apply to every push of a round, not only the first. A push still held when the round closes is never sent. A round in which every push was held ends as `skipped` with `reason` `"held"`: alarms were reaching the device the whole time, which says more than a check would.
 
-`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whether or not the account holds the pack today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
+`GET .../checks` returns the device's rounds, newest first. `limit` defaults to 20 and stops at 200. The relay keeps a round for 90 days, whatever the tier. The route answers whatever the account's tier is today. A round that is still open is in the list with `"result":null` and `"closed_at":null`.
 
 ---
 
@@ -965,6 +1127,28 @@ payload (relay_content: none):
 `relay_content: full` puts the real title/body in `alert` and drops `mutable-content`.
 
 Category `INCIDENT` registers one action: `ACK` ("I'm up"), which calls `POST /v1/incidents/{id}/ack`.
+
+**macOS gets the same alert.** A `macos` device's alarm pushes are this payload, byte for byte, to the same `apns-topic` (the bundle id the iPhone app uses). On a Mac the notification sound plays once and nothing in the payload changes that: the running Mac app plays the alarm itself when the push reaches it. No Live Activity push (§5.3) is ever sent to a `macos` device.
+
+**State kinds reach macOS as a background push.** When an incident is acknowledged, closed or expires, a `macos` device gets:
+
+```
+headers:
+  apns-push-type:   background
+  apns-priority:    5
+  apns-collapse-id: <incident_id>
+  apns-expiration:  <now + 60>
+
+payload:
+{
+  "aps": { "content-available": 1 },
+  "incident_id": "inc_9a8b7c",
+  "server": "https://alerts.example.com",
+  "kind": "ack"|"close"|"expire"
+}
+```
+
+It shows nothing and never rings. The Mac app stops any ringing for that incident and updates its menu-bar item. Apple may delay or drop a background push, so a Mac app that is ringing also reads the incident (§3.2) while it rings, and stops when the read says the incident is no longer open. An iPhone never gets this push: it hears state through the Live Activity update (§5.3).
 
 ### 5.2 FCM (Android)
 

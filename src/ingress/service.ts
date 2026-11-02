@@ -1,4 +1,6 @@
 import type { DeliveryEvent } from "../domain-events.js";
+import { CapError } from "../tier/devices.js";
+import { chargeP4 } from "../tier/p4-usage.js";
 import type { IngressDependencies, PublishInput, PublishResult, TopicRecord } from "./types.js";
 
 type StoredMessage = {
@@ -10,6 +12,16 @@ export class PublishService {
   constructor(private readonly deps: IngressDependencies) {}
 
   async publish(topic: TopicRecord, input: PublishInput): Promise<PublishResult> {
+    // api.md §1.7 and §4.2. On a relay or hosted server a heads-up counts
+    // against the account's caps.p4_daily, the same count a relayed heads-up
+    // uses. A heads-up is a priority-4 publish, or a priority-5 publish to a
+    // topic whose critical switch is off. Over the cap nothing is stored or
+    // sent. A self-hosted server has no caps. An alarm is never capped:
+    // priority 5 on a topic with the switch on, and priorities 1 to 3.
+    const headsUp = input.priority === 4 || (input.priority === 5 && !topic.critical);
+    if (headsUp && this.deps.mode !== "selfhosted" && !chargeP4(this.deps.db, this.deps.clock, topic.accountId)) {
+      throw new CapError("p4_daily");
+    }
     const title = input.title ?? topic.name;
     const result = input.priority === 5 && topic.critical
       ? this.publishCritical(topic, input, title)
@@ -24,8 +36,15 @@ export class PublishService {
       // What was missing is any way to find out why. A bad FCM_PRIVATE_KEY on
       // the dev server turned every publish into a bare "Internal Server
       // Error" with nothing in the container log to explain it.
+      //
+      // The dispatcher now catches a send that throws, so one bad device does
+      // not stop the others. When every send threw and nothing was delivered,
+      // that is still the case above, and it still answers 500.
       try {
-        await this.deps.dispatch(result.events);
+        const outcome = await this.deps.dispatch(result.events);
+        if (outcome !== undefined && (outcome.failed ?? 0) > 0 && outcome.delivered === 0) {
+          throw new Error(`every push failed (${outcome.failed})`);
+        }
       } catch (error) {
         console.error("dispatch_failed", {
           topic: topic.name,

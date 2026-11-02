@@ -3,6 +3,238 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.25.0 - 2026-10-29
+
+### Added
+
+- Device platform `macos` for the Crit Alarm app on the Mac (§4.2). Its
+  alarm token is kind `apns`, and `push_token` on registration and `PATCH`
+  is stored as `apns`.
+- Alarm pushes to a Mac are the iOS alert of §5.1, unchanged, to the same
+  bundle id.
+- State kinds (`ack`, `close`, `expire`) reach a Mac as an APNs background
+  push with `content-available` only (§5.1). An iPhone never gets it.
+- `platform: "macos"` is accepted on a cancel answer (§3.9).
+
+### Changed
+
+- A `macos` device holds no Live Activity tokens. `POST /tokens` with
+  `la_start` or `la_update` for one answers `400 {"error":"invalid request"}`.
+- Compatibility. No route was added or removed, and iOS and Android see no
+  change. A server built before 1.25.0 refuses `platform: "macos"` with
+  `400`, and the Mac app reads that answer as "server too old for the Mac".
+
+## 1.24.0 - 2026-10-28
+
+### Changed
+
+- A priority-5 message on a topic whose `critical` switch is off counts
+  against `caps.p4_daily`, the same as a priority 4. Both go out as a
+  heads-up with no incident. Until now only priority 4 counted.
+- On a `relay` or `hosted` server, such a publish over the cap answers
+  `429 {"error":"cap","cap":"p4_daily"}` and is neither stored nor sent, on
+  every publish route (§1.7).
+- `POST /relay/v1/push` treats a `p5` with no `incident_id` like a `p4`. It
+  goes only to the subscribed accounts still under their cap and charges
+  each of them one. The relay answers `429` only when every subscribed
+  account is at its cap (§4.1).
+- §4.2 says which messages count: a heads-up published on the account's own
+  server, and a `p4` or a `p5` with no `incident_id` relayed to it. An alarm
+  never counts. The cap keeps its name.
+- Compatibility. No route or field was added or removed. The app is
+  unaffected. A self-hosted server that sent more priority-5 heads-ups a day
+  than the cap allows now gets `429` past the cap where it used to get
+  `202`, and an integration that did the same on a hosted server gets `429`
+  where it used to get `200`.
+
+## 1.23.0 - 2026-10-28
+
+### Added
+
+- `POST /v1/account/cancel-reason` (§3.9). The answer to "What made you cancel?":
+  a reason from a list of six, an optional text of 500 characters at most, the
+  app version and the platform. `204` on success, then `400`, `401`, `403`,
+  `413`, `429` and `501`.
+- One answer per account per rolling 30 days, with no client key. The first call
+  in the window creates it and every later call in the window is a repeat. A
+  repeat never changes the reason, version or platform, may fill an empty text
+  once, and never replaces text. Every accepted call answers `204`.
+- Only an account that is on `hosted` now, or was ever moved to it (a trial
+  or a manual grant included), may send. Any other account answers
+  `403 {"error":"tier","tier":"hosted"}`.
+- A request limit of 30 calls per account per rolling hour, every call counted,
+  kept in memory by the server process and reset on restart.
+- `critalarm cancel-answers [--since YYYY-MM-DD]` (§4.4), for the operator to
+  read the answers.
+- A row for the route in the body limit table (§1.8): 8192 bytes, over it
+  `413 {"error":"request too large"}`. A row in the error table for
+  `invalid reason`, `text too long` and `request too large`.
+
+### Changed
+
+- The account erase (§3.7) and the operator erase (§4.4) also delete the
+  account's cancel answers, and those of every tombstone that points at it, in
+  the same transaction.
+- Only `hosted` takes the route. `selfhosted` and `relay` answer `501` before
+  any credential is checked, an exception to the credential rule at the top of
+  §3. `selfhosted` uses the body §3.7 uses. `relay` has no §3.7 precedent: §3.7
+  works in `relay` mode.
+- Compatibility. No route, field, header or push payload that exists changed.
+  An app built for 1.22.0 never calls the new route.
+
+## 1.22.0 - 2026-10-21
+
+### Added
+
+- Body limits per route, in a table in §1.8. A `Content-Length` over the
+  limit is refused without reading the body. The publish routes take 4096
+  bytes, `POST /v1/topics/{name}/send` 64 KiB, `POST /relay/v1/push`
+  64 KiB, `POST /relay/v1/servers` 4096 bytes, the RevenueCat webhook
+  256 KiB, and the sign-in surface and every other JSON route 16 KiB.
+- The server setting `behind-proxy` (`BEHIND_PROXY`) in §1.8: unset or
+  `off` reads the socket peer, `cloudflare` reads `CF-Connecting-IP`, and
+  `1` to `10` reads that many entries from the right of `X-Forwarded-For`.
+- §3.7 says when the sign-in surface treats a first sign-in with a
+  provider as an identity it already holds: the addresses match and the
+  provider marks its address as verified.
+
+### Changed
+
+- Every relay key needs `topic` on every push, a key issued before 1.20.0
+  included. A push without it answers `400 {"error":"invalid request"}`
+  (§4.1). The 1.20.0 summary notes that the exemption is gone.
+- A priority-4 publish on a `relay` or `hosted` server over
+  `caps.p4_daily` answers `429 {"error":"cap","cap":"p4_daily"}` and is
+  neither stored nor sent (§1.7). This holds on every publish route. A
+  `selfhosted` server counts nothing.
+- `POST /relay/v1/push` sends a `p4` only to the subscribed accounts still
+  under `caps.p4_daily` and charges only those. It answers `429` only when
+  every subscribed account is at its cap (§4.1).
+- `413` `41301` covers a `?m=` message, a title, tags and a click URL over
+  4096 bytes, as well as a body over 4096 bytes (§1.8).
+- `{"error":"invalid request"}` also covers a body over the route's limit
+  (§1.8).
+- An IPv6 client counts against a rate limit by its /64 (§1.8).
+- The sign-in surface links an Apple identity to an existing one by email
+  only when Apple marks the address as verified. Google already worked that
+  way. An unverified match answers `401` and issues no `identity_token`
+  (§3.7).
+- The `429` line of `POST /relay/v1/push` lists `p4_daily` only. The push
+  never answered `critical_topics` or `devices`.
+- Compatibility. No route or field was added or removed. The app is
+  unaffected. A server built for 1.20.0 or later already sends `topic` on
+  every push. A server built before 1.20.0 sends none, and the relay
+  refuses its pushes with `400` until it is upgraded. An integration that
+  sent more than `caps.p4_daily` priority-4 publishes a day to a hosted
+  server now gets `429` past the cap where it used to get `200`.
+
+## 1.21.0 - 2026-10-13
+
+### Added
+
+- `relay_name` on every topic object of a `selfhosted` server (§3.1): 32
+  random bytes as 43 characters of base64url, made by the server, readable
+  with a management credential only. Absent in `relay` and `hosted` mode.
+- Server setting `relay-plain-hash` (`RELAY_PLAIN_HASH`), `on` or `off`,
+  default `on` (§4.1).
+
+### Changed
+
+- The app subscribes a topic that has a `relay_name` as
+  `sha256(base_url + "/" + relay_name)`. A topic without one is subscribed
+  by name, as before (§3.1).
+- A self-hosted server pushes the hash made from `relay_name`, with
+  `relay_name` in the push's `topic` field. The relay's check is unchanged
+  and the relay does not see the topic's name on that push (§4.1).
+- While `relay-plain-hash` is `on`, the server also sends the push from
+  1.20.0, made from the topic's name, so an app from before this version
+  keeps getting alarms. Both pushes carry the same `message_id`.
+- Compatibility. The relay needs no change. An app from before 1.21.0
+  ignores `relay_name`. `relay` and `hosted` servers behave as in 1.20.0.
+
+## 1.20.0 - 2026-10-13
+
+### Added
+
+- `challenge` on `POST /relay/v1/servers` (§4.1). The relay calls
+  `GET {base_url}/v1/relay-challenge/{challenge}` and issues a key only when
+  the server answers with the same value.
+- `GET /v1/relay-challenge/{challenge}` on the server (§3.8), no auth. It
+  answers `200` for the value of the registration in flight and `404` for
+  anything else. The answer names the relay the value was made for, and a
+  relay issues a key only when that is one of its own configured host
+  names.
+- `topic` on `POST /relay/v1/push` (§4.1), the topic's name. The relay
+  checks it against `topic_hash` and the key's `base_url`, then drops it.
+- Errors `invalid base_url` (`400`), `challenge failed` (`422`),
+  `registration closed` (`403`) and `topic mismatch` (`403`) (§1.8, §4.1).
+- Rules for `base_url` at registration: `https`, a host name of two labels
+  or more, public addresses only, port 443 or 8443, no credentials, query,
+  fragment or trailing `/`, at most 200 characters (§4.1).
+
+### Changed
+
+- A relay key is no longer issued to anyone who asks. It is issued to a
+  server that proves it answers at its `base_url`, with no secret from the
+  relay's operator. The relay's code had refused strangers since the relay
+  was hardened, so 1.19.0 said "anonymously" and no relay did it.
+- A relay key pushes only topics of the server it was registered for. A
+  push whose `topic_hash` is not `sha256(base_url + "/" + topic)` answers
+  `403 {"error":"topic mismatch"}`.
+- One key per `base_url`. A new registration that passes the challenge
+  replaces the old key, which then answers `401`.
+- The relay sees a topic's name on every push. 1.19.0 sent it the hash
+  only. The relay does not store, log or forward the name.
+- Compatibility. The app sends and receives nothing new. A key issued
+  before 1.20.0 keeps working without `topic`. A 1.19.0 server that asks
+  for a new key without the operator's secret gets `400`, because it sends no `challenge`. A 1.20.0
+  server that pushes to a 1.19.0 relay is accepted: that relay ignores the
+  two new fields.
+
+## 1.19.0 - 2026-10-09
+
+### Added
+
+- `{"error":"tier","tier":"..."}` with `403` (§1.8). A route that needs a
+  tier the account is not on answers it, and `tier` names the tier needed.
+- `"tier"` as a `reason` on `GET .../check` and on a round (§4.5).
+- §4.5 says what happens when the tier changes. The device stays enrolled,
+  nothing is sent while the account is off `hosted`, each round that comes
+  due is written as `skipped`, and rounds go on with no new `PUT` when the
+  account is `hosted` again. A failed store read lowers no tier (§4.3), so
+  it stops no check.
+
+### Changed
+
+- The weekly check goes by the tier, not by the `pro` pack (§4.5). A device
+  is sent checks only while its account's tier is `hosted`. `free` and
+  `relay` do not get them. Holding `pro` no longer gets a device a check,
+  and a Hosted account needs no pack for one.
+- `PUT /relay/v1/devices/{device_id}/check` with `"enabled":true` on a tier
+  other than `hosted` answers `403 {"error":"tier","tier":"hosted"}`. It
+  answered `403 {"error":"pack","pack":"pro"}` in 1.18.0.
+- `reason` beside `"state":"off"`, and `reason` on a `skipped` round, say
+  `"tier"` where 1.18.0 said `"pack"`. A round closed before 1.19.0 keeps
+  `"pack"`. A client treats a `reason` it does not know as no reason.
+- A phone on a self-hosted server cannot get the weekly check (§4.5). No
+  plan is sold there, and the app does not offer the check or enrol while it
+  is connected to one.
+- The `pack` error stays in §1.8 for packs in general. No route answers it
+  in this version.
+- Compatibility with 1.18.0 clients. No route, field or push payload was
+  added or removed, and packs, the receipt route, the round list and the
+  check push (§5.4) are unchanged. An app built for 1.18.0 that enrols on a
+  `free` account holding `pro` gets a `403` with no `pack` field, reads it
+  as a switch that failed and changes nothing. It reads `"reason":"tier"` as
+  no reason, shows the check as switched off, and raises no notice about
+  missed checks, because `state` is `off`. That app offers the check only to
+  an account holding `pro`, so a Hosted account without `pro` is not offered
+  it until the app is built for 1.19.0.
+
+### Removed
+
+- `"pack"` as a `reason` the relay writes (§4.5).
+
 ## 1.18.0 - 2026-10-07
 
 ### Added

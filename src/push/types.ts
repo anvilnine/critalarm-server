@@ -1,6 +1,7 @@
 import type { KeyObject } from "node:crypto";
 import type { DeliveryEvent } from "../domain-events.js";
 import type { Clock } from "../incident/types.js";
+import type { Platform } from "../platform.js";
 
 // Which Apple push host a token belongs to. A Debug or Profile build of the
 // iOS app registers a sandbox token, a Release, TestFlight or App Store build
@@ -10,7 +11,7 @@ export type ApnsEnvironment = "sandbox" | "production";
 export interface PushDevice {
   id: string;
   accountId: string;
-  platform: "ios" | "android";
+  platform: Platform;
   pushToken: string;
   // The host that last rang this device, or absent when the server has not
   // learned it yet. Absent means start at the configured APNS_ENVIRONMENT.

@@ -54,3 +54,20 @@ describe("404s", () => {
     expect(await res.json()).toEqual({ error: "Not found" });
   });
 });
+
+// api.md §4.1, 1.20.0. Registration is mounted on a relay with no operator
+// secret set. The body here is empty, so the route answers 400 and makes no
+// outbound request.
+describe("relay registration", () => {
+  it("is mounted with no registration secret configured", async () => {
+    const res = await app.request("/relay/v1/servers", { method: "POST", body: "{}" }, testEnv);
+    expect(res.status).toBe(400);
+  });
+
+  it("is not mounted on a self-hosted server", async () => {
+    const db = openDatabase(":memory:");
+    migrate(db);
+    const selfhosted = createApp({ config: { mode: "selfhosted", baseUrl: "https://alerts.example.com", relayUrl: "https://relay.critalarm.app", relayContent: "none", listen: ":8080", port: 8080, dataDir: "/data", behindProxy: false }, db, clock: { now: () => 1 }, ids: { message: () => "m", incident: () => "i", timer: () => "t" }, dispatch: async () => {} });
+    expect((await selfhosted.request("/relay/v1/servers", { method: "POST", body: "{}" }, testEnv)).status).toBe(404);
+  });
+});
