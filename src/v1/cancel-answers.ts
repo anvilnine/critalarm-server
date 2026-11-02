@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { Hono, MiddlewareHandler } from "hono";
 import { readBytes } from "../body-limit.js";
 import type { Clock } from "../incident/types.js";
+import { RollingLimit } from "../rate-limit.js";
 import { platforms, type Platform } from "../platform.js";
 import { tierRequired } from "../tier/caps.js";
 import type { V1Env } from "./auth.js";
@@ -118,26 +119,6 @@ export function storeAnswer(db: Database.Database, clock: Clock, accountId: stri
   }).immediate();
 }
 
-// A rolling hour per account, kept in memory by this process: best effort, and
-// a restart clears it. Every call that reaches it counts, whatever its outcome
-// after; a call it refuses does not.
-function requestWindow(): (accountId: string, nowS: number) => boolean {
-  const calls = new Map<string, number[]>();
-  return (accountId, nowS) => {
-    if (calls.size > 1000) {
-      for (const [key, times] of calls) if (times.every((at) => at <= nowS - HOUR_S)) calls.delete(key);
-    }
-    const recent = (calls.get(accountId) ?? []).filter((at) => at > nowS - HOUR_S);
-    if (recent.length >= REQUESTS_PER_HOUR) {
-      calls.set(accountId, recent);
-      return false;
-    }
-    recent.push(nowS);
-    calls.set(accountId, recent);
-    return true;
-  };
-}
-
 type Deps = { db: Database.Database; clock: Clock; mode: "selfhosted" | "relay" | "hosted" };
 
 export function mountCancelAnswerRoute(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env>, deps: Deps): void {
@@ -152,11 +133,14 @@ export function mountCancelAnswerRoute(r: Hono<V1Env>, auth: MiddlewareHandler<V
   }
   // Step 2, the credential.
   r.use(path, auth);
-  const allow = requestWindow();
+  // A rolling hour per account, kept in memory by this process: best effort,
+  // and a restart clears it. Every call that reaches it counts, whatever its
+  // outcome after; a call it refuses does not.
+  const requests = new RollingLimit(deps.clock, REQUESTS_PER_HOUR, HOUR_S);
   r.post(path, async (c) => {
     const accountId = c.get("account").accountId;
     // Step 3, the request limit.
-    if (!allow(accountId, deps.clock.now())) return c.json({ error: "rate limited" }, 429);
+    if (!requests.allow(accountId)) return c.json({ error: "rate limited" }, 429);
     // Step 4, on hosted now or ever.
     if (!holdsOrHeldHosted(deps.db, accountId)) return tierRequired("hosted");
     // Step 5, the raw size. A declared Content-Length over the limit is refused

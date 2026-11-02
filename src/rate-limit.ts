@@ -1,11 +1,81 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
-import { rateLimiter } from "hono-rate-limiter";
-import type { Context, MiddlewareHandler } from "hono";
-import type { Bindings, Variables } from "./index.js";
+import type { Context, Env, Next } from "hono";
+import type { Clock } from "./incident/types.js";
 import { embeddedIpv4, ipv6Groups } from "./relay/address.js";
 
-type Ctx = { Bindings: Bindings; Variables: Variables };
+// The body of every 429 in the ntfy shape (api.md §1.8).
+export const RATE_LIMITED = { code: 42901, http: 429, error: "rate limited" } as const;
+
+// Every limit in the server is one of the two classes below, counted on the
+// injected clock and kept in memory. The server is one process, so a restart
+// clears them. The publish limiter and the account-creation limit key on the
+// client address (clientIp, clientKey); the refresh and cancel-reason limits
+// key on the account.
+
+// A rolling window per key. `allowed` only looks and `record` counts, so a
+// call that another limit turns away is not charged to this one. `allow` does
+// both. A refused call is never counted, so hammering a route does not push
+// the window out.
+export class RollingLimit {
+  private readonly hits = new Map<string, number[]>();
+  private sweptAt = 0;
+
+  constructor(private readonly clock: Clock, private readonly limit: number, private readonly windowS: number) {}
+
+  private live(key: string, now: number): number[] {
+    return (this.hits.get(key) ?? []).filter((at) => at > now - this.windowS);
+  }
+
+  allowed(key: string): boolean {
+    const now = this.clock.now();
+    // Drop idle keys once per window so the table follows the traffic.
+    if (now - this.sweptAt >= this.windowS) {
+      this.sweptAt = now;
+      for (const [other, times] of this.hits) if (!times.some((at) => at > now - this.windowS)) this.hits.delete(other);
+    }
+    return this.live(key, now).length < this.limit;
+  }
+
+  record(key: string): void {
+    const now = this.clock.now();
+    this.hits.set(key, [...this.live(key, now), now]);
+  }
+
+  // True when the call is allowed, and then it counts.
+  allow(key: string): boolean {
+    if (!this.allowed(key)) return false;
+    this.record(key);
+    return true;
+  }
+}
+
+// A count per key for the current UTC day. At 00:00 UTC every count starts
+// again from zero.
+export class DailyLimit {
+  private day = -1;
+  private readonly counts = new Map<string, number>();
+
+  constructor(private readonly clock: Clock, private readonly limit: number) {}
+
+  private roll(): void {
+    const day = Math.floor(this.clock.now() / 86_400);
+    if (day !== this.day) {
+      this.day = day;
+      this.counts.clear();
+    }
+  }
+
+  allowed(key: string): boolean {
+    this.roll();
+    return (this.counts.get(key) ?? 0) < this.limit;
+  }
+
+  record(key: string): void {
+    this.roll();
+    this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
+  }
+}
 
 // Who may say what the client's address is (BEHIND_PROXY, README
 // "Configuration"):
@@ -61,37 +131,22 @@ export function clientKey(address: string): string {
   return `h:${createHash("sha256").update(text).digest("hex").slice(0, 32)}`;
 }
 
-// 30 requests / 60s per IP by default, in-memory store. Each call builds its
-// own limiter (and its own counter store), so /check/* and /mcp rate-limit
-// independently, matching the original per-app Cloudflare limiters.
-//
-// The limiter is built on the first request rather than at import. Every call
-// site here runs at module scope (`routes.use(...)` at the top level), and the
-// default memory store starts a cleanup timer in its constructor. Workers
-// rejects a script that sets a timer in global scope, and it rejects it at
-// upload with "Disallowed operation called within global scope", so the whole
-// deploy fails rather than one route.
-//
-// Caveat on Workers: the counter lives in one isolate's memory, and Cloudflare
-// runs many isolates. The effective cap is therefore per isolate, not global,
-// which is looser than the same code on a single Node process. Cloudflare's
-// native Rate Limiting binding is the real fix. See STATUS.md.
+// The publish limiter: 30 requests per rolling 60 seconds per client address
+// by default (api.md §1.8). One instance is one bucket, so the routes that
+// share an instance share the window: POST /{topic}, POST /v1/topics/{name}/send
+// and POST /v1/test all take the instance createApp builds. Each call to
+// makeRateLimiter builds a bucket of its own.
+export type PublishLimiter = <E extends Env>(c: Context<E>, next: Next) => Promise<Response | void>;
+
 export function makeRateLimiter(
-  onLimit?: (c: Context<Ctx>) => Response | Promise<Response>,
   limit = 30,
   trust: ProxyTrust = false,
-): MiddlewareHandler<Ctx> {
-  let inner: MiddlewareHandler<Ctx> | undefined;
-
-  return (c, next) => {
-    inner ??= rateLimiter<Ctx>({
-      windowMs: 60_000,
-      limit,
-      standardHeaders: "draft-6",
-      // An IPv6 client counts by its /64, the same as the relay's own limits.
-      keyGenerator: (ctx) => clientKey(clientIp(ctx, trust)),
-      ...(onLimit ? { handler: (ctx) => onLimit(ctx) } : {}),
-    });
-    return inner(c, next);
+  clock: Clock = { now: () => Math.floor(Date.now() / 1000) },
+): PublishLimiter {
+  const window = new RollingLimit(clock, limit, 60);
+  return async (c, next) => {
+    // An IPv6 client counts by its /64, the same as the relay's own limits.
+    if (!window.allow(clientKey(clientIp(c, trust)))) return c.json(RATE_LIMITED, 429);
+    await next();
   };
 }

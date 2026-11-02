@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import type { DeliveryEvent, DispatchResult } from "../domain-events.js";
 import type { IncidentService } from "../incident/service.js";
 import type { Clock, IdGenerator } from "../incident/types.js";
-import type { ProxyTrust } from "../rate-limit.js";
+import type { ProxyTrust, PublishLimiter } from "../rate-limit.js";
 
 export interface PublishInput {
   topic: string;
@@ -54,6 +54,8 @@ export interface IngressDependencies {
   dispatch(events: readonly DeliveryEvent[]): Promise<DispatchResult | void>;
   mode?: "selfhosted" | "relay" | "hosted";
   publishLimit?: number;
+  // The publish bucket, when another router shares it. Absent builds one from publishLimit.
+  publishLimiter?: PublishLimiter;
   behindProxy?: ProxyTrust;
 }
 
