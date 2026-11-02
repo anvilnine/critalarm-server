@@ -151,6 +151,28 @@ describe("RevenueCat webhook", () => {
     expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
   });
 
+  it("lowers an account to relay when the store moves its own billing id from hosted to relay", async () => {
+    const { app, db } = setup();
+    await webhook(app, event({ entitlement_id: "crit_hosted", entitlement_ids: ["crit_hosted"] }));
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+
+    await webhook(app, event({ id: "downgrade", type: "PRODUCT_CHANGE", event_timestamp_ms: 2_000_000, expiration_at_ms: 3_000_000 }));
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "relay" });
+    expect(db.prepare("SELECT app_user_id, entitled_tier FROM account_billing_ids").all()).toEqual([{ app_user_id: "acc_1", entitled_tier: "relay" }]);
+  });
+
+  it("keeps a hand-set hosted account at hosted when its store-bought relay id is refunded", async () => {
+    const { app, db } = setup();
+    await webhook(app, event());
+    db.prepare("UPDATE accounts SET tier = 'hosted' WHERE id = 'acc_1'").run();
+
+    await webhook(app, event({ id: "refund", type: "CANCELLATION", event_timestamp_ms: 2_000_000, expiration_at_ms: 900_000 }));
+
+    expect(db.prepare("SELECT tier FROM accounts WHERE id = 'acc_1'").get()).toEqual({ tier: "hosted" });
+    expect(db.prepare("SELECT entitled_tier FROM account_billing_ids WHERE app_user_id = 'acc_1'").get()).toEqual({ entitled_tier: "free" });
+  });
+
   it("still raises an account set by hand when its billing id buys a higher tier", async () => {
     const { app, db } = setup();
     db.prepare("UPDATE accounts SET tier = 'relay' WHERE id = 'acc_1'").run();
