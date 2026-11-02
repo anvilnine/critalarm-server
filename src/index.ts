@@ -1,5 +1,6 @@
 import { ensureRelayNames } from "./v1/topics.js";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import type Database from "better-sqlite3";
 import type { Config } from "./config.js";
 import type { Clock, DeliveryEvent, IdGenerator } from "./incident/types.js";
@@ -43,6 +44,24 @@ export function createApp(deps: AppDependencies): Hono {
   // first request.
   if (deps.config.mode === "selfhosted") ensureRelayNames(deps.db);
   const app = new Hono();
+  // api.md 1.26.0. Every response carries nosniff, and HSTS when this server
+  // is addressed over https. Registered before any route so it wraps them all,
+  // the 404 and the 500 included.
+  const hsts = deps.config.baseUrl.startsWith("https://");
+  app.use("*", async (c, next) => {
+    await next();
+    c.header("X-Content-Type-Options", "nosniff");
+    if (hsts) c.header("Strict-Transport-Security", "max-age=31536000");
+  });
+  // api.md §1.1 error table: a fault nobody planned for answers
+  // 500 {"error":"internal error"}. The error goes to the log and never into
+  // the body. A route that threw an HTTPException chose its own answer, so it
+  // keeps it.
+  app.onError((error, c) => {
+    if (error instanceof HTTPException) return error.getResponse();
+    console.error("internal_error", error);
+    return c.json({ error: "internal error" }, 500);
+  });
   // api.md §1.8. One publish bucket for POST /{topic}, POST /v1/topics/{name}/send and POST /v1/test.
   const publishLimiter = makeRateLimiter(30, deps.config.behindProxy, deps.clock);
   const incidents = new IncidentService(deps.db, deps.clock, deps.ids);
