@@ -1,8 +1,8 @@
 import { ParseError, parseJsonPublish } from "../ingress/headers.js";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type Database from "better-sqlite3";
 import type { Config } from "../config.js";
-import { DEFAULT_INCIDENT_LIMIT, IncidentConflictError, IncidentService, MAX_INCIDENT_LIMIT } from "../incident/service.js";
+import { DEFAULT_INCIDENT_LIMIT, IncidentConflictError, IncidentNotFoundError, IncidentService, MAX_INCIDENT_LIMIT } from "../incident/service.js";
 import type { Clock, DeliveryEvent, IdGenerator, IncidentWithMessages } from "../incident/types.js";
 import { historyCutoff } from "../retention/window.js";
 import type { DispatchResult } from "../domain-events.js";
@@ -23,6 +23,10 @@ const MAX_SEND_BYTES = 65_536;
 type Deps={db:Database.Database;config:Config;clock:Clock;ids:IdGenerator;incidents:IncidentService;dispatch(events:readonly DeliveryEvent[]):Promise<DispatchResult|void>;identities?:IdentityResolver;revoke?:TokenRevoker;reconcileAccount?:(accountId:string)=>void;relayChallenge?:(value:string)=>boolean;publishLimiter?:PublishLimiter};
 function incidentView(i:IncidentWithMessages){return {id:i.id,topic:i.topic,state:i.state,opened_at:i.openedAt,acked_at:i.ackedAt,closed_at:i.closedAt,last_message_at:i.lastMessageAt,updated_at:i.updatedAt,messages:i.messages.map(m=>({id:m.id,time:m.createdAt,expires:m.createdAt+43200,event:"message",topic:i.topic,title:m.title,message:m.body,priority:m.priority,tags:m.tags,...(m.click===null?{}:{click:m.click}),...(m.markdown?{markdown:true}:{}),...(m.incidentId===null?{}:{incident_id:m.incidentId})}))};}
 function publishTopic(db:Database.Database,account:string,name:string):TopicRecord|undefined{return db.prepare("SELECT id, account_id AS accountId, name, base_url AS baseUrl, topic_hash AS topicHash, critical, repeat_interval_s AS repeatIntervalS, max_ring_s AS maxRingS, desk_timer_s AS deskTimerS, relay_content AS relayContent FROM topics WHERE account_id=? AND name=?").get(account,name) as TopicRecord|undefined;}
+// api.md §3.2. A wrong id or another account's incident is 404 and a wrong state
+// is 409. Anything else (a database fault, a dispatch that threw) is not the
+// caller's doing: it is rethrown so app.onError logs it and answers the JSON 500.
+function incidentFailure(c:Context,e:unknown):Response{if(e instanceof IncidentConflictError)return c.json({error:"incident state conflict"},409);if(e instanceof IncidentNotFoundError)return c.json({error:"not found"},404);throw e;}
 export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=requireDevice(deps.db,deps.config.mode ?? "hosted");const service=new PublishService({...deps,incidents:deps.incidents,mode:deps.config.mode ?? "hosted"});r.get("/v1/info",c=>c.json({name:"critalarm",version,base_url:deps.config.baseUrl,relay_url:deps.config.relayUrl,relay_content:deps.config.relayContent,mode:deps.config.mode ?? "hosted"}));
   // api.md §3.8. No auth: the relay holds no credential for this server yet.
   // It is registered before every other route and outside the auth prefixes. It
@@ -59,8 +63,8 @@ export function createV1Router(deps:Deps){const r=new Hono<V1Env>();const auth=r
     const cutoff=historyCutoff(deps.db,deps.clock,deps.config.mode ?? "hosted",accountId);
     return c.json(deps.incidents.list(accountId,{limit:limit===undefined?DEFAULT_INCIDENT_LIMIT:Math.min(Number(limit),MAX_INCIDENT_LIMIT),state:state as "open"|"acked"|"closed"|"expired"|undefined,topic:c.req.query("topic"),...(since===undefined?{}:{since:Number(since)}),...(cutoff===undefined?{}:{openedAfter:cutoff})}).map(incidentView))});
   r.get("/v1/incidents/:id",c=>{const i=deps.incidents.get(c.get("account").accountId,c.req.param("id"));return i===null?c.json({error:"not found"},404):c.json(incidentView(i))});
-  r.post("/v1/incidents/:id/ack",async c=>{try{const {incident:i,events}=deps.incidents.acknowledge(c.get("account").accountId,c.req.param("id"));const timer=deps.db.prepare("SELECT fire_at FROM timers WHERE incident_id=? AND kind='desk'").get(i.id) as {fire_at:number};await deps.dispatch(events);return c.json({...incidentView(deps.incidents.get(c.get("account").accountId,i.id)!),desk_timer_fires_at:timer.fire_at})}catch(e){return e instanceof IncidentConflictError?c.json({error:"incident state conflict"},409):c.json({error:"not found"},404)}});
-  r.post("/v1/incidents/:id/close",async c=>{try{const {incident:i,events}=deps.incidents.close(c.get("account").accountId,c.req.param("id"));await deps.dispatch(events);return c.json(incidentView(deps.incidents.get(c.get("account").accountId,i.id)!))}catch(e){return e instanceof IncidentConflictError?c.json({error:"incident state conflict"},409):c.json({error:"not found"},404)}});
+  r.post("/v1/incidents/:id/ack",async c=>{try{const {incident:i,events}=deps.incidents.acknowledge(c.get("account").accountId,c.req.param("id"));const timer=deps.db.prepare("SELECT fire_at FROM timers WHERE incident_id=? AND kind='desk'").get(i.id) as {fire_at:number};await deps.dispatch(events);return c.json({...incidentView(deps.incidents.get(c.get("account").accountId,i.id)!),desk_timer_fires_at:timer.fire_at})}catch(e){return incidentFailure(c,e)}});
+  r.post("/v1/incidents/:id/close",async c=>{try{const {incident:i,events}=deps.incidents.close(c.get("account").accountId,c.req.param("id"));await deps.dispatch(events);return c.json(incidentView(deps.incidents.get(c.get("account").accountId,i.id)!))}catch(e){return incidentFailure(c,e)}});
   r.post("/v1/topics/:name/send", async c => {
     const topic = publishTopic(deps.db, c.get("account").accountId, c.req.param("name"));
     if (topic === undefined) return c.json({ error: "not found" }, 404);
