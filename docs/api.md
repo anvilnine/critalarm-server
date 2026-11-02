@@ -532,7 +532,7 @@ An account created before 1.11.0 carries no join token at all, and this is the o
 
 Any device on the account may call it, the same way any device may delete a topic.
 
-Not rate limited, because nothing else in §3.7 is. `link`, `merge`, `switch` and the account delete all run bare; the limiter is wired into the publish path only. Minting in a loop costs one row update and hands out a token that immediately retires the one before it, so the damage is bounded. Putting a limiter on the §3.7 write routes is worth doing as one job covering all of them, not as a rule this route alone carries.
+Not rate limited, because nothing else in §3.7 is. `link`, `merge`, `switch` and the account delete all run bare; the limiters are on the publish routes (§1.8) and on account creation (§4.2) only. Minting in a loop costs one row update and hands out a token that immediately retires the one before it, so the damage is bounded. Putting a limiter on the §3.7 write routes is worth doing as one job covering all of them, not as a rule this route alone carries.
 
 ```
 DELETE /v1/account                                      // erase this device's account
@@ -700,6 +700,7 @@ POST /relay/v1/devices                                  // registration. no auth
         "tier":"free"|"relay"|"hosted",
         "caps":{ "devices":5, "critical_topics":2, "p4_daily":50, "history_days":7 },
         "packs":[ { "id":"pro", "expires_at":null } ] }
+→ 429 {"code":42901,"http":429,"error":"rate limited"}  // no bearer, over the account-creation limit
 
 PATCH  /relay/v1/devices/{device_id}                     // re-register: new push token, new app version
   Authorization: Bearer dv_...
