@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.26.0
+**Version:** 1.27.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.27.0** adds `topic` to the iOS alarm push (§5.1): the topic's name, the same string the alert body already shows on a `relay_content: none` push. The iPhone app reads it to pick the topic's own ring timers and its critical switch for the local alarm chain. Without it the chain fell back to the default timers and could not see a topic whose critical switch is off. Nothing else changes, and an app that ignores the key behaves as before.
 
 **1.26.0** writes down the fixes from the 2026-10-31 audit that a client can see. Four changes. First, `POST /v1/topics/{name}/send` (§3.5) and `POST /v1/test` (§3.3) count against the publish limit of §1.8, in the same window as `POST /{topic}`, and answer `429` `42901` over it. Second, `POST /relay/v1/devices` (§4.2) without a bearer, the call that creates an anonymous account, is limited to 20 per rolling 60 seconds and 200 per UTC day per client address, and answers `429` `42901` over either. A call with a `dv_` or an `aj_` is not counted. Third, an error the server did not expect answers `500 {"error":"internal error"}` as JSON, where it used to answer plain text. Fourth, every response carries `X-Content-Type-Options: nosniff`, and a server whose `BASE_URL` starts with `https://` also sends `Strict-Transport-Security: max-age=31536000`. No route or field is added. An app that already retries a `429` with backoff needs no change.
 
@@ -1120,11 +1122,14 @@ payload (relay_content: none):
     "category": "INCIDENT"
   },
   "incident_id": "inc_9a8b7c",
+  "topic": "prod",
   "server": "https://alerts.example.com",
   "kind": "open",
   "ring_until": 1757464200
 }
 ```
+
+**`topic` is the topic's name, on every alarm push.** It is the same name the alert body shows on a `relay_content: none` push, so it reveals nothing the notification does not. The app uses it to look up that topic's ring timers and critical switch when it schedules the local alarm chain. Added in 1.27.0; an older server leaves it out, and the app then falls back to its default timers.
 
 **`ring_until` is the last second the phone may ring for this incident on its own.** It is `opened_at + max_ring_s` in epoch seconds, and a `reopen` moves it to the new `opened_at`. It is on `open`, `repeat`, `reopen`, and on a `p5` that joins an open incident; a `p5` on a topic whose switch is off has no incident and carries `null`. A phone that silences an alarm without acknowledging it re-arms locally until this second and no later; after it, only a fresh push from the server may ring. Server time; a client allows a small margin and stops at whichever comes first of `ring_until` and an `expire`.
 

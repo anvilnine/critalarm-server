@@ -3,6 +3,16 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.27.0 - 2026-11-02
+
+### Added
+
+- The iOS alarm push (§5.1) carries `topic`, the topic's name. The iPhone
+  app's local alarm chain reads it to use that topic's ring timers and
+  critical switch. The name was already in the alert body of a
+  `relay_content: none` push, so no new data leaves the server.
+- Compatibility. An app that ignores the key behaves as before.
+
 ## 1.26.0 - 2026-11-02
 
 ### Changed
