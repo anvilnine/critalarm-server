@@ -3,6 +3,22 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.26.0 - 2026-11-02
+
+### Changed
+
+- `POST /v1/topics/{name}/send` (§3.5) and `POST /v1/test` (§3.3) count
+  against the publish limit (§1.8), in the same window as `POST /{topic}`,
+  and answer `429` `42901` over it.
+- `POST /relay/v1/devices` without a bearer is limited to 20 per rolling
+  60 seconds and 200 per UTC day per client address, answering `429`
+  `42901` over either (§4.2). Calls with `dv_` or `aj_` are not counted.
+- An unexpected fault answers `500 {"error":"internal error"}` as JSON.
+- Every response carries `X-Content-Type-Options: nosniff`. A server with
+  an `https://` `BASE_URL` also sends `Strict-Transport-Security:
+  max-age=31536000`.
+- Compatibility. No route or field was added or removed.
+
 ## 1.25.0 - 2026-10-29
 
 ### Added

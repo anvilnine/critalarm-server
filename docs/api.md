@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.25.0
+**Version:** 1.26.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.26.0** writes down the fixes from the 2026-10-31 audit that a client can see. Four changes. First, `POST /v1/topics/{name}/send` (§3.5) and `POST /v1/test` (§3.3) count against the publish limit of §1.8, in the same window as `POST /{topic}`, and answer `429` `42901` over it. Second, `POST /relay/v1/devices` (§4.2) without a bearer, the call that creates an anonymous account, is limited to 20 per rolling 60 seconds and 200 per UTC day per client address, and answers `429` `42901` over either. A call with a `dv_` or an `aj_` is not counted. Third, an error the server did not expect answers `500 {"error":"internal error"}` as JSON, where it used to answer plain text. Fourth, every response carries `X-Content-Type-Options: nosniff`, and a server whose `BASE_URL` starts with `https://` also sends `Strict-Transport-Security: max-age=31536000`. No route or field is added. An app that already retries a `429` with backoff needs no change.
 
 **1.25.0** adds a third device platform, `macos`, for the Crit Alarm app on the Mac (§4.2). A Mac registers like an iPhone: its alarm token is kind `apns` and its alarm pushes are the iOS alert of §5.1, sent to the same bundle id. A Mac holds no Live Activity tokens, and `POST /tokens` with `la_start` or `la_update` from a Mac answers `400 {"error":"invalid request"}`. A Mac also gets the state kinds (`ack`, `close`, `expire`) as a background push (§5.1), because nothing else tells a running Mac app to stop ringing when the incident is handled on another device. A Mac counts against `caps.devices` like any device, can enrol in the weekly check (§4.5, sent as the APNs check of §5.4), and may send `platform: "macos"` with a cancel answer (§3.9). No route is added. A server built before 1.25.0 refuses `platform: "macos"` with `400 {"error":"invalid request"}`. `version` in `GET /v1/info` (§3.4) is the server binary's version, not this contract's, so a Mac app cannot tell an old server in advance: it treats that `400` on registration as "this server is too old for the Mac app" and says so.
 
@@ -176,7 +178,7 @@ ntfy's shape:
 {"code":42901,"http":429,"error":"rate limited"}
 ```
 
-Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute.
+Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute. `POST /v1/topics/{name}/send` (§3.5) and `POST /v1/test` (§3.3) count in the same window, so 30 calls across all three publish routes is the limit.
 
 **Which IP.** The address a rate limit counts is the one that opened the connection, unless the server setting `behind-proxy` (`BEHIND_PROXY`) says who may report the client's address instead:
 
@@ -220,6 +222,7 @@ Errors outside ntfy's shape carry a plain `{"error":"..."}` and no numeric code.
 | `{"error":"registration closed"}` | `403` from relay registration when the relay's operator has closed it (§4.1) |
 | `{"error":"topic mismatch"}` | `403` from a relay push whose `topic_hash` is not the hash of `topic` under the key's `base_url` (§4.1) |
 | `{"error":"invalid reason"}`, `{"error":"text too long"}`, `{"error":"request too large"}` | `400` or `413` from the cancel reason route (§3.9) |
+| `{"error":"internal error"}` | `500` from a fault the server did not expect. Safe to retry with backoff |
 
 ---
 
@@ -393,7 +396,7 @@ POST /v1/test?topic=prod
 → 200 { "incident_id": "..." }
 ```
 
-Publishes a priority-5 message titled `Crit Alarm test` to the topic through the normal path. Exists so "Ring me now" is a single call. Requires the topic to be `critical: true`; otherwise `409 {"error":"topic is not critical"}`.
+Publishes a priority-5 message titled `Crit Alarm test` to the topic through the normal path. Exists so "Ring me now" is a single call. Requires the topic to be `critical: true`; otherwise `409 {"error":"topic is not critical"}`. Counts against the publish limit (§1.8) and answers `429 {"code":42901,"http":429,"error":"rate limited"}` over it.
 
 ### 3.4 Server info
 
@@ -421,6 +424,8 @@ Publishes to the topic through the same path as §1, so every §1.7 priority rul
 `title`, `priority` and `tags` are optional. `message` is required. `priority` defaults to `3`. Values and meanings are §1.3's.
 
 **Why this exists.** A topic token is shown once, on creation, and then goes out to a monitoring tool. The dashboard and the app never hold one, so without this route they cannot send to a topic they own. This route takes the management credential instead, which the app already has.
+
+Counts against the publish limit (§1.8), in the same window as `POST /{topic}`, and answers `429 {"code":42901,"http":429,"error":"rate limited"}` over it.
 
 Same scoping as the rest of §3: a topic the credential does not own answers `404`. A topic name that exists but is out of scope is indistinguishable from one that does not exist.
 
@@ -751,6 +756,8 @@ POST   /relay/v1/packs/refresh                          // ask the relay to read
 **Three secrets, three jobs.** `tk_` (§1.2) is a publish token. It goes to Uptime Kuma, a cron job, a CI pipeline, anywhere outside the user's control, and it can only publish to one topic. `dv_` is the device's own secret. It manages topics, subscriptions and incidents, and it never leaves the app. Never send `dv_` to an alerting source and never publish with it.
 
 `aj_` is the account join token. It is minted when an account is created, returned once alongside `device_token`, re-minted on demand by `POST /v1/account/join-token` (§3.7), and it authorises one thing: attaching a new device to that account. It is account-scoped, so revoking it touches no device and removing a device breaks no future join. It is not `account_id`, which is returned on every registration and is not a secret. It never publishes and it never manages a topic.
+
+**Creating an account is rate limited.** A `POST /relay/v1/devices` with no `Authorization` header is limited to 20 calls per rolling 60 seconds and 200 per UTC day for one client address (§1.8 says which address). Over either answers `429 {"code":42901,"http":429,"error":"rate limited"}` and creates nothing. The limits are wide because phones on one mobile network often share an address. A call that carries a `dv_` or an `aj_` is not counted.
 
 **Accounts.** Registration with an unknown `device_id` creates an anonymous account and links the device to it. The account is the owner of topics, subscriptions, caps and billing; the device is one of possibly several handsets attached to it. PRD §6.9 requires many devices per account before teams ship, and PRD §7 caps the *number of devices*, which only an account can count.
 
