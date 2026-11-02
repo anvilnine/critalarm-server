@@ -38,6 +38,23 @@ describe("RollingLimit", () => {
   });
 });
 
+describe("RollingLimit memory", () => {
+  it("sweeps idle keys once the table is over its size, before the next window sweep is due", () => {
+    const clock = new FakeClock(1_000);
+    const limit = new RollingLimit(clock, 1, 60, 3);
+    const table = (limit as unknown as { hits: Map<string, number[]> }).hits;
+    limit.allow("first"); // the window sweep runs here, at 1_000
+    clock.value = 1_030;
+    for (const key of ["a", "b", "c", "d"]) limit.allow(key);
+    clock.value = 1_060; // "first" has left the window and goes; a..d are still live
+    limit.allowed("x");
+    expect(table.size).toBe(4);
+    clock.value = 1_091; // a..d have left the window; the next window sweep is not due until 1_120
+    limit.allowed("x");
+    expect(table.size).toBe(0);
+  });
+});
+
 describe("DailyLimit", () => {
   const MIDNIGHT = 20_000 * 86_400;
 
@@ -73,5 +90,23 @@ describe("publish limiter", () => {
     expect((await server.request("/")).status).toBe(429);
     clock.value = 1_060;
     expect((await server.request("/")).status).toBe(200);
+  });
+});
+
+describe("DailyLimit table cap", () => {
+  const MIDNIGHT = 20_000 * 86_400;
+
+  it("refuses a new key when the table is full, keeps known keys counting, and empties at midnight", () => {
+    const clock = new FakeClock(MIDNIGHT + 10);
+    const limit = new DailyLimit(clock, 2, 3);
+    for (const key of ["a", "b", "c"]) { expect(limit.allowed(key)).toBe(true); limit.record(key); }
+    expect(limit.allowed("d")).toBe(false);
+    // A known key still counts up to its own limit.
+    expect(limit.allowed("a")).toBe(true);
+    limit.record("a");
+    expect(limit.allowed("a")).toBe(false);
+    expect(limit.allowed("d")).toBe(false);
+    clock.value = MIDNIGHT + 86_400;
+    expect(limit.allowed("d")).toBe(true);
   });
 });

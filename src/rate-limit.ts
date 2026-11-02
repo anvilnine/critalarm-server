@@ -21,7 +21,7 @@ export class RollingLimit {
   private readonly hits = new Map<string, number[]>();
   private sweptAt = 0;
 
-  constructor(private readonly clock: Clock, private readonly limit: number, private readonly windowS: number) {}
+  constructor(private readonly clock: Clock, private readonly limit: number, private readonly windowS: number, private readonly sweepAbove = 10_000) {}
 
   private live(key: string, now: number): number[] {
     return (this.hits.get(key) ?? []).filter((at) => at > now - this.windowS);
@@ -29,8 +29,10 @@ export class RollingLimit {
 
   allowed(key: string): boolean {
     const now = this.clock.now();
-    // Drop idle keys once per window so the table follows the traffic.
-    if (now - this.sweptAt >= this.windowS) {
+    // Drop idle keys once per window so the table follows the traffic, and
+    // again (at most once a second) while the table holds more than
+    // `sweepAbove` keys, so a flood of addresses cannot grow it for a window.
+    if (now - this.sweptAt >= this.windowS || (this.hits.size > this.sweepAbove && now !== this.sweptAt)) {
       this.sweptAt = now;
       for (const [other, times] of this.hits) if (!times.some((at) => at > now - this.windowS)) this.hits.delete(other);
     }
@@ -51,12 +53,15 @@ export class RollingLimit {
 }
 
 // A count per key for the current UTC day. At 00:00 UTC every count starts
-// again from zero.
+// again from zero. The table holds at most `maxKeys` keys (100_000): once it is
+// full a new key is refused and a known key keeps its count, so a flood of
+// addresses cannot grow memory, and the limit fails closed for new addresses
+// until midnight.
 export class DailyLimit {
   private day = -1;
   private readonly counts = new Map<string, number>();
 
-  constructor(private readonly clock: Clock, private readonly limit: number) {}
+  constructor(private readonly clock: Clock, private readonly limit: number, private readonly maxKeys = 100_000) {}
 
   private roll(): void {
     const day = Math.floor(this.clock.now() / 86_400);
@@ -68,7 +73,9 @@ export class DailyLimit {
 
   allowed(key: string): boolean {
     this.roll();
-    return (this.counts.get(key) ?? 0) < this.limit;
+    const count = this.counts.get(key);
+    if (count === undefined) return this.counts.size < this.maxKeys;
+    return count < this.limit;
   }
 
   record(key: string): void {
