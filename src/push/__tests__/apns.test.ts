@@ -108,6 +108,7 @@ describe("ApnsSender", () => {
         category: "INCIDENT",
       },
       incident_id: "inc_1",
+      topic: "prod",
       server: "https://alerts.example.com",
       ring_until: 1_060,
       kind: "open",
@@ -186,6 +187,7 @@ describe("ApnsSender", () => {
           "mutable-content": 1,
           category: "INCIDENT",
         },
+        topic: "prod",
         server: "https://alerts.example.com",
         kind: "p4",
       },
@@ -197,6 +199,7 @@ describe("ApnsSender", () => {
           category: "INCIDENT",
         },
         incident_id: "inc_1",
+        topic: "prod",
         server: "https://alerts.example.com",
         kind: "p5",
         ring_until: 1_060,
@@ -330,6 +333,73 @@ describe("ApnsSender", () => {
 
     expect(result).toEqual({ status: 400, stale: false, apnsEnvironment: "sandbox" });
     expect(transport.sent).toHaveLength(1);
+  });
+
+  // api.md §5.1, 1.27.0. The iPhone's local alarm chain picks the topic's ring
+  // timers and critical switch by this name. Without it the chain used the
+  // defaults and missed a topic whose critical switch is off.
+  it("names the topic on every alarm push, whatever relay_content says", async () => {
+    const transport = replies(200);
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport: () => transport,
+    });
+
+    const cases: Partial<DeliveryEvent>[] = [
+      { kind: "open" },
+      { kind: "repeat" },
+      { kind: "reopen" },
+      // A p5 that joins an open incident.
+      { kind: "p5" },
+    ];
+    for (const relayContent of ["none", "full"] as const) {
+      for (const overrides of cases) {
+        await sender.send(device, event({ ...overrides, topic: "db-prod", relayContent }));
+      }
+    }
+
+    expect(transport.sent).toHaveLength(8);
+    for (const sent of transport.sent) {
+      const body = jsonBody(sent);
+      expect(body.topic).toBe("db-prod");
+      expect(body.incident_id).toBe("inc_1");
+    }
+    expect(transport.sent.map((sent) => jsonBody(sent).kind)).toEqual(["open", "repeat", "reopen", "p5", "open", "repeat", "reopen", "p5"]);
+  });
+
+  it("keeps the topic on a full-content push next to the real title and body", async () => {
+    const transport = replies(200);
+    const sender = new ApnsSender({
+      teamId: "team_1",
+      keyId: "key_1",
+      privateKey,
+      bundleId: "app.critalarm",
+      environment: "production",
+      clock: { now: () => 1_000 },
+      transport: () => transport,
+    });
+
+    await sender.send(device, event({ kind: "repeat", relayContent: "full" }));
+
+    expect(jsonBody(transport.sent[0]!)).toEqual({
+      aps: {
+        alert: { title: "Database", body: "db01 is down" },
+        sound: "alarm.caf",
+        "interruption-level": "time-sensitive",
+        "content-available": 1,
+        category: "INCIDENT",
+      },
+      incident_id: "inc_1",
+      topic: "prod",
+      server: "https://alerts.example.com",
+      kind: "repeat",
+      ring_until: 1_060,
+    });
   });
 
   it("closes its transport on shutdown", () => {

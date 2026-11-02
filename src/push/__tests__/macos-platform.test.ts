@@ -79,8 +79,9 @@ const alertHeaders = (collapseId: string, expiration: string): [string, string][
   ["content-type", "application/json"],
 ];
 
-// The iOS wire as it was before 1.25.0, written out by hand. A Mac must get
-// exactly these bytes, and an iPhone must keep getting them.
+// The iOS wire as it was before 1.25.0, written out by hand, plus the topic
+// name that 1.27.0 added to every alarm push. A Mac must get exactly these
+// bytes, and an iPhone must keep getting them.
 const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; headers: [string, string][]; body: string } }[] = [
   {
     name: "open on a critical topic",
@@ -88,7 +89,7 @@ const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; hea
     wire: {
       path: "/3/device/aaaa0001",
       headers: alertHeaders("inc_1", "1060"),
-      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","server":"https://alerts.example.com","kind":"open","ring_until":1060}',
+      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","topic":"prod","server":"https://alerts.example.com","kind":"open","ring_until":1060}',
     },
   },
   {
@@ -97,7 +98,7 @@ const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; hea
     wire: {
       path: "/3/device/aaaa0001",
       headers: alertHeaders("inc_1", "1060"),
-      body: '{"aps":{"alert":{"title":"Database","body":"db01 is down"},"interruption-level":"time-sensitive","category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","server":"https://alerts.example.com","kind":"repeat","ring_until":1060}',
+      body: '{"aps":{"alert":{"title":"Database","body":"db01 is down"},"interruption-level":"time-sensitive","category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","topic":"prod","server":"https://alerts.example.com","kind":"repeat","ring_until":1060}',
     },
   },
   {
@@ -106,7 +107,7 @@ const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; hea
     wire: {
       path: "/3/device/aaaa0001",
       headers: alertHeaders("inc_1", "1060"),
-      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","server":"https://alerts.example.com","kind":"reopen","ring_until":1200}',
+      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT","sound":"alarm.caf","content-available":1},"incident_id":"inc_1","topic":"prod","server":"https://alerts.example.com","kind":"reopen","ring_until":1200}',
     },
   },
   {
@@ -115,7 +116,7 @@ const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; hea
     wire: {
       path: "/3/device/aaaa0001",
       headers: alertHeaders("m_4", "1300"),
-      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT"},"server":"https://alerts.example.com","kind":"p4"}',
+      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT"},"topic":"prod","server":"https://alerts.example.com","kind":"p4"}',
     },
   },
   {
@@ -124,7 +125,7 @@ const iosGolden: { name: string; event: DeliveryEvent; wire: { path: string; hea
     wire: {
       path: "/3/device/aaaa0001",
       headers: alertHeaders("m_5", "1060"),
-      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT"},"server":"https://alerts.example.com","kind":"p5"}',
+      body: '{"aps":{"alert":{"title":"Crit Alarm","body":"Critical alert on prod — open to see details"},"interruption-level":"time-sensitive","mutable-content":1,"category":"INCIDENT"},"topic":"prod","server":"https://alerts.example.com","kind":"p5"}',
     },
   },
 ];

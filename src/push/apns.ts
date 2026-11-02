@@ -360,6 +360,10 @@ function apnsPayload(event: DeliveryEvent): Record<string, unknown> {
   return {
     aps,
     ...(event.incidentId === null ? {} : { incident_id: event.incidentId }),
+    // api.md §5.1, 1.27.0. The phone's local alarm chain looks up the topic's
+    // ring timers and critical switch by this name. It is on every alarm
+    // push, whatever relay_content says: the none alert body already shows it.
+    topic: event.topic,
     server: event.server,
     kind: event.kind,
     // api.md §5.1. The phone re-arms a silenced alarm up to this second and no
