@@ -53,7 +53,7 @@ export function createApp(deps: AppDependencies): Hono {
     c.header("X-Content-Type-Options", "nosniff");
     if (hsts) c.header("Strict-Transport-Security", "max-age=31536000");
   });
-  // api.md §1.1 error table: a fault nobody planned for answers
+  // api.md §1.8 error table: a fault nobody planned for answers
   // 500 {"error":"internal error"}. The error goes to the log and never into
   // the body. A route that threw an HTTPException chose its own answer, so it
   // keeps it.
