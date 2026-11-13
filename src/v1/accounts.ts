@@ -61,7 +61,7 @@ export type DeleteOutcome =
 // accounts.merged_into points a tombstone at the account that survived it, so a
 // credential that still names the old one resolves forward. The hop count is
 // bounded because a cycle here would hang a request.
-function liveAccount(db: Database.Database, accountId: string): string {
+export function liveAccount(db: Database.Database, accountId: string): string {
   let current = accountId;
   for (let hop = 0; hop < 8; hop += 1) {
     const row = db.prepare("SELECT merged_into FROM accounts WHERE id = ?").get(current) as { merged_into: string | null } | undefined;
