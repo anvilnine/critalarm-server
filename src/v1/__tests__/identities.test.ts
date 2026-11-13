@@ -108,19 +108,19 @@ function publish(app: App, topic: string, token: string) {
 }
 
 describe("rule 1, proof on link", () => {
-  it("the takeover fails: a new identity and no proof_token on a claimed account answers 403 and writes nothing", async () => {
+  it("the takeover fails: a new identity and no proof_token on a claimed account answers 409 and writes nothing", async () => {
     const { app, db } = setup();
     seedUser(db, "usr_owner", { session: "sess_owner" });
     seedUser(db, "usr_thief", { session: "sess_thief" });
     onAccount(db, "usr_owner", "a", 1);
 
     const response = await link(app, "dv_a", { identity_token: "sess_thief", intent: "link" });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "proof required" });
     expect(db.prepare("SELECT user_id, account_id, linked_at FROM account_identities").all()).toEqual([{ user_id: "usr_owner", account_id: "a", linked_at: 1 }]);
   });
 
-  it("the repoint fails: an empty claimed account, an identity that has another account, no proof, 403 and both accounts unchanged", async () => {
+  it("the repoint fails: an empty claimed account, an identity that has another account, no proof, 409 and both accounts unchanged", async () => {
     const { app, db } = setup();
     seedUser(db, "usr_owner", { session: "sess_owner" });
     seedUser(db, "usr_thief", { session: "sess_thief" });
@@ -129,7 +129,7 @@ describe("rule 1, proof on link", () => {
     onAccount(db, "usr_thief", "b", 2);
 
     const response = await link(app, "dv_a", { identity_token: "sess_thief", intent: "link" });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "proof required" });
     expect(identitiesOn(db, "a")).toEqual(["usr_owner"]);
     expect(identitiesOn(db, "b")).toEqual(["usr_thief"]);
@@ -138,7 +138,7 @@ describe("rule 1, proof on link", () => {
     expect(db.prepare("SELECT id, account_id FROM devices ORDER BY id").all()).toEqual([{ id: "da", account_id: "a" }, { id: "db", account_id: "b" }]);
   });
 
-  it("answers 403 for a proof_token that is invalid, expired, or of an identity not on the account", async () => {
+  it("answers 409 for a proof_token that is invalid, expired, or of an identity not on the account", async () => {
     const { app, db } = setup();
     seedUser(db, "usr_owner", { session: "sess_owner" });
     seedSession(db, "usr_owner", "sess_owner_old", 10, "2000-01-01T00:00:00.000Z");
@@ -150,7 +150,7 @@ describe("rule 1, proof on link", () => {
     // The identity being added cannot vouch for itself either.
     for (const proof of ["nope", "", "sess_owner_old", "sess_other", "sess_new", 42]) {
       const response = await link(app, "dv_a", { identity_token: "sess_new", intent: "link", proof_token: proof });
-      expect([proof, response.status]).toEqual([proof, 403]);
+      expect([proof, response.status]).toEqual([proof, 409]);
       expect([proof, await response.json()]).toEqual([proof, { error: "proof required" }]);
     }
     expect(identitiesOn(db, "a")).toEqual(["usr_owner"]);

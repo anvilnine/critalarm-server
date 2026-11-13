@@ -46,7 +46,7 @@ export const deleteSchema = z.object({ identity_token: z.string().min(1).optiona
 export type LinkOutcome =
   | { status: 200; body: { account_id: string; outcome: "claimed" | "attached" | "linked" | "already_linked" } }
   | { status: 401; body: { error: "unauthorized" } }
-  | { status: 403; body: { error: "proof required" } }
+  | { status: 409; body: { error: "proof required" } }
   | { status: 409; body: { error: "cap"; cap: "identities" } }
   | { status: 409; body: { error: "choose"; into_account: string; topics: number; incidents: number } }
   | { status: 409; body: { error: "account has another identity" } }
@@ -183,10 +183,13 @@ export function linkIdentity(db: Database.Database, clock: Clock, identities: Id
   // of an identity already on this account. It runs before rows 2 to 6, and
   // so before row 4 can repoint this account's identities onto the new
   // identity's account. An account holding no identity has nothing to prove
-  // against. 403, not 401: an app treats 401 as a dead session and signs out.
+  // against. 409, not 401 or 403, for apps built before 1.28.0: they treat 401
+  // as a dead session and sign out, and do not expect 403 here, so the add
+  // would hang. An unknown 409 they already show as an add that did not go
+  // through.
   if (intent === "link" && holders.length > 0) {
     const proof = proofToken === undefined ? null : identities.resolve(proofToken);
-    if (proof === null || !holders.includes(proof.userId)) return { status: 403, body: { error: "proof required" } };
+    if (proof === null || !holders.includes(proof.userId)) return { status: 409, body: { error: "proof required" } };
   }
 
   if (target === undefined) {
