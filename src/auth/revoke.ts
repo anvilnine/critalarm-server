@@ -17,8 +17,12 @@ import { appleProvider } from "./better-auth.js";
 export const APPLE_REVOKE_URL = "https://appleid.apple.com/auth/revoke";
 export const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
+// `only` names one provider sign-in, a row id of better-auth's `account` table.
+// Removing one way to sign in (api.md §3.7) revokes that row and leaves the
+// identity's other provider alone. Without it every row of the user goes, which
+// is what the account delete wants.
 export interface TokenRevoker {
-  revoke(userId: string): Promise<void>;
+  revoke(userId: string, only?: string): Promise<void>;
 }
 
 // What a server with no sign-in configured gets. There is nothing to revoke,
@@ -54,10 +58,10 @@ export function providerTokenRevoker(db: Database.Database, auth: AuthConfig | u
   const apple = auth.apple === undefined ? undefined : appleProvider(auth.apple, clock);
   const call = fetchImpl ?? ((request: Request) => fetch(request));
   return {
-    async revoke(userId: string): Promise<void> {
-      const rows = db
-        .prepare('SELECT "providerId" AS providerId, "refreshToken" AS refreshToken, "accessToken" AS accessToken FROM "account" WHERE "userId" = ?')
-        .all(userId) as ProviderRow[];
+    async revoke(userId: string, only?: string): Promise<void> {
+      const rows = (only === undefined
+        ? db.prepare('SELECT "providerId" AS providerId, "refreshToken" AS refreshToken, "accessToken" AS accessToken FROM "account" WHERE "userId" = ?').all(userId)
+        : db.prepare('SELECT "providerId" AS providerId, "refreshToken" AS refreshToken, "accessToken" AS accessToken FROM "account" WHERE "userId" = ? AND "id" = ?').all(userId, only)) as ProviderRow[];
       for (const row of rows) {
         // Apple wants the refresh token. The access token is the fallback for a
         // row written before the person ever came back, which has no refresh
