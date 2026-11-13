@@ -119,6 +119,20 @@ describe("provider token revocation", () => {
     warn.mockRestore();
   });
 
+  // Removing one way to sign in (api.md §3.7) revokes that provider's tokens
+  // and leaves the other provider of the same identity signed in.
+  it("revokes one provider sign-in only when it is named", async () => {
+    const db = setup();
+    addProvider(db, "oa_apple", "apple", "rt_apple");
+    addProvider(db, "oa_google", "google", "rt_google");
+    const { calls, fetchImpl } = recorder();
+
+    await providerTokenRevoker(db, authWithApple(), CLOCK, fetchImpl).revoke("usr_1", "oa_google");
+
+    expect(calls.map((call) => call.url)).toEqual([GOOGLE_REVOKE_URL]);
+    expect(calls[0]!.body.get("token")).toBe("rt_google");
+  });
+
   it("does nothing at all when sign-in is not configured", async () => {
     const db = setup();
     addProvider(db, "oa_apple", "apple", "rt_apple");

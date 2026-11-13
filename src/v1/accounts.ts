@@ -12,6 +12,7 @@ import { sweepDeviceIntoTopics, sweepTopicIntoDevices } from "../tier/subscripti
 import type { Tier } from "../tier/types.js";
 import type { V1Env } from "./auth.js";
 import { jsonBody, textBody } from "../body-limit.js";
+import { mountIdentityRoutes } from "./identities.js";
 
 // api.md §3.7. Signing in does not create an account. Registration already made
 // one (§4.2) and it has owned topics, devices and billing ever since. These
@@ -22,10 +23,18 @@ import { jsonBody, textBody } from "../body-limit.js";
 // (api.md §3.7). Absent means "sign_in", so a client that never sends it
 // behaves exactly as it did in 1.12.0. Any other value fails the parse and
 // answers 400, which is why this is an enum and not a string.
+//
+// `proof_token` is read under "link" only, and "sign_in" never reads it, so it
+// is not typed here: a sign_in carrying a proof_token of any shape answers
+// exactly as one without it. Under "link" anything but a string is no proof.
 export const linkSchema = z.object({
   identity_token: z.string().min(1),
   intent: z.enum(["sign_in", "link"]).optional(),
+  proof_token: z.unknown().optional(),
 });
+
+// api.md §3.7. An account holds at most this many identities.
+export const MAX_IDENTITIES = 6;
 
 export type LinkIntent = "sign_in" | "link";
 export const switchSchema = z.object({ identity_token: z.string().min(1), into_account: z.string().min(1) });
@@ -37,6 +46,8 @@ export const deleteSchema = z.object({ identity_token: z.string().min(1).optiona
 export type LinkOutcome =
   | { status: 200; body: { account_id: string; outcome: "claimed" | "attached" | "linked" | "already_linked" } }
   | { status: 401; body: { error: "unauthorized" } }
+  | { status: 403; body: { error: "proof required" } }
+  | { status: 409; body: { error: "cap"; cap: "identities" } }
   | { status: 409; body: { error: "choose"; into_account: string; topics: number; incidents: number } }
   | { status: 409; body: { error: "account has another identity" } }
   | { status: 409; body: { error: "identity has another account" } };
@@ -61,7 +72,7 @@ export type DeleteOutcome =
 // accounts.merged_into points a tombstone at the account that survived it, so a
 // credential that still names the old one resolves forward. The hop count is
 // bounded because a cycle here would hang a request.
-function liveAccount(db: Database.Database, accountId: string): string {
+export function liveAccount(db: Database.Database, accountId: string): string {
   let current = accountId;
   for (let hop = 0; hop < 8; hop += 1) {
     const row = db.prepare("SELECT merged_into FROM accounts WHERE id = ?").get(current) as { merged_into: string | null } | undefined;
@@ -80,7 +91,7 @@ function identityAccount(db: Database.Database, userId: string): string | undefi
 // account_identities.account_id (migration 15), so a person who signed in with
 // Google on an Android handset and Apple on an iPhone has two rows here and both
 // point at this account.
-function accountIdentities(db: Database.Database, accountId: string): string[] {
+export function accountIdentities(db: Database.Database, accountId: string): string[] {
   const rows = db.prepare("SELECT user_id FROM account_identities WHERE account_id = ?").all(accountId) as { user_id: string }[];
   return rows.map((row) => row.user_id);
 }
@@ -152,7 +163,7 @@ function revokeTopicTokens(db: Database.Database, accountId: string): void {
 // opposite things: a person adding their second provider, or a second person
 // signing in on a borrowed handset. The server cannot tell them apart, so the
 // app says which it meant in `intent`.
-export function linkIdentity(db: Database.Database, clock: Clock, identities: IdentityResolver, sourceAccount: string, identityToken: string, intent: LinkIntent = "sign_in"): LinkOutcome {
+export function linkIdentity(db: Database.Database, clock: Clock, identities: IdentityResolver, sourceAccount: string, identityToken: string, intent: LinkIntent = "sign_in", proofToken?: string): LinkOutcome {
   const identity = identities.resolve(identityToken);
   if (identity === null) return { status: 401, body: { error: "unauthorized" } };
   const source = liveAccount(db, sourceAccount);
@@ -160,19 +171,35 @@ export function linkIdentity(db: Database.Database, clock: Clock, identities: Id
 
   // Row 7. The identity already points at this very account, under either
   // intent. Checked first, so a retry after a dropped reply lands here and
-  // never on one of the refusals below.
+  // never on one of the refusals below. It changes nothing, so it needs no
+  // proof.
   if (target === source) return { status: 200, body: { account_id: source, outcome: "already_linked" } };
+
+  const holders = accountIdentities(db, source);
+
+  // Adding needs proof (api.md §3.7, 1.28.0). An added identity can do
+  // everything the first one can, account delete included, so a device token
+  // alone must not be enough to add one. proof_token has to be a live session
+  // of an identity already on this account. It runs before rows 2 to 6, and
+  // so before row 4 can repoint this account's identities onto the new
+  // identity's account. An account holding no identity has nothing to prove
+  // against. 403, not 401: an app treats 401 as a dead session and signs out.
+  if (intent === "link" && holders.length > 0) {
+    const proof = proofToken === undefined ? null : identities.resolve(proofToken);
+    if (proof === null || !holders.includes(proof.userId)) return { status: 403, body: { error: "proof required" } };
+  }
 
   if (target === undefined) {
     // Rows 1 to 3. The identity is new, so nothing of it exists to collide
     // with and nothing moves whichever way this goes.
-    const holders = accountIdentities(db, source);
     // Row 2. The shared handset. api.md §3.7 requires 409 here and forbids
     // letting a constraint decide it at 500, so it is checked before anything
     // is written.
     if (holders.length > 0 && intent === "sign_in") {
       return { status: 409, body: { error: "account has another identity" } };
     }
+    // Row 3 adds one identity to the account, and 6 is the most it holds.
+    if (holders.length >= MAX_IDENTITIES) return { status: 409, body: { error: "cap", cap: "identities" } };
     // Rows 1 and 3. One row, pointing at the account this device already has.
     // `linked` is the account picking up a second way to sign in; `claimed` is
     // its first.
@@ -194,6 +221,15 @@ export function linkIdentity(db: Database.Database, clock: Clock, identities: Id
   if (content.topics === 0 && content.incidents === 0) {
     // Row 4. Nothing to decide, under either intent: the device's account
     // holds nothing, so the handset joins the identity's account.
+    //
+    // tombstone() carries this account's identities across, so under a proven
+    // `link` the joined account ends up holding both sets. That is a link
+    // giving an account more identities, and the cap applies to it. Under
+    // `sign_in` this account holds none (the shared handset was refused
+    // above), so the count cannot grow.
+    if (holders.length > 0 && holders.length + accountIdentities(db, target).length > MAX_IDENTITIES) {
+      return { status: 409, body: { error: "cap", cap: "identities" } };
+    }
     db.transaction(() => {
       moveDevices(db, source, target);
       tombstone(db, source, target);
@@ -394,7 +430,7 @@ export function mergeAccounts(db: Database.Database, clock: Clock, identities: I
 // account itself and every tombstone whose merged_into chain ends at it. A
 // tombstone still owns rows (a switch leaves its topics behind), so leaving one
 // would leave a dead tenant holding topics nobody can reach.
-function accountFamily(db: Database.Database, accountId: string): string[] {
+export function accountFamily(db: Database.Database, accountId: string): string[] {
   const family = [accountId];
   for (let hop = 0; hop < 8; hop += 1) {
     const marks = family.map(() => "?").join(", ");
@@ -485,7 +521,7 @@ export function findAccount(db: Database.Database, given: { id: string } | { ema
 // Only an `open` incident blocks. An `acked` one does not: nothing is ringing,
 // and a person must never be stuck unable to leave. The tombstones are searched
 // too, because their topics can still be publishing.
-function openIncident(db: Database.Database, family: string[]): string | undefined {
+export function openIncident(db: Database.Database, family: string[]): string | undefined {
   const marks = family.map(() => "?").join(", ");
   const row = db
     .prepare(`SELECT id FROM incidents WHERE state = 'open' AND topic_id IN (SELECT id FROM topics WHERE account_id IN (${marks})) LIMIT 1`)
@@ -555,6 +591,8 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
     refuse("/v1/account/switch");
     refuse("/v1/account/join-token");
     r.delete("/v1/account", (c) => c.json({ error: "not supported in selfhosted mode" }, 501));
+    r.get("/v1/account/identities", (c) => c.json({ error: "not supported in selfhosted mode" }, 501));
+    r.delete("/v1/account/identities/:id", (c) => c.json({ error: "not supported in selfhosted mode" }, 501));
     return;
   }
 
@@ -563,13 +601,18 @@ export function mountAccountRoutes(r: Hono<V1Env>, auth: MiddlewareHandler<V1Env
   r.use("/v1/account/switch", auth);
   r.use("/v1/account/join-token", auth);
   r.use("/v1/account", auth);
+  r.use("/v1/account/identities", auth);
+  r.use("/v1/account/identities/*", auth);
+  mountIdentityRoutes(r, { db: deps.db, clock: deps.clock, identities: deps.identities, revoke: deps.revoke });
 
   r.post("/v1/account/link", async (c) => {
     let body: unknown;
     try { body = await jsonBody(c.req.raw); } catch { return c.json({ error: "invalid request" }, 400); }
     const parsed = linkSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid request" }, 400);
-    const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, parsed.data.intent ?? "sign_in");
+    const intent = parsed.data.intent ?? "sign_in";
+    const proof = intent === "link" && typeof parsed.data.proof_token === "string" ? parsed.data.proof_token : undefined;
+    const result = linkIdentity(deps.db, deps.clock, deps.identities, c.get("account").accountId, parsed.data.identity_token, intent, proof);
     return c.json(result.body, result.status);
   });
 
