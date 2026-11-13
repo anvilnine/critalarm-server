@@ -1,6 +1,7 @@
 import type { DeliveryEvent } from "../domain-events.js";
 import { CapError } from "../tier/devices.js";
 import { chargeP4 } from "../tier/p4-usage.js";
+import { accountHasDevice } from "./auth.js";
 import type { IngressDependencies, PublishInput, PublishResult, TopicRecord } from "./types.js";
 
 type StoredMessage = {
@@ -8,10 +9,27 @@ type StoredMessage = {
   createdAt: number;
 };
 
+// api.md §1.8, "A topic nobody can hear". The routes answer it with
+// 410 {"code":41001,"http":410,"error":"account is gone"}.
+export class AccountGoneError extends Error {
+  constructor() {
+    super("account is gone");
+  }
+}
+
 export class PublishService {
   constructor(private readonly deps: IngressDependencies) {}
 
   async publish(topic: TopicRecord, input: PublishInput): Promise<PublishResult> {
+    // api.md §1.8. A hosted server refuses a publish to a topic whose account
+    // has no device left, because nobody would be woken. It runs after the
+    // token and the request are checked and before anything is written, the
+    // heads-up count included. Only an explicit hosted mode takes it: an absent
+    // mode is read as relay elsewhere (index.ts), and selfhosted and relay hold
+    // no devices to count.
+    if (this.deps.mode === "hosted" && !accountHasDevice(this.deps.db, topic.accountId)) {
+      throw new AccountGoneError();
+    }
     // api.md §1.7 and §4.2. On a relay or hosted server a heads-up counts
     // against the account's caps.p4_daily, the same count a relayed heads-up
     // uses. A heads-up is a priority-4 publish, or a priority-5 publish to a
