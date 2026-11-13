@@ -126,7 +126,8 @@ function sessionOf(identities: IdentityResolver, token: string): { userId: strin
 // middleware before any of this.
 export async function removeIdentity(db: Database.Database, clock: Clock, identities: IdentityResolver, revoker: TokenRevoker, sourceAccount: string, identityToken: string | undefined, id: string): Promise<RemoveOutcome> {
   const account = liveAccount(db, sourceAccount);
-  const session = identityToken === undefined || identityToken === "" ? null : sessionOf(identities, identityToken);
+  if (identityToken === undefined || identityToken === "") return { status: 401, body: { error: "unauthorized" } };
+  const session = sessionOf(identities, identityToken);
   if (session === null || !accountIdentities(db, account).includes(session.userId)) return { status: 401, body: { error: "unauthorized" } };
   // A session whose age cannot be read is not known to be recent.
   if (session.createdAt === null || clock.now() - session.createdAt > RECENT_SIGN_IN_SECONDS) {
@@ -149,16 +150,20 @@ export async function removeIdentity(db: Database.Database, clock: Clock, identi
   db.transaction(() => {
     // The provider sign-in, which holds the provider tokens.
     db.prepare('DELETE FROM "account" WHERE "id" = ?').run(target.rowId);
-    // Every session of the identity (api.md §3.7). A session does not record
-    // which provider made it, so one made with the removed provider cannot be
-    // told apart from the rest.
-    db.prepare('DELETE FROM "session" WHERE "userId" = ?').run(target.userId);
     const left = (db.prepare('SELECT COUNT(*) AS count FROM "account" WHERE "userId" = ?').get(target.userId) as { count: number }).count;
     if (left === 0) {
-      // No way to sign in is left, so the identity itself goes. "user" has no
-      // foreign key from account_identities, so both rows are removed here.
+      // No way to sign in is left, so the identity itself goes, with every
+      // session it has (the "user" row cascades them), the asking one
+      // included if it was this identity's. "user" has no foreign key from
+      // account_identities, so both rows are removed here.
       db.prepare("DELETE FROM account_identities WHERE user_id = ?").run(target.userId);
       db.prepare('DELETE FROM "user" WHERE "id" = ?').run(target.userId);
+    } else {
+      // The identity keeps another provider sign-in. Every session of it goes
+      // except the one that asked (api.md §3.7): a session does not record
+      // which provider made it, so one made through the removed sign-in must
+      // not outlive it, while the fresh session that asked stays signed in.
+      db.prepare('DELETE FROM "session" WHERE "userId" = ? AND "token" <> ?').run(target.userId, identityToken);
     }
   })();
   return { status: 204 };

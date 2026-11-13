@@ -393,23 +393,59 @@ describe("rule 5, DELETE /v1/account/identities/{identity_id}", () => {
     expect(identitiesOn(db, "a")).toEqual(["usr_1"]);
   });
 
-  it("removes one provider of an identity that holds Apple and Google, and keeps the identity", async () => {
+  it("removing one of two provider sign-ins keeps the asking session and ends the identity's other sessions", async () => {
     const { app, db } = setup();
     seedUser(db, "usr_1", { email: "zed@gmail.com", session: "sess_1" });
+    seedSession(db, "usr_1", "sess_2", 5000);
     seedProvider(db, "oa_g", "usr_1", "google");
     seedProvider(db, "oa_a", "usr_1", "apple");
     onAccount(db, "usr_1", "a", 1);
-    const rows = await rowsOf(app, "dv_a", "sess_1");
-    const google = rows.find((row) => row.provider === "google")!;
+    const google = (await rowsOf(app, "dv_a", "sess_1")).find((row) => row.provider === "google")!;
 
     const response = await remove(app, "dv_a", google.id, { identity_token: "sess_1" });
     expect(response.status).toBe(204);
     expect(identitiesOn(db, "a")).toEqual(["usr_1"]);
     expect(count(db, 'SELECT COUNT(*) AS count FROM "user" WHERE id = ?', "usr_1")).toBe(1);
     expect(db.prepare('SELECT id FROM "account"').all()).toEqual([{ id: "oa_a" }]);
-    // api.md §3.7: every session of the identity goes with the provider sign-in.
-    expect(count(db, 'SELECT COUNT(*) AS count FROM "session" WHERE "userId" = ?', "usr_1")).toBe(0);
-    expect((await rowsOf(app, "dv_a")).map((row) => row.provider)).toEqual(["apple"]);
+    // The asking session still resolves: it lists with the address and current.
+    expect((await rowsOf(app, "dv_a", "sess_1")).map((row) => [row.provider, row.email, row.current])).toEqual([["apple", "zed@gmail.com", true]]);
+    expect(db.prepare('SELECT token FROM "session" ORDER BY token').all()).toEqual([{ token: "sess_1" }]);
+  });
+
+  it("removing an identity's last provider sign-in with its own session ends every session of it, the asking one included", async () => {
+    const { app, db } = setup();
+    seedUser(db, "usr_u", { email: "u@gmail.com", session: "sess_u" });
+    seedSession(db, "usr_u", "sess_u2", 5000);
+    seedUser(db, "usr_v", { email: "v@icloud.com", session: "sess_v" });
+    seedProvider(db, "oa_u", "usr_u", "google");
+    seedProvider(db, "oa_v", "usr_v", "apple");
+    onAccount(db, "usr_u", "a", 1);
+    onAccount(db, "usr_v", "a", 2);
+    const id = (await rowsOf(app, "dv_a", "sess_u")).find((row) => row.email === "u@gmail.com")!.id;
+
+    expect((await remove(app, "dv_a", id, { identity_token: "sess_u" })).status).toBe(204);
+    expect(count(db, 'SELECT COUNT(*) AS count FROM "session" WHERE "userId" = ?', "usr_u")).toBe(0);
+    expect(count(db, "SELECT COUNT(*) AS count FROM account_identities WHERE user_id = ?", "usr_u")).toBe(0);
+    expect(count(db, 'SELECT COUNT(*) AS count FROM "user" WHERE id = ?', "usr_u")).toBe(0);
+    expect(identitiesOn(db, "a")).toEqual(["usr_v"]);
+  });
+
+  it("removing another identity's last provider sign-in keeps every session of the asking identity", async () => {
+    const { app, db } = setup();
+    seedUser(db, "usr_u", { email: "u@gmail.com", session: "sess_u" });
+    seedSession(db, "usr_u", "sess_u2", 5000);
+    seedUser(db, "usr_v", { email: "v@icloud.com", session: "sess_v" });
+    seedSession(db, "usr_v", "sess_v2", 5000);
+    seedProvider(db, "oa_u", "usr_u", "google");
+    seedProvider(db, "oa_v", "usr_v", "apple");
+    onAccount(db, "usr_u", "a", 1);
+    onAccount(db, "usr_v", "a", 2);
+    const id = (await rowsOf(app, "dv_a", "sess_v")).find((row) => row.email === "u@gmail.com")!.id;
+
+    expect((await remove(app, "dv_a", id, { identity_token: "sess_v" })).status).toBe(204);
+    expect(count(db, 'SELECT COUNT(*) AS count FROM "session" WHERE "userId" = ?', "usr_u")).toBe(0);
+    expect(db.prepare('SELECT token FROM "session" WHERE "userId" = ? ORDER BY token').all("usr_v")).toEqual([{ token: "sess_v" }, { token: "sess_v2" }]);
+    expect(identitiesOn(db, "a")).toEqual(["usr_v"]);
   });
 
   it("leaves topics, topic tokens, devices, billing ids and packs untouched, and the removed identity can no longer delete the account", async () => {
