@@ -3,6 +3,36 @@
 Versions here are the API contract's versions (`docs/api.md`), not the server
 binary's. The binary's version is in `package.json`.
 
+## 1.28.0 - 2026-11-13
+
+### Security
+
+- `POST /v1/account/link` with `intent: "link"` on an account that already
+  holds an identity needs `proof_token`, a live session of an identity
+  already on that account, and answers `403 {"error":"proof required"}`
+  without one (§3.7). The device token alone used to be enough to add an
+  identity to a signed-in account.
+
+### Added
+
+- `GET /v1/account/identities` lists the ways to sign in to the device's
+  account, with a masked `email_hint` for a device token alone and the full
+  `email` when a session of the account is sent in `X-Identity-Token`.
+- `DELETE /v1/account/identities/{identity_id}` removes one way to sign in.
+  It needs a session created in the last 300 seconds and never removes the
+  last identity.
+- An account holds at most 6 identities, and may hold more than one of the
+  same provider.
+
+### Changed
+
+- In `hosted` mode a publish to a topic whose account has no device answers
+  `410` `41001` and opens no incident (§1.8). It used to answer `200` and
+  ring nobody. Tokens are not revoked.
+- Compatibility. An app built before 1.28.0 cannot add a second provider
+  and shows its ordinary failure message. Every other account route is
+  unchanged.
+
 ## 1.27.0 - 2026-11-02
 
 ### Added

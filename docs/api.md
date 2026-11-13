@@ -1,7 +1,9 @@
 # Crit Alarm Server: API Contract
 
-**Version:** 1.27.0
+**Version:** 1.28.0
 **Status:** draft, 2026-09-23. Lives in `critalarm-server/docs/api.md`. The app's client code and tests pin to this file. Changes here are versioned changes.
+
+**1.28.0** closes a way in to a signed-in account and lets a person see and manage how they sign in (§3.7, §1.8). Four changes. First, `POST /v1/account/link` with `intent: "link"` on an account that already holds an identity needs `proof_token`, a live session of an identity already on that account, and answers `403 {"error":"proof required"}` without one. Until now the device token alone was enough, so anyone holding an unlocked handset could add their own Apple or Google identity to its account. Second, `GET /v1/account/identities` lists the ways to sign in that the device's account holds. Third, `DELETE /v1/account/identities/{identity_id}` removes one, never the last. Fourth, in `hosted` mode a publish to a topic whose account has no device left answers `410` `41001` and opens no incident, where it used to answer `200` and ring nobody. An app built before 1.28.0 can no longer add a second provider and shows its ordinary failure message. Signing in, merging, switching and deleting are unchanged.
 
 **1.27.0** adds `topic` to the iOS alarm push (§5.1): the topic's name, the same string the alert body already shows on a `relay_content: none` push. The iPhone app reads it to pick the topic's own ring timers and its critical switch for the local alarm chain. Without it the chain fell back to the default timers and could not see a topic whose critical switch is off. Nothing else changes, and an app that ignores the key behaves as before.
 
@@ -178,7 +180,10 @@ ntfy's shape:
 {"code":40901,"http":409,"error":"topic already exists"}
 {"code":41301,"http":413,"error":"message too large"}      // body, ?m=, title, tags or click > 4096 bytes
 {"code":42901,"http":429,"error":"rate limited"}
+{"code":41001,"http":410,"error":"account is gone"}        // hosted mode only, see below
 ```
+
+**A topic nobody can hear.** In `hosted` mode, a publish to a topic whose account has no device answers `410` `41001`. No message is stored and no incident opens. Publishing authenticates on the topic token alone, so before 1.28.0 a topic whose last device had left its account kept answering `200` and woke nobody. The tokens are not revoked: the moment a device is on the account again, by signing in or by a join code, the same token publishes as before. `selfhosted` and `relay` modes never answer this, because a self-hosted server holds no devices to count. The poll routes (§2) are unaffected.
 
 Publishing is rate limited to **30 requests per 60 seconds per IP**. Over that returns `42901`. The window is a rolling 60 seconds, not a clock minute. `POST /v1/topics/{name}/send` (§3.5) and `POST /v1/test` (§3.3) count in the same window, so 30 calls across all three publish routes is the limit.
 
@@ -457,8 +462,9 @@ For a load balancer, a container health check, or an uptime probe. It touches no
 ```
 POST /v1/account/link                                   // sign up, sign in, or add a provider
   Authorization: Bearer dv_...
-  { "identity_token":"...", "intent":"sign_in" }        // intent is "sign_in" or "link".
+  { "identity_token":"...", "intent":"sign_in",         // intent is "sign_in" or "link".
                                                         // Absent means "sign_in".
+    "proof_token":"..." }                               // intent "link" only, see "Adding needs proof"
 → 200 { "account_id":"acc_...", "outcome":"claimed" }
         // the identity was new. It now points at this device's own account.
         // Nothing moved. This is the common path and it is cheap.
@@ -479,6 +485,10 @@ POST /v1/account/link                                   // sign up, sign in, or 
                                                         // account is already claimed
 → 409 { "error":"identity has another account" }        // intent "link", and the identity already
                                                         // points at a different account
+→ 403 { "error":"proof required" }                      // intent "link", this device's account holds an
+                                                        // identity, and proof_token is missing, invalid,
+                                                        // expired or belongs to an identity not on it
+→ 409 { "error":"cap", "cap":"identities" }             // the account already holds 6 identities
 → 401
 ```
 
@@ -490,7 +500,56 @@ A client that never sends `intent` behaves exactly as it did in 1.12.0, with one
 
 **`link` against an account that holds no identity yet answers `claimed`, not `linked`.** Nothing is being added to, so it is the ordinary first claim. No screen should reach this, because the button that sends `link` only exists once somebody is signed in, but a client that sends it anyway gets the sensible answer rather than an error.
 
+**Adding needs proof.** Since 1.28.0, `intent: "link"` on an account that already holds at least one identity needs `proof_token`: a live session token of an identity that is already on this device's account. `identity_token` says which identity is being added and `proof_token` says the person adding it is already signed in to the account. Without it the device token alone could add an identity, and an added identity can do everything the first one can, account delete included, so anyone holding an unlocked handset could take the account. The check runs before every `link` outcome except `already_linked`, which changes nothing, and except the first claim of an account holding no identity, where there is nothing to prove against. `403` and not `401`, because the device and the new identity are both valid and it is the permission to add that is missing; an app built before 1.28.0 treats `401` as a dead session and signs the person out, which is the wrong answer to this. `intent: "sign_in"` never reads `proof_token`.
+
+An account holds at most 6 identities. A `link` that would add a seventh answers `409 {"error":"cap","cap":"identities"}`.
+
+**More than one identity of the same provider is allowed.** Two Google identities with different addresses are two identities, and both may sit on one account. A server never refuses an identity for its provider alone.
+
 An empty account means no topics and no incidents. That test matters more than it looks: registration runs long before any sign-in screen and creates an account unconditionally, so "a device with no account" cannot happen, and without the empty case every second-handset sign-in would prompt about an account holding nothing.
+
+```
+GET /v1/account/identities                              // the ways to sign in to this device's account
+  Authorization: Bearer dv_...
+  X-Identity-Token: ...                                 // optional. A live session of an identity
+                                                        // on this account
+→ 200 { "identities":[
+          { "id":"idn_...",                             // opaque, stable, names one row below
+            "provider":"google",                        // "apple" or "google"
+            "email_hint":"z•••@gmail.com",              // always present unless email_hidden
+            "email":"zed@gmail.com",                    // only with a valid X-Identity-Token
+            "email_hidden":false,                       // true for an Apple private relay address
+            "linked_at":1763000000,                     // unix seconds
+            "current":true } ] }                        // the identity X-Identity-Token resolves to.
+                                                        // Absent or false otherwise
+→ 401                                                   // bad dv_
+```
+
+One row per provider sign-in, not per person record: an identity that signs in with both Apple and Google under one verified address (see "Two providers with one address") is two rows with two ids. The list is empty for an account that holds no identity. Rows are ordered by `linked_at`, oldest first.
+
+**What a device token alone learns.** Without `X-Identity-Token`, or with one that is invalid, expired or of an identity not on this account, the reply carries no `email` on any row and never answers `401` for the header: a handset that has lost its session must still be able to say "this iPhone is on the account z•••@gmail.com". `email_hint` is made by the server: the first character of the local part, exactly three `•`, then `@` and the whole domain. The length of the local part is not recoverable from it. An address at `privaterelay.appleid.com` has `email_hidden: true` and carries neither `email` nor `email_hint`, with or without the header, because a relay address means nothing to the person it belongs to. A device token already reads the account's topics and history, so the hint tells its holder nothing more sensitive than what it can already see, and the route takes no parameter that could ask about any other account.
+
+```
+DELETE /v1/account/identities/{identity_id}             // remove one way to sign in
+  Authorization: Bearer dv_...
+  { "identity_token":"..." }                            // a session of any identity on this account,
+                                                        // created no more than 300 seconds ago
+→ 204
+→ 401                                                   // bad dv_, or identity_token is missing, invalid,
+                                                        // expired, or of an identity not on this account
+→ 403 { "error":"recent sign-in required" }             // the session is valid and older than 300 seconds
+→ 404                                                   // no such identity on this account
+→ 409 { "error":"last identity" }                       // it is the only one the account holds
+→ 409 { "error":"live incident", "incident_id":"inc_..." }   // an alarm is ringing. Acknowledge it, then retry
+```
+
+Any identity on the account may remove any other, or itself while another remains. That is what lets a person who has lost access to their Google account take it off with Apple. The session must be fresh, because a handset keeps its session for a long time and a reinstalled iPhone still holds it: the app runs the provider's sign-in again when the session it holds is older than 300 seconds.
+
+The last identity is never removed. An account that had an identity and has none again could be deleted on the device token alone, which is what the identity was there to prevent. A person who wants no identity deletes the account.
+
+Removal deletes that provider sign-in, every session of its identity, and the provider tokens held for it, after asking the provider to revoke them the way the account delete does. That call is best effort and never blocks. When the identity has no provider sign-in left, the identity itself goes. Topics, tokens, devices, incidents, billing and packs are not touched: billing belongs to the account, never to an identity. Only an `open` incident blocks.
+
+Removing the identity this handset signed in with does not sign the handset out of the account: the device token is what holds it there. The app drops the session it holds and shows the account as needing a sign-in.
 
 ```
 POST /v1/account/merge                                  // fold this device's account into the identity's
@@ -519,7 +578,7 @@ POST /v1/account/switch                                 // start fresh instead o
 
 The device joins the identity's account and its old account is tombstoned, carrying nothing with it.
 
-**This is the branch that can silently stop paging somebody.** Publishing authenticates on the topic token alone and never looks at the account, so an abandoned account's `tk_` tokens keep accepting publishes, keep opening incidents, and have no device left to ring. A `200` and nobody woken. So either the old account's tokens are revoked as part of the switch, or publishing to a topic whose account is tombstoned or deviceless answers `410 {"error":"account is gone"}`. One of the two is required. The prompt must also say the old tokens will stop working, because that is the part a person cannot guess.
+**This is the branch that can silently stop paging somebody.** Publishing authenticates on the topic token alone and never looks at the account, so an abandoned account's `tk_` tokens keep accepting publishes, keep opening incidents, and have no device left to ring. A `200` and nobody woken. So either the old account's tokens are revoked as part of the switch, or publishing to a topic whose account is tombstoned or deviceless answers `410 {"error":"account is gone"}`. One of the two is required. A switch revokes. Since 1.28.0 a `hosted` server also answers the `410` (§1.8) for any account left with no device, which covers the sign-out that removes the last handset, where nothing is revoked because signing in again must bring the alarms back. The prompt must also say the old tokens will stop working, because that is the part a person cannot guess.
 
 ```
 POST /v1/account/join-token                             // mint a fresh aj_ for this account
