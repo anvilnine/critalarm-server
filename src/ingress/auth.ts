@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
+import { liveAccount } from "../v1/accounts.js";
 import type { TopicRecord } from "./types.js";
 
 type TopicRow = {
@@ -55,4 +56,10 @@ export function authenticateTopic(db: Database.Database, request: Request, name:
     )
     .get(hash, name) as TopicRow | undefined;
   return row === undefined ? null : topicRecord(row);
+}
+
+// A topic's account_id can name a tombstone left by a merge. The devices sit on
+// the account that survived it, so the count follows merged_into first.
+export function accountHasDevice(db: Database.Database, accountId: string): boolean {
+  return db.prepare("SELECT 1 FROM devices WHERE account_id = ? LIMIT 1").get(liveAccount(db, accountId)) !== undefined;
 }

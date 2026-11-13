@@ -7,7 +7,7 @@ import { authenticateTopic } from "./auth.js";
 import { MAX_MESSAGE_BYTES, ParseError, parseJsonPublish, parsePublishRequest, rejectDelayHeaders } from "./headers.js";
 import { readBytes } from "../body-limit.js";
 import { CapError } from "../tier/devices.js";
-import { PublishService } from "./service.js";
+import { AccountGoneError, PublishService } from "./service.js";
 import { historyCutoff } from "../retention/window.js";
 import type { IngressDependencies } from "./types.js";
 
@@ -80,6 +80,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
       if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
+      if (error instanceof AccountGoneError) return c.json(numericError(41001, 410, "account is gone"), 410);
       throw error;
     }
   };
@@ -95,6 +96,7 @@ export function createIngressRouter(deps: IngressDependencies): Hono<IngressEnv>
     } catch (error: unknown) {
       if (error instanceof ParseError) return parseError(c, error);
       if (error instanceof CapError) return c.json({ error: "cap", cap: error.cap }, 429);
+      if (error instanceof AccountGoneError) return c.json(numericError(41001, 410, "account is gone"), 410);
       throw error;
     }
   });
