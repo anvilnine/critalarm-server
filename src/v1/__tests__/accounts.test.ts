@@ -265,7 +265,7 @@ describe("POST /v1/account/link: one account, more than one identity", () => {
     const topic = await makeTopic(app, "dv_a", "prod");
     expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
 
-    const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" });
+    const response = await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link", proof_token: "sess_1" });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ account_id: "a", outcome: "linked" });
 
@@ -363,7 +363,7 @@ describe("POST /v1/account/link: one account, more than one identity", () => {
     // The Android handset signs up, the iPhone's provider is added to the same
     // account from that same handset.
     expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_google" })).status).toBe(200);
-    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_apple", intent: "link" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_apple", intent: "link", proof_token: "sess_google" })).status).toBe(200);
     expect(identitiesOn(db, "a")).toEqual(["usr_apple", "usr_google"]);
 
     // Now the second handset, holding an empty account of its own, signs in
@@ -386,7 +386,7 @@ describe("POST /v1/account/link: one account, more than one identity", () => {
       seedIdentity(db, "usr_2", "sess_2");
       db.prepare('INSERT INTO "account" (id, "accountId", "providerId", "userId", "refreshToken", "createdAt", "updatedAt") VALUES (?, ?, \'google\', ?, ?, 0, 0)').run("oa_2", "google-subject", "usr_2", "rt_google");
       expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
-      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+      expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link", proof_token: "sess_1" })).status).toBe(200);
 
       // Either identity is enough: both belong to the same person, and asking
       // for both would strand anybody who lost access to one.
@@ -407,7 +407,7 @@ describe("POST /v1/account/link: one account, more than one identity", () => {
     seedIdentity(db, "usr_1", "sess_1");
     seedIdentity(db, "usr_2", "sess_2");
     expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_1" })).status).toBe(200);
-    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_a", { identity_token: "sess_2", intent: "link", proof_token: "sess_1" })).status).toBe(200);
 
     expect((await del(app, "dv_a", { identity_token: "sess_1" })).status).toBe(204);
     expect([...revoked].sort()).toEqual(["usr_1", "usr_2"]);
@@ -419,7 +419,7 @@ describe("POST /v1/account/link: one account, more than one identity", () => {
     seedIdentity(db, "usr_2", "sess_2");
     // Account b is the survivor and it holds both of the person's providers.
     expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_1" })).status).toBe(200);
-    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_2", intent: "link" })).status).toBe(200);
+    expect((await post(app, "/v1/account/link", "dv_b", { identity_token: "sess_2", intent: "link", proof_token: "sess_1" })).status).toBe(200);
     const theirs = await makeTopic(app, "dv_b", "theirs");
     // The other handset brings a topic, so the sign-in asks rather than
     // attaches. No incident on either side: a merge refuses while one is open
