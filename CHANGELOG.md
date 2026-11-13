@@ -9,7 +9,7 @@ binary's. The binary's version is in `package.json`.
 
 - `POST /v1/account/link` with `intent: "link"` on an account that already
   holds an identity needs `proof_token`, a live session of an identity
-  already on that account, and answers `403 {"error":"proof required"}`
+  already on that account, and answers `409 {"error":"proof required"}`
   without one (§3.7). The device token alone used to be enough to add an
   identity to a signed-in account.
 
