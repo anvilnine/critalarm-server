@@ -16,6 +16,10 @@ import { appleProvider } from "./better-auth.js";
 
 export const APPLE_REVOKE_URL = "https://appleid.apple.com/auth/revoke";
 export const GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+// How long a provider gets to answer. The delete waits for this call, so a
+// provider that never answers must not hold it. Running out of time is logged
+// like any other failed call and the delete carries on.
+const REVOKE_TIMEOUT_MS = 10_000;
 
 // `only` names one provider sign-in, a row id of better-auth's `account` table.
 // Removing one way to sign in (api.md §3.7) revokes that row and leaves the
@@ -38,6 +42,7 @@ function appleRequest(apple: AppleCredentials, token: string, hint: string): Req
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ client_id: apple.clientId, client_secret: apple.clientSecret, token, token_type_hint: hint }).toString(),
+    signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS),
   });
 }
 
@@ -46,6 +51,7 @@ function googleRequest(token: string): Request {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ token }).toString(),
+    signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS),
   });
 }
 
