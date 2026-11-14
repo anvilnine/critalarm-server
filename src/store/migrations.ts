@@ -517,6 +517,29 @@ const migrations: Migration[] = [
   // api.md §4.2 and §3.9, contract 1.25.0. A third platform, macos, in both
   // tables that name one.
   { foreignKeysOff: true, up: rebuildPlatformChecksWithMacos },
+  // Three lookups by topic_id that had no index and read the whole table.
+  //
+  // messages_by_topic serves the poll, GET /{topic}/json (api.md §2). It
+  // filters on topic_id, bounds created_at and sorts by (created_at, rowid),
+  // which is the order the index is already in.
+  //
+  // incidents_by_topic serves GET /v1/incidents (api.md §3.2), the retention
+  // prune and the per-account counts, which all reach incidents through the
+  // account's topics. The only index on incidents.topic_id until now was
+  // incidents_one_active_per_topic, which is partial and covers open and
+  // acked rows only.
+  //
+  // topic_tokens_by_topic serves the token list and the token count of one
+  // topic (api.md §3.1).
+  //
+  // All three also serve the foreign key check SQLite runs on each child table
+  // when a topic is deleted. No row changes. IF NOT EXISTS, so a database
+  // where an operator already made one of them by hand still migrates.
+  `
+    CREATE INDEX IF NOT EXISTS messages_by_topic ON messages(topic_id, created_at);
+    CREATE INDEX IF NOT EXISTS incidents_by_topic ON incidents(topic_id, opened_at);
+    CREATE INDEX IF NOT EXISTS topic_tokens_by_topic ON topic_tokens(topic_id, created_at);
+  `,
 ];
 
 // Which tables name `table` in a REFERENCES clause right now. Read from the

@@ -15,6 +15,8 @@ export interface RelayPayload {
 export interface RelayClientOptions { db: Database.Database; relayUrl: string; baseUrl: string; relayContent: "none" | "full"; registrationSecret?: string;
   // api.md §4.1, relay-plain-hash. False sends the secret push only. Unset is on.
   plainHash?: boolean; fetch?: (request: Request) => Promise<Response>;
+  // Milliseconds one forwarded push may take. Tests shorten it. Unset is 30 seconds.
+  pushTimeoutMs?: number;
   // Milliseconds. Tests inject a fake one for the challenge window and the backoff.
   now?: () => number;
   // One JSON-able object per line. Defaults to console.error(JSON.stringify(line)).

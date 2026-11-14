@@ -185,4 +185,40 @@ describe("FcmSender", () => {
       },
     });
   });
+  // A request that is never answered. It settles only when its signal fires,
+  // which is what the real fetch does with a connection that went quiet.
+  const neverAnswers = (request: Request) => new Promise<Response>((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason as Error), { once: true });
+  });
+
+  it("gives up on a send Google never answers, so the dispatcher can move on", async () => {
+    const sender = new FcmSender({
+      projectId: "crit-alarm-project",
+      clientEmail: "push@crit-alarm-project.iam.gserviceaccount.com",
+      privateKey,
+      tokenUrl: "https://oauth.example.test/token",
+      clock: { now: () => 1_000 },
+      timeoutMs: 20,
+      fetch: async (request) => {
+        if (request.url === "https://oauth.example.test/token") return Response.json({ access_token: "access_1", expires_in: 3_600 });
+        return neverAnswers(request);
+      },
+    });
+
+    await expect(sender.send(device, event())).rejects.toMatchObject({ name: "TimeoutError" });
+  });
+
+  it("gives up on a token exchange Google never answers", async () => {
+    const sender = new FcmSender({
+      projectId: "crit-alarm-project",
+      clientEmail: "push@crit-alarm-project.iam.gserviceaccount.com",
+      privateKey,
+      tokenUrl: "https://oauth.example.test/token",
+      clock: { now: () => 1_000 },
+      timeoutMs: 20,
+      fetch: neverAnswers,
+    });
+
+    await expect(sender.send(device, event())).rejects.toMatchObject({ name: "TimeoutError" });
+  });
 });

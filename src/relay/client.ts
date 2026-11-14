@@ -17,6 +17,12 @@ const BACKOFF_CAP_MS = 3_600_000;
 // reason waits at most 5 minutes.
 const BACKOFF_CAP_RATE_LIMITED_MS = 300_000;
 const REGISTER_TIMEOUT_MS = 15_000;
+// One forwarded push. The relay answers after it has sent to the account's
+// devices, so this is longer than the registration call. Without a limit a
+// relay that stopped answering held the forward, and every event queued behind
+// it, until the runtime gave up minutes later. Running out of time fails the
+// push the way a dead connection does: it is logged and not sent again.
+const PUSH_TIMEOUT_MS = 30_000;
 
 export class RelayClient {
   private challenge: { value: string; expiresAt: number } | undefined;
@@ -158,7 +164,7 @@ export class RelayClient {
   }
 
   private push(key: string, payload: RelayPayload): Promise<Response> {
-    return this.call(new Request(`${this.relayBase()}/relay/v1/push`, { method: "POST", redirect: "error", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(payload) }));
+    return this.call(new Request(`${this.relayBase()}/relay/v1/push`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(this.options.pushTimeoutMs ?? PUSH_TIMEOUT_MS), headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify(payload) }));
   }
 
   // A relay URL that redirects would carry the body, the secret or the key to

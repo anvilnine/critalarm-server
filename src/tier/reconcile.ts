@@ -46,6 +46,10 @@ const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 // Enough pages for any customer a person could really hold. The list is one
 // entitlement per product tier, so page two is already theoretical.
 export const MAX_PAGES = 10;
+// How long RevenueCat gets to answer one page. The same 30 seconds the queued
+// reads use (tier/billing-startup.ts). Running out of time is a failed read:
+// it is logged with reason "network" and nothing is written.
+const READ_TIMEOUT_MS = 30_000;
 
 export const activeEntitlementsSchema = z.object({
   items: z.array(z.object({
@@ -74,7 +78,7 @@ async function readActiveEntitlements(deps: LiveDependencies, appUserId: string)
   for (let page = 0; page < MAX_PAGES; page += 1) {
     let response: Response;
     try {
-      response = await deps.fetch(`${API_ORIGIN}${path}`, { headers: { Authorization: `Bearer ${deps.revenueCatApi.secretApiKey}`, Accept: "application/json" } });
+      response = await deps.fetch(`${API_ORIGIN}${path}`, { headers: { Authorization: `Bearer ${deps.revenueCatApi.secretApiKey}`, Accept: "application/json" }, signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
     } catch (error: unknown) {
       report({ event: "reconcile_read_failed", app_user_id: appUserId, reason: "network", detail: String(error) });
       return null;

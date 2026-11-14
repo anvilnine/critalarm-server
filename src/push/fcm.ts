@@ -4,11 +4,21 @@ import type { PrivateKey, PushDevice, PushResult, PushSender, SenderDependencies
 
 const firebaseScope = "https://www.googleapis.com/auth/firebase.messaging";
 
+// How long Google gets to answer the token exchange or one send. The same 10
+// seconds the weekly check gives it (push/check.ts). Without a limit a
+// connection that stops answering held the send, and every push queued behind
+// it in the same batch, until the runtime gave up minutes later. A send that
+// runs out of time throws, and the dispatcher logs it, counts it as failed and
+// moves on to the next device, the same as any other transport error.
+export const FCM_TIMEOUT_MS = 10_000;
+
 export interface FcmSenderOptions extends SenderDependencies {
   projectId: string;
   clientEmail: string;
   privateKey: PrivateKey;
   tokenUrl: string;
+  // Tests shorten it. Production leaves it unset and gets FCM_TIMEOUT_MS.
+  timeoutMs?: number;
 }
 
 type CachedToken = { value: string; expiresAt: number };
@@ -34,6 +44,7 @@ export class FcmSender implements PushSender {
           "content-type": "application/json",
         },
         body: JSON.stringify(fcmPayload(device, event)),
+        signal: AbortSignal.timeout(this.options.timeoutMs ?? FCM_TIMEOUT_MS),
       }),
     );
     return { status: response.status, stale: false };
@@ -65,6 +76,7 @@ export class FcmSender implements PushSender {
           grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
           assertion,
         }),
+        signal: AbortSignal.timeout(this.options.timeoutMs ?? FCM_TIMEOUT_MS),
       }),
     );
     const body = await responseJson(response);
