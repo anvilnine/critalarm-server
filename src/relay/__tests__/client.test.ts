@@ -62,6 +62,28 @@ describe("relay client", () => {
   });
 });
 
+describe("relay push time limit", () => {
+  it("fails a push the relay never answers and still sends the next event", async () => {
+    const db = openDatabase(":memory:"); migrate(db);
+    const pushed: string[] = [];
+    const fetcher = async (request: Request) => {
+      if (request.url.endsWith("/servers")) return new Response(JSON.stringify({ relay_key: "rk_test" }), { status: 201 });
+      const body = await request.clone().json() as { message_id: string };
+      pushed.push(body.message_id);
+      // The first push is never answered. It settles only when its signal fires.
+      if (body.message_id === "slow") return new Promise<Response>((_resolve, reject) => { request.signal.addEventListener("abort", () => reject(request.signal.reason as Error), { once: true }); });
+      return new Response(null, { status: 202 });
+    };
+    const client = new RelayClient({ db, relayUrl: "https://relay.test", baseUrl: "https://a.test", relayContent: "none", fetch: fetcher, pushTimeoutMs: 20 });
+    const event = { kind: "open" as const, topicHash: "a".repeat(64), topic: "prod", incidentId: "inc", messageId: "slow", priority: 5 as const, maxRingS: 10, ringUntil: null, server: "https://a.test", title: "T", body: "B", critical: true, relayContent: "none" as const };
+    await expect(client.forwardOne(event)).rejects.toMatchObject({ name: "TimeoutError" });
+    const response = await client.forwardOne({ ...event, messageId: "next" });
+    expect(response?.status).toBe(202);
+    expect(pushed).toEqual(["slow", "next"]);
+    db.close();
+  });
+});
+
 function harness(relayContent: "none" | "full" = "none") {
   const db = openDatabase(":memory:"); migrate(db);
   const bodies: unknown[] = [];
