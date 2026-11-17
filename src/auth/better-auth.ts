@@ -19,6 +19,20 @@ import { appleClientSecretMinter } from "./apple-client-secret.js";
 
 export type AuthHandler = (request: Request) => Promise<Response>;
 
+// The header that carries the client address to better-auth's rate limiter.
+// index.ts sets it on every /api/auth/* request from clientIp(), the same
+// address every other limit here counts (BEHIND_PROXY), and overwrites any
+// value the caller sent.
+//
+// Left to itself, better-auth reads X-Forwarded-For and trusts it only when it
+// holds exactly one address. With no proxy there is no such header, and behind
+// a proxy that appends (Cloudflare, Traefik) a caller who sends their own
+// makes two. Either way better-auth found no address and counted every request
+// in one shared bucket per path: four sign-ins in ten seconds from anyone
+// turned sign-in away for everybody. A caller with no proxy in front could
+// also send one made-up address per request and never be counted.
+export const AUTH_CLIENT_IP_HEADER = "x-critalarm-client-ip";
+
 export function authIsConfigured(auth: AuthConfig | undefined): boolean {
   return auth !== undefined && (auth.apple !== undefined || auth.google !== undefined);
 }
@@ -42,13 +56,17 @@ export function appleProvider(apple: AppleAuthConfig, clock: Clock): { clientId:
   };
 }
 
-export function createAuthHandler(config: Config, db: Database.Database, clock: Clock = systemClock): AuthHandler | undefined {
+// `rateLimit` exists for tests. better-auth turns its limiter on when
+// NODE_ENV is production and off otherwise, and the server leaves that alone.
+export function createAuthHandler(config: Config, db: Database.Database, clock: Clock = systemClock, options: { rateLimit?: boolean } = {}): AuthHandler | undefined {
   const auth = config.auth;
   if (!authIsConfigured(auth) || auth === undefined) return undefined;
   const instance = betterAuth({
     database: db,
     baseURL: config.baseUrl,
     secret: auth.secret,
+    advanced: { ipAddress: { ipAddressHeaders: [AUTH_CLIENT_IP_HEADER] } },
+    ...(options.rateLimit === undefined ? {} : { rateLimit: { enabled: options.rateLimit } }),
     // better-auth's own Apple example requires this. Apple POSTs the
     // authorization response from appleid.apple.com rather than from this
     // server's origin, and without the origin on the list the callback is

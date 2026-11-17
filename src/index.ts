@@ -13,14 +13,15 @@ import { relayHost } from "./relay/host.js";
 import { createStatsRouter } from "./stats/router.js";
 import { Counters, LOCAL_KEY } from "./stats/counters.js";
 import type { DispatchResult } from "./domain-events.js";
-import type { AuthHandler } from "./auth/better-auth.js";
 import type { IdentityResolver } from "./auth/identity.js";
 import type { TokenRevoker } from "./auth/revoke.js";
 import type { StoreReads } from "./tier/types.js";
 import { createCheckRouter } from "./check/router.js";
 import { CheckStore } from "./check/store.js";
 import { boundedRequest, SMALL_JSON_BYTES } from "./body-limit.js";
-import { makeRateLimiter } from "./rate-limit.js";
+import { clientIp, makeRateLimiter } from "./rate-limit.js";
+import { AUTH_CLIENT_IP_HEADER, type AuthHandler } from "./auth/better-auth.js";
+import { isIP } from "node:net";
 export type Bindings = { ALLOWED_ORIGINS: string; PORT?: string; incoming?: { socket?: { remoteAddress?: string } } };
 export type Variables = Record<string, never>;
 
@@ -82,7 +83,7 @@ export function createApp(deps: AppDependencies): Hono {
     app.on(["POST", "GET"], "/api/auth/*", async c => {
       const request = await boundedRequest(c.req.raw, SMALL_JSON_BYTES);
       if (request === "too large") return c.json({ error: "invalid request" }, 400);
-      return handler(request);
+      return handler(withClientIp(request, clientIp(c, deps.config.behindProxy)));
     });
   }
   if ((deps.config.mode ?? "relay") !== "selfhosted") app.route("/", createTierRouter({ db: deps.db, clock: deps.clock, ids: { account: () => `acc_${crypto.randomUUID()}`, deviceToken: () => `dv_${crypto.randomUUID()}`, accountJoinToken: () => `aj_${crypto.randomUUID()}` }, ...(deps.config.revenueCat === undefined ? {} : { revenueCat: deps.config.revenueCat }), ...(deps.storeReads === undefined ? {} : { storeReads: deps.storeReads }), ...(deps.config.packIncludes === undefined ? {} : { packIncludes: deps.config.packIncludes }), behindProxy: deps.config.behindProxy }));
@@ -106,6 +107,17 @@ export function createApp(deps: AppDependencies): Hono {
     if (deps.config.statsKey !== undefined) app.route("/", createStatsRouter(deps.db, deps.clock, deps.config.statsKey));
   }
   app.route("/", createIngressRouter({ ...deps, incidents, dispatch: localDispatch, publishLimiter, behindProxy: deps.config.behindProxy, mode: deps.config.mode })); app.notFound(c => c.json({ error: "Not found" }, 404)); return app;
+}
+
+// The request better-auth sees, carrying the client address in
+// AUTH_CLIENT_IP_HEADER (auth/better-auth.ts). Whatever the caller put in that
+// header is dropped first, so only this server ever chooses its value. An
+// address that is not an IP (no socket, as in app.request()) sets nothing.
+export function withClientIp(request: Request, address: string): Request {
+  const headers = new Headers(request.headers);
+  headers.delete(AUTH_CLIENT_IP_HEADER);
+  if (isIP(address) !== 0) headers.set(AUTH_CLIENT_IP_HEADER, address);
+  return new Request(request, { headers });
 }
 
 // api.md §4.1. The names this relay answers to, from configuration only: the
